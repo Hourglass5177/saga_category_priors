@@ -104,7 +104,7 @@ if __name__ == '__main__':
         masks = torch.load(os.path.join(os.path.join(dataset.source_path, 'sam_masks'), image_path.replace('jpg', 'pt').replace('JPG', 'pt').replace('png', 'pt')))
         # N_mask, C
 
-        images_masks[image_path.split('.')[0]] = masks.cpu().float()
+        images_masks[os.path.splitext(os.path.basename(image_path))[0]] = masks.cpu().float()
 
 
     OUTPUT_DIR = os.path.join(args.image_root, 'mask_scales')

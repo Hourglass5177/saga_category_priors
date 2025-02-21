@@ -22,9 +22,10 @@ import dearpygui.dearpygui as dpg
 import math
 from scene.cameras import Camera
 from utils.graphics_utils import getWorld2View2, focal2fov, fov2focal
-from scene.dataset_readers import readColmapCameras, read_extrinsics_binary, read_intrinsics_binary
+from scene.dataset_readers import readColmapCameras, read_extrinsics_binary, read_intrinsics_binary, read_extrinsics_text, read_intrinsics_text
 from utils.camera_utils import cameraList_from_camInfos
 from utils.visualization_utils import save_image
+from utils.clip_utils import get_relevancy
 
 from scipy.spatial.transform import Rotation as R
 from scipy.spatial import KDTree
@@ -75,6 +76,11 @@ class CONFIG:
 
     FEATURE_PCD_PATH = os.path.join(MODEL_PATH, f'point_cloud/iteration_{str(FEATURE_GAUSSIAN_ITERATION)}/contrastive_feature_point_cloud.ply')
     SCENE_PCD_PATH = os.path.join(MODEL_PATH, f'point_cloud/iteration_{str(SCENE_GAUSSIAN_ITERATION)}/scene_point_cloud.ply')
+
+    point_labels_path = 'temp/tys/point_labels.pth'
+    langauge_features_path = 'temp/tys/langauge_features.pth'
+    pos_texts = ['table', 'chair', 'plant', 'object']
+    neg_texts = ["object", "things", "stuff", "texture"]
 
 
 class OrbitCamera:
@@ -214,8 +220,8 @@ class GaussianSplattingGUI:
             'feature': feature_gaussian_model,
             'scale_gate': scale_gate
         }
-        self.cameras = readColmapCameras(read_extrinsics_binary(os.path.join(self.opt.DATA_PATH, 'sparse/0/images.bin')), 
-                                         read_intrinsics_binary(os.path.join(self.opt.DATA_PATH, 'sparse/0/cameras.bin')), 
+        self.cameras = readColmapCameras(read_extrinsics_text(os.path.join(self.opt.DATA_PATH, 'sparse/0/images.txt')), 
+                                         read_intrinsics_text(os.path.join(self.opt.DATA_PATH, 'sparse/0/cameras.txt')), 
                                          os.path.join(self.opt.DATA_PATH, 'images'))
         self.camera_list = cameraList_from_camInfos(self.cameras, 1, self.opt)
 
@@ -234,6 +240,16 @@ class GaussianSplattingGUI:
         
         self.clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch16").to('cuda')
         self.clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch16")
+        self.nembed = self.clip_processor(text=self.opt.neg_texts, return_tensors='pt', padding=True)
+        self.nembed = self.nembed.to(self.clip_model.device)
+        self.nembed = self.clip_model.get_text_features(**self.nembed)
+        self.nembed = F.normalize(self.nembed, dim=-1)
+        self.nembed = self.nembed.detach().cpu()
+        self.pembed = self.clip_processor(text=self.opt.pos_texts, return_tensors='pt', padding=True)
+        self.pembed = self.pembed.to(self.clip_model.device)
+        self.pembed = self.clip_model.get_text_features(**self.pembed)
+        self.pembed = F.normalize(self.pembed, dim=-1)
+        self.pembed = self.pembed.detach().cpu()
 
         self.cluster_point_colors = None
         self.label_to_color = np.random.rand(1000, 3)
@@ -250,6 +266,11 @@ class GaussianSplattingGUI:
         self.load_model = True
 
         print("loading model file done.")
+
+        if opt.point_labels_path:
+            self.point_labels = torch.load(opt.point_labels_path)
+        if opt.langauge_features_path:
+            self.langauge_features = torch.load(opt.langauge_features_path)
 
         self.mode = "image"  # choose from ['image', 'depth']
 
@@ -277,11 +298,13 @@ class GaussianSplattingGUI:
         self.reload_flag = False        # reload the whole scene / point cloud
         self.object_seg_id = 0          # to store the segmented object with increasing index order (path at: ./)
         self.cluster_in_3D_flag = False
+        self.label = 0
 
         self.render_mode_rgb = False
         self.render_mode_similarity = False
         self.render_mode_pca = False
         self.render_mode_cluster = False
+        self.render_mode_label = False
 
         self.save_flag = False
     def __del__(self):
@@ -357,6 +380,13 @@ class GaussianSplattingGUI:
             self.reload_flag = True
         def callback_cluster():
             self.cluster_in_3D_flag =True
+        def callback_label(sender, app_data, user_data):
+            self.label = (self.label+user_data)%len(torch.unique(self.point_labels))
+            langauge_feature = self.langauge_features[self.label, ...]
+            sims = get_relevancy(langauge_feature, self.pembed, self.nembed)
+            sims, _ = torch.max(sims, dim=1)
+            _, index = torch.max(sims, dim=0)
+            dpg.set_value('label', f'{self.label}:{self.opt.pos_texts[index.item()]}')
         def callback_reshuffle_color():
             self.label_to_color = np.random.rand(1000, 3)
             try:
@@ -373,6 +403,8 @@ class GaussianSplattingGUI:
             self.render_mode_pca = not self.render_mode_pca
         def render_mode_cluster_callback(sender):
             self.render_mode_cluster = not self.render_mode_cluster
+        def render_mode_label_callback(sender):
+            self.render_mode_label = not self.render_mode_label
         # control window
         with dpg.window(label="Control", tag="_control_window", width=300, height=550, pos=[self.window_width+10, 0]):
 
@@ -388,6 +420,7 @@ class GaussianSplattingGUI:
             dpg.add_checkbox(label="PCA", callback=render_mode_pca_callback, user_data="Some Data")
             dpg.add_checkbox(label="SIMILARITY", callback=render_mode_similarity_callback, user_data="Some Data")
             dpg.add_checkbox(label="3D CLUSTER", callback=render_mode_cluster_callback, user_data="Some Data")
+            dpg.add_checkbox(label="Label", callback=render_mode_label_callback, user_data="Some Data")
             
 
             dpg.add_text("\nSegment option: ", tag="seg")
@@ -404,6 +437,9 @@ class GaussianSplattingGUI:
             dpg.add_text("\n")
 
             dpg.add_button(label="cluster3d", callback=callback_cluster, user_data="Some Data")
+            dpg.add_input_text(label='label', tag='label')
+            dpg.add_button(label="prev", callback=callback_label, user_data=-1)
+            dpg.add_button(label="next", callback=callback_label, user_data=1)
             dpg.add_button(label="reshuffle_cluster_color", callback=callback_reshuffle_color, user_data="Some Data")
             dpg.add_button(label="reload_data", callback=callback_reload, user_data="Some Data")
 
@@ -434,7 +470,7 @@ class GaussianSplattingGUI:
             if not dpg.is_item_focused("_primary_window"):
                 return
             delta = app_data
-            self.camera.scale(delta*10)
+            self.camera.scale(delta*5)
             self.update_camera = True
             if self.debug:
                 dpg.set_value("_log_pose", str(self.camera.pose))
@@ -453,14 +489,14 @@ class GaussianSplattingGUI:
                 dx = self.mouse_pos[0] - pos[0]
                 dy = self.mouse_pos[1] - pos[1]
                 if dx != 0.0 or dy != 0.0:
-                    self.camera.orbit(-dx*30, dy*30)
+                    self.camera.orbit(-dx*10, dy*10)
                     self.update_camera = True
 
             if self.moving_middle and dpg.is_item_focused("_primary_window"):
                 dx = self.mouse_pos[0] - pos[0]
                 dy = self.mouse_pos[1] - pos[1]
                 if dx != 0.0 or dy != 0.0:
-                    self.camera.pan(-dx*200, dy*200)
+                    self.camera.pan(-dx*5, dy*5)
                     self.update_camera = True
             
             self.mouse_pos = pos
@@ -606,120 +642,91 @@ class GaussianSplattingGUI:
         self.cluster_point_colors = self.label_to_color[self.point_labels.detach().cpu().numpy()]
 
         # extract langauge features
-        # def mask_to_bbox(mask: torch.Tensor) -> torch.Tensor:
-        #     """
-        #     根据二值掩码生成边界框 (XYXY格式)。
+        def mask_to_bbox(mask: torch.Tensor) -> torch.Tensor:
+            """
+            根据二值掩码生成边界框 (XYXY格式)。
             
-        #     :param mask: 输入二值掩码 (torch.Tensor)，形状为 (H, W)，值为0或1。
-        #     :return: 边界框 (torch.Tensor)，格式为 [x_min, y_min, x_max, y_max]。
-        #     """
-        #     if mask.dim() != 2:
-        #         raise ValueError("输入掩码必须是二维的 (H, W)")
+            :param mask: 输入二值掩码 (torch.Tensor)，形状为 (H, W)，值为0或1。
+            :return: 边界框 (torch.Tensor)，格式为 [x_min, y_min, x_max, y_max]。
+            """
+            if mask.dim() != 2:
+                raise ValueError("输入掩码必须是二维的 (H, W)")
 
-        #     # 找到掩码中值为1的位置
-        #     y_indices, x_indices = torch.where(mask > 0)
+            # 找到掩码中值为1的位置
+            y_indices, x_indices = torch.where(mask > 0)
 
-        #     if len(y_indices) == 0 or len(x_indices) == 0:
-        #         # 如果没有前景像素，返回一个空的bbox
-        #         return torch.tensor([0, 0, 0, 0], dtype=torch.float32)
+            if len(y_indices) == 0 or len(x_indices) == 0:
+                # 如果没有前景像素，返回一个空的bbox
+                return torch.tensor([0, 0, 0, 0], dtype=torch.float32)
 
-        #     # 计算边界框
-        #     x_min = x_indices.min().item()
-        #     x_max = x_indices.max().item()
-        #     y_min = y_indices.min().item()
-        #     y_max = y_indices.max().item()
+            # 计算边界框
+            x_min = x_indices.min().item()
+            x_max = x_indices.max().item()
+            y_min = y_indices.min().item()
+            y_max = y_indices.max().item()
 
-        #     return torch.tensor([x_min, y_min, x_max, y_max], dtype=torch.float32)
+            return torch.tensor([x_min, y_min, x_max, y_max], dtype=torch.float32)
         
-        # def get_entity_image(image: np.ndarray, mask: np.ndarray)->np.ndarray:
-        #     def get_bbox(mask: np.ndarray):
-        #         # 查找掩码中的 True 元素的索引
-        #         rows = np.any(mask, axis=1)
-        #         cols = np.any(mask, axis=0)
+        def get_entity_image(image: np.ndarray, mask: np.ndarray)->np.ndarray:
+            def get_bbox(mask: np.ndarray):
+                # 查找掩码中的 True 元素的索引
+                rows = np.any(mask, axis=1)
+                cols = np.any(mask, axis=0)
                 
-        #         # 如果没有 True 元素，则返回全零的边界框
-        #         if not np.any(rows) or not np.any(cols):
-        #             return (0, 0, 0, 0)
+                # 如果没有 True 元素，则返回全零的边界框
+                if not np.any(rows) or not np.any(cols):
+                    return (0, 0, 0, 0)
                 
-        #         # 获取边界框的上下左右边界
-        #         x_min, x_max = np.where(rows)[0][[0, -1]] # h
-        #         y_min, y_max = np.where(cols)[0][[0, -1]] # w
+                # 获取边界框的上下左右边界
+                x_min, x_max = np.where(rows)[0][[0, -1]] # h
+                y_min, y_max = np.where(cols)[0][[0, -1]] # w
                 
-        #         # 返回边界框
-        #         return (x_min, y_min, x_max + 1 - x_min, y_max + 1 - y_min) # x, y, h, w
-        #     if mask.sum()==0:
-        #         return np.zeros((224,224,3), dtype=np.uint8)
-        #     image = image.copy()
-        #     # crop by bbox
-        #     x,y,h,w = get_bbox(mask)
-        #     image[~mask] = np.zeros(3, dtype=np.uint8) #分割区域外为白色
-        #     image = image[x:x+h, y:y+w, ...] #将img按分割区域bbox裁剪
-        #     # pad to square
-        #     l = max(h,w)
-        #     paded_img = np.zeros((l, l, 3), dtype=np.uint8)
-        #     if h > w:
-        #         paded_img[:,(h-w)//2:(h-w)//2 + w, :] = image
-        #     else:
-        #         paded_img[(w-h)//2:(w-h)//2 + h, :, :] = image
-        #     paded_img = cv2.resize(paded_img, (224,224))
-        #     return paded_img
+                # 返回边界框
+                return (x_min, y_min, x_max + 1 - x_min, y_max + 1 - y_min) # x, y, h, w
+            if mask.sum()==0:
+                return np.zeros((224,224,3), dtype=np.uint8)
+            image = image.copy()
+            # crop by bbox
+            x,y,h,w = get_bbox(mask)
+            image[~mask] = np.zeros(3, dtype=np.uint8) #分割区域外为白色
+            image = image[x:x+h, y:y+w, ...] #将img按分割区域bbox裁剪
+            # pad to square
+            l = max(h,w)
+            paded_img = np.zeros((l, l, 3), dtype=np.uint8)
+            if h > w:
+                paded_img[:,(h-w)//2:(h-w)//2 + w, :] = image
+            else:
+                paded_img[(w-h)//2:(w-h)//2 + h, :, :] = image
+            paded_img = cv2.resize(paded_img, (224,224))
+            return paded_img
         
-        # self.langauge_features = []
-        # for label in range(0, len(np.unique(cluster_labels))):
-        #     features = []
-        #     for i, camera in enumerate(self.camera_list):
-        #         render_pkg = render(camera, self.engine['scene'], self.opt, self.bg_color, filtered_mask=~(self.point_labels==label))
-        #         if torch.logical_and(render_pkg['visibility_filter'], (self.point_labels==label)).sum()/(self.point_labels==label).sum() > 0.9: # valid camera
-        #             render_image = render_pkg['render']
-        #             original_image = camera.original_image.to('cuda')
-        #             prompt_mask = (render_image!=0).any(dim=0)
-        #             prompt_bbox = torch.Tensor(mask_to_bbox(prompt_mask)).to('cuda')
-        #             transformed_bbox = self.mask_predictor.transform.apply_boxes_torch(prompt_bbox, original_image.shape[-2:])
-        #             batched_image = original_image.unsqueeze(0)
-        #             transformed_image = self.mask_predictor.transform.apply_image_torch(batched_image)
-        #             self.mask_predictor.set_torch_image(transformed_image, original_image.shape[-2:])
-        #             masks, scores, _ = self.mask_predictor.predict_torch(point_coords=None, point_labels=None, boxes=transformed_bbox, multimask_output=False)
+        self.langauge_features = []
+        for label in range(0, len(np.unique(cluster_labels))):
+            features = []
+            for i, camera in enumerate(self.camera_list):
+                render_pkg = render(camera, self.engine['scene'], self.opt, self.bg_color, filtered_mask=~(self.point_labels==label))
+                if torch.logical_and(render_pkg['visibility_filter'], (self.point_labels==label)).sum()/(self.point_labels==label).sum() > 0.9: # valid camera
+                    render_image = render_pkg['render']
+                    original_image = camera.original_image.to('cuda')
+                    prompt_mask = (render_image!=0).any(dim=0)
+                    prompt_bbox = torch.Tensor(mask_to_bbox(prompt_mask)).to('cuda')
+                    transformed_bbox = self.mask_predictor.transform.apply_boxes_torch(prompt_bbox, original_image.shape[-2:])
+                    batched_image = original_image.unsqueeze(0)
+                    transformed_image = self.mask_predictor.transform.apply_image_torch(batched_image)
+                    self.mask_predictor.set_torch_image(transformed_image, original_image.shape[-2:])
+                    masks, scores, _ = self.mask_predictor.predict_torch(point_coords=None, point_labels=None, boxes=transformed_bbox, multimask_output=False)
 
-        #             inputs = self.clip_processor(images=get_entity_image((original_image*255).permute(1,2,0).to('cpu', torch.uint8).numpy()*masks[0,0,...][None,...].permute(1,2,0).cpu().numpy(), masks[0,0].cpu().numpy()), return_tensors='pt')
-        #             inputs = inputs.to(self.clip_model.device)
-        #             semantic0 = self.clip_model.get_image_features(**inputs)
-        #             semantic0 = F.normalize(semantic0,dim=-1).detach().cpu()
-        #         else:
-        #             semantic0 = torch.zeros((1,512), dtype=torch.float32, device='cpu')
-        #         features.append(semantic0)
-        #     self.langauge_features.append(torch.concat(features, dim=0))
-        # self.langauge_features = torch.stack(self.langauge_features, dim=0)
-        # torch.save(self.langauge_features, 'langauge_features.pth')
+                    inputs = self.clip_processor(images=get_entity_image((original_image*255).permute(1,2,0).to('cpu', torch.uint8).numpy()*masks[0,0,...][None,...].permute(1,2,0).cpu().numpy(), masks[0,0].cpu().numpy()), return_tensors='pt')
+                    inputs = inputs.to(self.clip_model.device)
+                    semantic0 = self.clip_model.get_image_features(**inputs)
+                    semantic0 = F.normalize(semantic0,dim=-1).detach().cpu()
+                else:
+                    semantic0 = torch.zeros((1,512), dtype=torch.float32, device='cpu')
+                features.append(semantic0)
+            self.langauge_features.append(torch.concat(features, dim=0))
+        self.langauge_features = torch.stack(self.langauge_features, dim=0)
+        torch.save(self.langauge_features, 'langauge_features.pth')
         self.langauge_features = torch.load('langauge_features.pth')
-        def get_relevancy(raw_semantic_map: torch.Tensor, pembed: torch.Tensor, nembed: torch.Tensor):
-            s = raw_semantic_map.shape[:-1]
-            c = raw_semantic_map.shape[-1]
-            raw_semantics = raw_semantic_map.flatten(0, -2)
-            psim=pembed@raw_semantics.T # (p, i)
-            nsim=nembed@raw_semantics.T # (n, i)
-            nsim=nsim.unsqueeze(0).repeat_interleave(pembed.shape[0],dim=0) # (p, n ,i)
-            psim=psim.unsqueeze(1).repeat_interleave(nembed.shape[0],dim=1) # (p, n, i)
-            sim=torch.stack((psim,nsim), dim=-1) # (p, n, i, 2)
-            sim=torch.softmax(10*sim, dim=-1) # (p, n, i, 2)
-            sim, indice = sim[...,0].min(dim=1) # (p, i)
-            return sim.unflatten(1, s)
-        ptexts = ['bin', 'sofa', 'pillow', 'chair', 'table']
-        ntexts = ["object", "things", "stuff", "texture"]
-        nembed = self.clip_processor(text=ntexts, return_tensors='pt', padding=True)
-        nembed = nembed.to(self.clip_model.device)
-        nembed = self.clip_model.get_text_features(**nembed)
-        nembed = F.normalize(nembed, dim=-1)
-        nembed = nembed.detach().cpu()
-        pembed = self.clip_processor(text=ptexts, return_tensors='pt', padding=True)
-        pembed = pembed.to(self.clip_model.device)
-        pembed = self.clip_model.get_text_features(**pembed)
-        pembed = F.normalize(pembed, dim=-1)
-        pembed = pembed.detach().cpu()
-        sims = get_relevancy(self.langauge_features, pembed, nembed) # float[p, e, c]
-        for ptext, sim in zip(ptexts, sims):
-            entity_index,camera_index = torch.unravel_index(sim.argmax(), sim.shape)
-            render_pkg = render(self.camera_list[camera_index], self.engine['scene'], self.opt, self.bg_color, filtered_mask=~(self.point_labels==entity_index))
-            save_image(render_pkg['render'], f'temp/replic/{ptext}.jpg', dataformat='CHW')
         # self.cluster_point_colors[self.seg_score.max(dim = -1)[0].detach().cpu().numpy() < 0.5] = (0,0,0)
 
 
@@ -898,7 +905,9 @@ class GaussianSplattingGUI:
                     return torch.from_numpy(res).cuda()
                 # self.rendered_cluster = filter2d(self.rendered_cluster)
                 self.render_buffer = self.rendered_cluster.cpu().numpy().reshape(-1) if self.render_buffer is None else self.render_buffer + self.rendered_cluster.cpu().numpy().reshape(-1)
-            
+            render_num += 1
+        if self.render_mode_label:
+            self.render_buffer = render(view_camera, self.engine['scene'], self.opt, self.bg_color, filtered_mask=~(self.point_labels==self.label))['render'].permute(1,2,0).cpu().numpy().reshape(-1)
             render_num += 1
         if self.render_mode_similarity:
             if score_map is not None:
@@ -915,8 +924,8 @@ class GaussianSplattingGUI:
 if __name__ == "__main__":
     parser = ArgumentParser(description="GUI option")
 
-    parser.add_argument('-m', '--model_path', type=str, default="./output/replic/office3")
-    parser.add_argument('-s', '--data_path', type=str, default="./data/replic/office3")
+    parser.add_argument('-m', '--model_path', type=str, default="./output/temp/tys")
+    parser.add_argument('-s', '--data_path', type=str, default="./data/temp/tys")
     parser.add_argument('--feature_iteration', type=int, default=10000)
     parser.add_argument('--scene_iteration', type=int, default=30000)
 
@@ -932,6 +941,8 @@ if __name__ == "__main__":
     opt.SCALE_GATE_PATH = os.path.join(opt.MODEL_PATH, f'point_cloud/iteration_{str(opt.FEATURE_GAUSSIAN_ITERATION)}/scale_gate.pt')
     opt.FEATURE_PCD_PATH = os.path.join(opt.MODEL_PATH, f'point_cloud/iteration_{str(opt.FEATURE_GAUSSIAN_ITERATION)}/contrastive_feature_point_cloud.ply')
     opt.SCENE_PCD_PATH = os.path.join(opt.MODEL_PATH, f'point_cloud/iteration_{str(opt.SCENE_GAUSSIAN_ITERATION)}/scene_point_cloud.ply')
+    opt.point_labels_path = 'temp/tys/point_labels.pth'
+    opt.langauge_features_path = 'temp/tys/langauge_features.pth'
 
     gs_model = GaussianModel(opt.sh_degree)
     feat_gs_model = FeatureGaussianModel(opt.FEATURE_DIM)

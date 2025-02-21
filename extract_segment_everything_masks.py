@@ -54,7 +54,7 @@ if __name__ == '__main__':
     print("Extracting SAM segment everything masks...")
     
     for path in tqdm(sorted(os.listdir(IMAGE_DIR))):
-        name = path.split('.')[0]
+        name = os.path.splitext(os.path.basename(path))[0]
         img = cv2.imread(os.path.join(IMAGE_DIR, path))
         if downsample_manually:
             img = cv2.resize(img,dsize=(img.shape[1] // args.downsample, img.shape[0] // args.downsample),fx=1,fy=1,interpolation=cv2.INTER_LINEAR)
