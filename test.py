@@ -7,9 +7,22 @@ import shutil
 import torch.nn.functional as F
 from PIL import Image
 
+def pth_to_json():
+    import json
+    label_to_class = {0:'plant', 1:'chair', 2:'table', 3:'object'}
+    point_ins_labels_path = 'temp/tys/point_ins_labels.pth'
+    point_labels_path = 'temp/tys/point_labels.pth'
+    point_ins_labels = torch.load(point_ins_labels_path, weights_only=True)
+    point_labels = torch.load(point_labels_path, weights_only=True)
+    output = dict()
+    output['point_instance_labels'] = point_ins_labels.tolist()
+    output['instances'] = [{'class': label_to_class[l]} for l in point_labels.tolist()]
+    with open('temp/tys/output.json','w') as f:
+        json.dump(output,f)
+
 def sam_masks_rgb():
-    spath = 'data/temp/shenyang/sam_masks'
-    dpath = 'data/temp/shenyang/sam_masks_rgb'
+    spath = 'data/temp/tys/sam_masks'
+    dpath = 'data/temp/tys/sam_masks_rgb'
     os.makedirs(dpath, exist_ok=True)
     for masks_name in os.listdir(spath):
         print(os.path.join(spath, masks_name))
@@ -201,9 +214,10 @@ def test_dinov2():
     print(outputs['last_hidden_state'].shape)
 
 def main():
+    pth_to_json()
     # sam_masks_rgb()
     # pick_image()
-    test_clip()
+    # test_clip()
     # test_dinov2()
 
 if __name__ =='__main__':

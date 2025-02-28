@@ -103,7 +103,7 @@ for i in range(0, len(np.unique(cluster_labels))):
     cluster_centers[i] = F.normalize(normed_sampled_point_features[cluster_labels == i-1].mean(dim = 0), dim = -1)
 
 seg_score = torch.einsum('nc,bc->bn', cluster_centers.cpu(), normed_point_features.cpu())
-point_labels = seg_score.argmax(dim = -1)
+point_ins_labels = seg_score.argmax(dim = -1)
 print(f'HDBSCAN finish')
 def filter3d(pos, label):
     print('begin filter3d')
@@ -131,14 +131,14 @@ def filter3d(pos, label):
     print('finish filter3d')
     return torch.tensor(new_label).cuda()
 start_time = datetime.now()
-point_labels = filter3d(point_xyz, point_labels)
+point_ins_labels = filter3d(point_xyz, point_ins_labels)
 end_time = datetime.now()
 elapsed_time = end_time - start_time
 print(f'{elapsed_time=}') # 89, pytorch3d.ops.knn_points=49
 print(f'knn finish')
-torch.save(point_labels, 'temp/tys/point_labels.pth')
-point_labels = torch.load('temp/tys/point_labels.pth')
-cluster_point_colors = cfg.label_to_color[point_labels.detach().cpu().numpy()]
+torch.save(point_ins_labels, 'temp/tys/point_ins_labels.pth')
+point_ins_labels = torch.load('temp/tys/point_ins_labels.pth')
+cluster_point_colors = cfg.label_to_color[point_ins_labels.detach().cpu().numpy()]
 
 # extract langauge features
 def mask_to_bbox(mask: torch.Tensor) -> torch.Tensor:
@@ -204,8 +204,8 @@ langauge_features = []
 for label in tqdm(list(range(0, len(np.unique(cluster_labels)))), desc='get langauge feature'):
     features = []
     for i, camera in enumerate(camera_list):
-        render_pkg = render(camera, gs_model, cfg, cfg.bg_color, filtered_mask=~(point_labels==label))
-        if torch.logical_and(render_pkg['visibility_filter'], (point_labels==label)).sum()/(point_labels==label).sum() > 0.9: # valid camera
+        render_pkg = render(camera, gs_model, cfg, cfg.bg_color, filtered_mask=~(point_ins_labels==label))
+        if torch.logical_and(render_pkg['visibility_filter'], (point_ins_labels==label)).sum()/(point_ins_labels==label).sum() > 0.9: # valid camera
             render_image = render_pkg['render']
             original_image = camera.original_image.to('cuda')
             prompt_mask = (render_image!=0).any(dim=0)
@@ -244,7 +244,7 @@ def get_relevancy(raw_semantic_map: torch.Tensor, pembed: torch.Tensor, nembed: 
     sim=torch.softmax(10*sim, dim=-1) # (p, n, i, 2)
     sim, indice = sim[...,0].min(dim=1) # (p, i)
     return sim.unflatten(1, s)
-ptexts = ['plant', 'sofa', 'pillow', 'chair', 'table']
+ptexts = ['plant', 'chair', 'table', 'object']
 ntexts = ["object", "things", "stuff", "texture"]
 nembed = clip_processor(text=ntexts, return_tensors='pt', padding=True)
 nembed = nembed.to(clip_model.device)
@@ -259,5 +259,5 @@ pembed = pembed.detach().cpu()
 sims = get_relevancy(langauge_features, pembed, nembed) # float[p, e, c]
 for ptext, sim in zip(ptexts, sims):
     entity_index,camera_index = torch.unravel_index(sim.argmax(), sim.shape)
-    render_pkg = render(camera_list[camera_index], gs_model, cfg, cfg.bg_color, filtered_mask=~(point_labels==entity_index))
+    render_pkg = render(camera_list[camera_index], gs_model, cfg, cfg.bg_color, filtered_mask=~(point_ins_labels==entity_index))
     save_image(render_pkg['render'], f'temp/tys/{ptext}.jpg', dataformat='CHW')

@@ -77,9 +77,9 @@ class CONFIG:
     FEATURE_PCD_PATH = os.path.join(MODEL_PATH, f'point_cloud/iteration_{str(FEATURE_GAUSSIAN_ITERATION)}/contrastive_feature_point_cloud.ply')
     SCENE_PCD_PATH = os.path.join(MODEL_PATH, f'point_cloud/iteration_{str(SCENE_GAUSSIAN_ITERATION)}/scene_point_cloud.ply')
 
-    point_labels_path = 'temp/tys/point_labels.pth'
+    point_ins_labels_path = 'temp/tys/point_ins_labels.pth'
     langauge_features_path = 'temp/tys/langauge_features.pth'
-    pos_texts = ['table', 'chair', 'plant', 'object']
+    pos_texts = ['plant', 'chair', 'table', 'object']
     neg_texts = ["object", "things", "stuff", "texture"]
 
 
@@ -267,8 +267,8 @@ class GaussianSplattingGUI:
 
         print("loading model file done.")
 
-        if opt.point_labels_path:
-            self.point_labels = torch.load(opt.point_labels_path)
+        if opt.point_ins_labels_path:
+            self.point_ins_labels = torch.load(opt.point_ins_labels_path)
         if opt.langauge_features_path:
             self.langauge_features = torch.load(opt.langauge_features_path)
 
@@ -381,7 +381,7 @@ class GaussianSplattingGUI:
         def callback_cluster():
             self.cluster_in_3D_flag =True
         def callback_label(sender, app_data, user_data):
-            self.label = (self.label+user_data)%len(torch.unique(self.point_labels))
+            self.label = (self.label+user_data)%len(torch.unique(self.point_ins_labels))
             langauge_feature = self.langauge_features[self.label, ...]
             sims = get_relevancy(langauge_feature, self.pembed, self.nembed)
             sims, _ = torch.max(sims, dim=1)
@@ -612,7 +612,7 @@ class GaussianSplattingGUI:
             cluster_centers[i] = torch.nn.functional.normalize(normed_sampled_point_features[cluster_labels == i-1].mean(dim = 0), dim = -1)
 
         self.seg_score = torch.einsum('nc,bc->bn', cluster_centers.cpu(), normed_point_features.cpu())
-        self.point_labels = self.seg_score.argmax(dim = -1)
+        self.point_ins_labels = self.seg_score.argmax(dim = -1)
         def filter3d(pos, label):
             print('begin filter3d')
             assert pos.shape[0] == label.shape[0]
@@ -638,8 +638,8 @@ class GaussianSplattingGUI:
                 new_label.append(bin[counts.index(max(counts))])
             print('finish filter3d')
             return torch.tensor(new_label).cuda()
-        self.point_labels = filter3d(point_xyz, self.point_labels)
-        self.cluster_point_colors = self.label_to_color[self.point_labels.detach().cpu().numpy()]
+        self.point_ins_labels = filter3d(point_xyz, self.point_ins_labels)
+        self.cluster_point_colors = self.label_to_color[self.point_ins_labels.detach().cpu().numpy()]
 
         # extract langauge features
         def mask_to_bbox(mask: torch.Tensor) -> torch.Tensor:
@@ -704,8 +704,8 @@ class GaussianSplattingGUI:
         for label in range(0, len(np.unique(cluster_labels))):
             features = []
             for i, camera in enumerate(self.camera_list):
-                render_pkg = render(camera, self.engine['scene'], self.opt, self.bg_color, filtered_mask=~(self.point_labels==label))
-                if torch.logical_and(render_pkg['visibility_filter'], (self.point_labels==label)).sum()/(self.point_labels==label).sum() > 0.9: # valid camera
+                render_pkg = render(camera, self.engine['scene'], self.opt, self.bg_color, filtered_mask=~(self.point_ins_labels==label))
+                if torch.logical_and(render_pkg['visibility_filter'], (self.point_ins_labels==label)).sum()/(self.point_ins_labels==label).sum() > 0.9: # valid camera
                     render_image = render_pkg['render']
                     original_image = camera.original_image.to('cuda')
                     prompt_mask = (render_image!=0).any(dim=0)
@@ -907,7 +907,7 @@ class GaussianSplattingGUI:
                 self.render_buffer = self.rendered_cluster.cpu().numpy().reshape(-1) if self.render_buffer is None else self.render_buffer + self.rendered_cluster.cpu().numpy().reshape(-1)
             render_num += 1
         if self.render_mode_label:
-            self.render_buffer = render(view_camera, self.engine['scene'], self.opt, self.bg_color, filtered_mask=~(self.point_labels==self.label))['render'].permute(1,2,0).cpu().numpy().reshape(-1)
+            self.render_buffer = render(view_camera, self.engine['scene'], self.opt, self.bg_color, filtered_mask=~(self.point_ins_labels==self.label))['render'].permute(1,2,0).cpu().numpy().reshape(-1)
             render_num += 1
         if self.render_mode_similarity:
             if score_map is not None:
@@ -941,7 +941,7 @@ if __name__ == "__main__":
     opt.SCALE_GATE_PATH = os.path.join(opt.MODEL_PATH, f'point_cloud/iteration_{str(opt.FEATURE_GAUSSIAN_ITERATION)}/scale_gate.pt')
     opt.FEATURE_PCD_PATH = os.path.join(opt.MODEL_PATH, f'point_cloud/iteration_{str(opt.FEATURE_GAUSSIAN_ITERATION)}/contrastive_feature_point_cloud.ply')
     opt.SCENE_PCD_PATH = os.path.join(opt.MODEL_PATH, f'point_cloud/iteration_{str(opt.SCENE_GAUSSIAN_ITERATION)}/scene_point_cloud.ply')
-    opt.point_labels_path = 'temp/tys/point_labels.pth'
+    opt.point_ins_labels_path = 'temp/tys/point_ins_labels.pth'
     opt.langauge_features_path = 'temp/tys/langauge_features.pth'
 
     gs_model = GaussianModel(opt.sh_degree)
