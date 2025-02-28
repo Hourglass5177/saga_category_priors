@@ -42,9 +42,16 @@ class Config:
 
     model_path = ''
     data_path = ''
-    scale_gate_path = os.path.join(model_path, f'point_cloud/iteration_10000/scale_gate.pt')
-    feature_pcd_path = os.path.join(model_path, f'point_cloud/iteration_10000/contrastive_feature_point_cloud.ply')
-    scene_pcd_path = os.path.join(model_path, f'point_cloud/iteration_30000/scene_point_cloud.ply')
+
+    @property
+    def scale_gate_path(self):
+        return os.path.join(self.model_path, f'point_cloud/iteration_10000/scale_gate.pt')
+    @property
+    def feature_pcd_path(self):
+        return os.path.join(self.model_path, f'point_cloud/iteration_10000/contrastive_feature_point_cloud.ply')
+    @property
+    def scene_pcd_path(self):
+        return os.path.join(self.model_path, f'point_cloud/iteration_30000/scene_point_cloud.ply')
 
     data_device = 'cpu'
 
@@ -59,11 +66,7 @@ class Config:
     pos_texts = ['plant', 'chair', 'table', 'object']
     neg_texts = ["object", "things", "stuff", "texture"]
 
-    def __setattr__(self, name, value):
-        if name in ['model_path', 'data_path']:
-            self.scale_gate_path = os.path.join(self.model_path, f'point_cloud/iteration_10000/scale_gate.pt')
-            self.feature_pcd_path = os.path.join(self.model_path, f'point_cloud/iteration_10000/contrastive_feature_point_cloud.ply')
-            self.scene_pcd_path = os.path.join(self.model_path, f'point_cloud/iteration_30000/scene_point_cloud.ply')
+    
 
 cfg = Config()
 parser = ArgumentParser(description="Training script parameters")
