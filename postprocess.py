@@ -1,6 +1,8 @@
 import torch
 from scene import Scene
 import os
+import json
+import sys
 from datetime import datetime
 from tqdm import tqdm
 from os import makedirs
@@ -25,6 +27,7 @@ from utils.graphics_utils import getWorld2View2, focal2fov, fov2focal
 from scene.dataset_readers import readColmapCameras, read_extrinsics_binary, read_intrinsics_binary, read_extrinsics_text, read_intrinsics_text
 from utils.camera_utils import cameraList_from_camInfos
 from utils.visualization_utils import save_image
+from utils.clip_utils import get_relevancy
 
 from scipy.spatial.transform import Rotation as R
 from scipy.spatial import KDTree
@@ -37,8 +40,8 @@ from transformers import CLIPProcessor, CLIPModel
 class Config:
     scale = 1.0
 
-    model_path = 'output/temp/tys'
-    data_path = 'data/temp/tys'
+    model_path = ''
+    data_path = ''
     scale_gate_path = os.path.join(model_path, f'point_cloud/iteration_10000/scale_gate.pt')
     feature_pcd_path = os.path.join(model_path, f'point_cloud/iteration_10000/contrastive_feature_point_cloud.ply')
     scene_pcd_path = os.path.join(model_path, f'point_cloud/iteration_30000/scene_point_cloud.ply')
@@ -53,9 +56,23 @@ class Config:
     convert_SHs_python = False
     compute_cov3D_python = False
 
-    label_to_color = np.random.rand(1000, 3)
+    pos_texts = ['plant', 'chair', 'table', 'object']
+    neg_texts = ["object", "things", "stuff", "texture"]
+
+    def __setattr__(self, name, value):
+        if name in ['model_path', 'data_path']:
+            self.scale_gate_path = os.path.join(self.model_path, f'point_cloud/iteration_10000/scale_gate.pt')
+            self.feature_pcd_path = os.path.join(self.model_path, f'point_cloud/iteration_10000/contrastive_feature_point_cloud.ply')
+            self.scene_pcd_path = os.path.join(self.model_path, f'point_cloud/iteration_30000/scene_point_cloud.ply')
 
 cfg = Config()
+parser = ArgumentParser(description="Training script parameters")
+parser.add_argument("--data_path", type=str, required=True)
+parser.add_argument("--model_path", type=str, required=True)
+parser.add_argument("--pos_texts", nargs="+", type=str, default=['plant', 'chair', 'table', 'object'])
+args = parser.parse_args(sys.argv[1:])
+cfg.model_path = args.model_path
+cfg.data_path = args.data_path
 
 sam = sam_model_registry['vit_h']('./third_party/segment-anything/sam_ckpt/sam_vit_h_4b8939.pth').to('cuda')
 mask_predictor = SamPredictor(sam)
@@ -103,7 +120,7 @@ for i in range(0, len(np.unique(cluster_labels))):
     cluster_centers[i] = F.normalize(normed_sampled_point_features[cluster_labels == i-1].mean(dim = 0), dim = -1)
 
 seg_score = torch.einsum('nc,bc->bn', cluster_centers.cpu(), normed_point_features.cpu())
-point_ins_labels = seg_score.argmax(dim = -1)
+point_labels = seg_score.argmax(dim = -1)
 print(f'HDBSCAN finish')
 def filter3d(pos, label):
     print('begin filter3d')
@@ -131,14 +148,13 @@ def filter3d(pos, label):
     print('finish filter3d')
     return torch.tensor(new_label).cuda()
 start_time = datetime.now()
-point_ins_labels = filter3d(point_xyz, point_ins_labels)
+point_labels = filter3d(point_xyz, point_labels)
 end_time = datetime.now()
 elapsed_time = end_time - start_time
 print(f'{elapsed_time=}') # 89, pytorch3d.ops.knn_points=49
 print(f'knn finish')
-torch.save(point_ins_labels, 'temp/tys/point_ins_labels.pth')
-point_ins_labels = torch.load('temp/tys/point_ins_labels.pth')
-cluster_point_colors = cfg.label_to_color[point_ins_labels.detach().cpu().numpy()]
+torch.save(point_labels, os.path.join(cfg.model_path, 'point_labels.pth'))
+point_labels = torch.load(os.path.join(cfg.model_path, 'point_labels.pth'))
 
 # extract langauge features
 def mask_to_bbox(mask: torch.Tensor) -> torch.Tensor:
@@ -204,8 +220,8 @@ langauge_features = []
 for label in tqdm(list(range(0, len(np.unique(cluster_labels)))), desc='get langauge feature'):
     features = []
     for i, camera in enumerate(camera_list):
-        render_pkg = render(camera, gs_model, cfg, cfg.bg_color, filtered_mask=~(point_ins_labels==label))
-        if torch.logical_and(render_pkg['visibility_filter'], (point_ins_labels==label)).sum()/(point_ins_labels==label).sum() > 0.9: # valid camera
+        render_pkg = render(camera, gs_model, cfg, cfg.bg_color, filtered_mask=~(point_labels==label))
+        if torch.logical_and(render_pkg['visibility_filter'], (point_labels==label)).sum()/(point_labels==label).sum() > 0.9: # valid camera
             render_image = render_pkg['render']
             original_image = camera.original_image.to('cuda')
             prompt_mask = (render_image!=0).any(dim=0)
@@ -229,35 +245,28 @@ end_time = datetime.now()
 elapsed_time = end_time - start_time
 print(f'{elapsed_time=}') # 2796
 print(f'{langauge_features.shape=}') # float[labels, cameras, clip_dim]
-torch.save(langauge_features, 'temp/tys/langauge_features.pth')
-langauge_features = torch.load('temp/tys/langauge_features.pth')
+torch.save(langauge_features, os.path.join(cfg.model_path, 'langauge_features.pth'))
+langauge_features = torch.load(os.path.join(cfg.model_path, 'langauge_features.pth'))
 
-def get_relevancy(raw_semantic_map: torch.Tensor, pembed: torch.Tensor, nembed: torch.Tensor):
-    s = raw_semantic_map.shape[:-1]
-    c = raw_semantic_map.shape[-1]
-    raw_semantics = raw_semantic_map.flatten(0, -2)
-    psim=pembed@raw_semantics.T # (p, i)
-    nsim=nembed@raw_semantics.T # (n, i)
-    nsim=nsim.unsqueeze(0).repeat_interleave(pembed.shape[0],dim=0) # (p, n ,i)
-    psim=psim.unsqueeze(1).repeat_interleave(nembed.shape[0],dim=1) # (p, n, i)
-    sim=torch.stack((psim,nsim), dim=-1) # (p, n, i, 2)
-    sim=torch.softmax(10*sim, dim=-1) # (p, n, i, 2)
-    sim, indice = sim[...,0].min(dim=1) # (p, i)
-    return sim.unflatten(1, s)
-ptexts = ['plant', 'chair', 'table', 'object']
-ntexts = ["object", "things", "stuff", "texture"]
-nembed = clip_processor(text=ntexts, return_tensors='pt', padding=True)
+nembed = clip_processor(text=cfg.neg_texts, return_tensors='pt', padding=True)
 nembed = nembed.to(clip_model.device)
 nembed = clip_model.get_text_features(**nembed)
 nembed = F.normalize(nembed, dim=-1)
 nembed = nembed.detach().cpu()
-pembed = clip_processor(text=ptexts, return_tensors='pt', padding=True)
+pembed = clip_processor(text=cfg.pos_texts, return_tensors='pt', padding=True)
 pembed = pembed.to(clip_model.device)
 pembed = clip_model.get_text_features(**pembed)
 pembed = F.normalize(pembed, dim=-1)
 pembed = pembed.detach().cpu()
 sims = get_relevancy(langauge_features, pembed, nembed) # float[p, e, c]
-for ptext, sim in zip(ptexts, sims):
-    entity_index,camera_index = torch.unravel_index(sim.argmax(), sim.shape)
-    render_pkg = render(camera_list[camera_index], gs_model, cfg, cfg.bg_color, filtered_mask=~(point_ins_labels==entity_index))
-    save_image(render_pkg['render'], f'temp/tys/{ptext}.jpg', dataformat='CHW')
+sims, _ = sims.max(dim=-1)
+_, index = sims.max(dim=0)
+instance_labels = index
+torch.save(instance_labels, os.path.join(cfg.model_path, 'instance_labels.pth'))
+instance_labels = torch.load(os.path.join(cfg.model_path, 'instance_labels.pth'))
+
+output = dict()
+output['point_labels'] = point_labels.tolist()
+output['instances'] = [{'class': cfg.pos_texts[l]} for l in instance_labels.tolist()]
+with open(os.path.join(cfg.model_path, 'output.json'),'w') as f:
+    json.dump(output,f)
