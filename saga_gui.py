@@ -79,6 +79,7 @@ class CONFIG:
 
     point_ins_labels_path = 'temp/tys/point_ins_labels.pth'
     langauge_features_path = 'temp/tys/langauge_features.pth'
+    json_path = 'output/temp/tys/output.json'
     pos_texts = ['plant', 'chair', 'table', 'object']
     neg_texts = ["object", "things", "stuff", "texture"]
 
@@ -587,59 +588,64 @@ class GaussianSplattingGUI:
         #     self.engine['feature'].roll_back()
         # except:
         #     pass
-        point_features = self.engine['feature'].get_point_features
-        point_xyz = self.engine['feature'].get_xyz
-        print(point_features.shape, point_xyz.shape)
+        # point_features = self.engine['feature'].get_point_features
+        # point_xyz = self.engine['feature'].get_xyz
+        # print(point_features.shape, point_xyz.shape)
 
-        scale_conditioned_point_features = torch.nn.functional.normalize(point_features, dim = -1, p = 2) * self.gates.unsqueeze(0)
+        # scale_conditioned_point_features = torch.nn.functional.normalize(point_features, dim = -1, p = 2) * self.gates.unsqueeze(0)
 
-        normed_point_features = torch.nn.functional.normalize(scale_conditioned_point_features, dim = -1, p = 2)
-        # normed_point_xyz = point_xyz
-        # normed_point_xyz = torch.nn.functional.normalize(point_xyz, dim = 0, p = 2)
-        # normed_point_xyz = 20*point_xyz / (point_xyz.abs().max())
-        # normed_point_features = torch.cat((normed_point_features, normed_point_xyz), dim=-1)
-        sampled_index = torch.rand(normed_point_features.shape[0]) > 0.98
-        normed_sampled_point_features = normed_point_features[sampled_index]
+        # normed_point_features = torch.nn.functional.normalize(scale_conditioned_point_features, dim = -1, p = 2)
+        # # normed_point_xyz = point_xyz
+        # # normed_point_xyz = torch.nn.functional.normalize(point_xyz, dim = 0, p = 2)
+        # # normed_point_xyz = 20*point_xyz / (point_xyz.abs().max())
+        # # normed_point_features = torch.cat((normed_point_features, normed_point_xyz), dim=-1)
+        # sampled_index = torch.rand(normed_point_features.shape[0]) > 0.98
+        # normed_sampled_point_features = normed_point_features[sampled_index]
 
-        # normed_sampled_point_features = sampled_point_features / torch.norm(sampled_point_features, dim = -1, keepdim = True)
+        # # normed_sampled_point_features = sampled_point_features / torch.norm(sampled_point_features, dim = -1, keepdim = True)
 
-        clusterer = HDBSCAN(min_cluster_size=10, cluster_selection_epsilon=0.01, allow_single_cluster = False) # HDBSCAN
+        # clusterer = HDBSCAN(min_cluster_size=10, cluster_selection_epsilon=0.01, allow_single_cluster = False) # HDBSCAN
 
-        cluster_labels = clusterer.fit_predict(normed_sampled_point_features.detach().cpu().numpy())
+        # cluster_labels = clusterer.fit_predict(normed_sampled_point_features.detach().cpu().numpy())
 
-        cluster_centers = torch.zeros(len(np.unique(cluster_labels)), normed_sampled_point_features.shape[-1])
-        for i in range(0, len(np.unique(cluster_labels))):
-            cluster_centers[i] = torch.nn.functional.normalize(normed_sampled_point_features[cluster_labels == i-1].mean(dim = 0), dim = -1)
+        # cluster_centers = torch.zeros(len(np.unique(cluster_labels)), normed_sampled_point_features.shape[-1])
+        # for i in range(0, len(np.unique(cluster_labels))):
+        #     cluster_centers[i] = torch.nn.functional.normalize(normed_sampled_point_features[cluster_labels == i-1].mean(dim = 0), dim = -1)
 
-        self.seg_score = torch.einsum('nc,bc->bn', cluster_centers.cpu(), normed_point_features.cpu())
-        self.point_ins_labels = self.seg_score.argmax(dim = -1)
-        def filter3d(pos, label):
-            print('begin filter3d')
-            assert pos.shape[0] == label.shape[0]
-            pos=pos.detach().cpu().numpy()
-            label=label.detach().cpu().numpy()
-            new_label = []
-            kdtree = KDTree(pos)
-            for i,p in enumerate(pos):
-                d, index = kdtree.query(x=p, k=512)
-                assert i == index[0]
-                # print(f'query index {index[1:]} for {index[0]}')
-                # print(f'query label {label[index[1:]].tolist()} for {label[index[0]].tolist()}')
-                index = index[1:]
-                bin = []
-                counts = []
-                for l in label[index]:
-                    try:
-                        counts[bin.index(l)]+=1
-                    except:
-                        bin.append(l)
-                        counts.append(1)
-                # print(f'{bin}\n{counts}')
-                new_label.append(bin[counts.index(max(counts))])
-            print('finish filter3d')
-            return torch.tensor(new_label).cuda()
-        self.point_ins_labels = filter3d(point_xyz, self.point_ins_labels)
-        self.cluster_point_colors = self.label_to_color[self.point_ins_labels.detach().cpu().numpy()]
+        # self.seg_score = torch.einsum('nc,bc->bn', cluster_centers.cpu(), normed_point_features.cpu())
+        # self.point_ins_labels = self.seg_score.argmax(dim = -1)
+        # def filter3d(pos, label):
+        #     print('begin filter3d')
+        #     assert pos.shape[0] == label.shape[0]
+        #     pos=pos.detach().cpu().numpy()
+        #     label=label.detach().cpu().numpy()
+        #     new_label = []
+        #     kdtree = KDTree(pos)
+        #     for i,p in enumerate(pos):
+        #         d, index = kdtree.query(x=p, k=512)
+        #         assert i == index[0]
+        #         # print(f'query index {index[1:]} for {index[0]}')
+        #         # print(f'query label {label[index[1:]].tolist()} for {label[index[0]].tolist()}')
+        #         index = index[1:]
+        #         bin = []
+        #         counts = []
+        #         for l in label[index]:
+        #             try:
+        #                 counts[bin.index(l)]+=1
+        #             except:
+        #                 bin.append(l)
+        #                 counts.append(1)
+        #         # print(f'{bin}\n{counts}')
+        #         new_label.append(bin[counts.index(max(counts))])
+        #     print('finish filter3d')
+        #     return torch.tensor(new_label).cuda()
+        # self.point_ins_labels = filter3d(point_xyz, self.point_ins_labels)
+        # self.cluster_point_colors = self.label_to_color[self.point_ins_labels.detach().cpu().numpy()]
+        import json
+        with open('temp/tys/output.json', 'r') as f:
+            j = json.load(f)
+        self.cluster_point_colors = self.label_to_color[np.array(j['point_instance_labels'])]
+        # self.cluster_point_colors[self.seg_score.max(dim = -1)[0].detach().cpu().numpy() < 0.5] = (0,0,0)
 
         # extract langauge features
         def mask_to_bbox(mask: torch.Tensor) -> torch.Tensor:
@@ -700,34 +706,33 @@ class GaussianSplattingGUI:
             paded_img = cv2.resize(paded_img, (224,224))
             return paded_img
         
-        self.langauge_features = []
-        for label in range(0, len(np.unique(cluster_labels))):
-            features = []
-            for i, camera in enumerate(self.camera_list):
-                render_pkg = render(camera, self.engine['scene'], self.opt, self.bg_color, filtered_mask=~(self.point_ins_labels==label))
-                if torch.logical_and(render_pkg['visibility_filter'], (self.point_ins_labels==label)).sum()/(self.point_ins_labels==label).sum() > 0.9: # valid camera
-                    render_image = render_pkg['render']
-                    original_image = camera.original_image.to('cuda')
-                    prompt_mask = (render_image!=0).any(dim=0)
-                    prompt_bbox = torch.Tensor(mask_to_bbox(prompt_mask)).to('cuda')
-                    transformed_bbox = self.mask_predictor.transform.apply_boxes_torch(prompt_bbox, original_image.shape[-2:])
-                    batched_image = original_image.unsqueeze(0)
-                    transformed_image = self.mask_predictor.transform.apply_image_torch(batched_image)
-                    self.mask_predictor.set_torch_image(transformed_image, original_image.shape[-2:])
-                    masks, scores, _ = self.mask_predictor.predict_torch(point_coords=None, point_labels=None, boxes=transformed_bbox, multimask_output=False)
+        # self.langauge_features = []
+        # for label in range(0, len(np.unique(cluster_labels))):
+        #     features = []
+        #     for i, camera in enumerate(self.camera_list):
+        #         render_pkg = render(camera, self.engine['scene'], self.opt, self.bg_color, filtered_mask=~(self.point_ins_labels==label))
+        #         if torch.logical_and(render_pkg['visibility_filter'], (self.point_ins_labels==label)).sum()/(self.point_ins_labels==label).sum() > 0.9: # valid camera
+        #             render_image = render_pkg['render']
+        #             original_image = camera.original_image.to('cuda')
+        #             prompt_mask = (render_image!=0).any(dim=0)
+        #             prompt_bbox = torch.Tensor(mask_to_bbox(prompt_mask)).to('cuda')
+        #             transformed_bbox = self.mask_predictor.transform.apply_boxes_torch(prompt_bbox, original_image.shape[-2:])
+        #             batched_image = original_image.unsqueeze(0)
+        #             transformed_image = self.mask_predictor.transform.apply_image_torch(batched_image)
+        #             self.mask_predictor.set_torch_image(transformed_image, original_image.shape[-2:])
+        #             masks, scores, _ = self.mask_predictor.predict_torch(point_coords=None, point_labels=None, boxes=transformed_bbox, multimask_output=False)
 
-                    inputs = self.clip_processor(images=get_entity_image((original_image*255).permute(1,2,0).to('cpu', torch.uint8).numpy()*masks[0,0,...][None,...].permute(1,2,0).cpu().numpy(), masks[0,0].cpu().numpy()), return_tensors='pt')
-                    inputs = inputs.to(self.clip_model.device)
-                    semantic0 = self.clip_model.get_image_features(**inputs)
-                    semantic0 = F.normalize(semantic0,dim=-1).detach().cpu()
-                else:
-                    semantic0 = torch.zeros((1,512), dtype=torch.float32, device='cpu')
-                features.append(semantic0)
-            self.langauge_features.append(torch.concat(features, dim=0))
-        self.langauge_features = torch.stack(self.langauge_features, dim=0)
-        torch.save(self.langauge_features, 'langauge_features.pth')
-        self.langauge_features = torch.load('langauge_features.pth')
-        # self.cluster_point_colors[self.seg_score.max(dim = -1)[0].detach().cpu().numpy() < 0.5] = (0,0,0)
+        #             inputs = self.clip_processor(images=get_entity_image((original_image*255).permute(1,2,0).to('cpu', torch.uint8).numpy()*masks[0,0,...][None,...].permute(1,2,0).cpu().numpy(), masks[0,0].cpu().numpy()), return_tensors='pt')
+        #             inputs = inputs.to(self.clip_model.device)
+        #             semantic0 = self.clip_model.get_image_features(**inputs)
+        #             semantic0 = F.normalize(semantic0,dim=-1).detach().cpu()
+        #         else:
+        #             semantic0 = torch.zeros((1,512), dtype=torch.float32, device='cpu')
+        #         features.append(semantic0)
+        #     self.langauge_features.append(torch.concat(features, dim=0))
+        # self.langauge_features = torch.stack(self.langauge_features, dim=0)
+        # torch.save(self.langauge_features, f'{self.opt.langauge_features_path}')
+        self.langauge_features = torch.load(f'{self.opt.langauge_features_path}')
 
 
     def pca(self, X, n_components=3):
