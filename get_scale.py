@@ -75,8 +75,6 @@ if __name__ == '__main__':
     parser.add_argument('--idx', default=0, type=int)
     parser.add_argument('--precomputed_mask', default=None, type=str)
 
-    parser.add_argument("--image_root", default='/datasets/nerf_data/360_v2/garden/', type=str)
-
     args = get_combined_args(parser)
 
     dataset = model.extract(args)
@@ -96,18 +94,18 @@ if __name__ == '__main__':
     assert os.path.join(dataset.source_path, 'sam_masks') and "Please run extract_segment_everything_masks first."
 
     from tqdm import tqdm
-    images_masks = {}
-    for i, image_path in tqdm(enumerate(sorted(os.listdir(os.path.join(dataset.source_path, 'images'))))):
-        # print(image_path)
-        image = cv2.imread(os.path.join(os.path.join(dataset.source_path, 'images'), image_path))
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        masks = torch.load(os.path.join(os.path.join(dataset.source_path, 'sam_masks'), image_path.replace('jpg', 'pt').replace('JPG', 'pt').replace('png', 'pt')))
-        # N_mask, C
+    # images_masks = {}
+    # for i, image_path in tqdm(enumerate(sorted(os.listdir(os.path.join(dataset.source_path, 'images'))))):
+    #     print(image_path)
+    #     image = cv2.imread(os.path.join(os.path.join(dataset.source_path, 'images'), image_path))
+    #     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    #     masks = torch.load(os.path.join(os.path.join(dataset.source_path, 'sam_masks'), image_path.replace('jpg', 'pt').replace('JPG', 'pt').replace('png', 'pt')))
+    #     # N_mask, C
 
-        images_masks[os.path.splitext(os.path.basename(image_path))[0]] = masks.cpu().float()
+    #     images_masks[os.path.splitext(os.path.basename(image_path))[0]] = masks.cpu().float()
 
 
-    OUTPUT_DIR = os.path.join(args.image_root, 'mask_scales')
+    OUTPUT_DIR = os.path.join(dataset.source_path, 'mask_scales')
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     cameras = scene.getTrainCameras()
@@ -121,7 +119,7 @@ if __name__ == '__main__':
         depth = rendered_pkg['depth'] # pixel-wise
 
         # plt.imshow(depth.detach().cpu().squeeze().numpy())
-        corresponding_masks = images_masks[view.image_name]
+        corresponding_masks = torch.load(os.path.join(dataset.source_path, 'sam_masks', f'{view.image_name}.pt')).cpu().float()
 
         # generate_grid_index(depth.squeeze())[50, 1]
 
