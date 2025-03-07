@@ -1,3 +1,7 @@
+# conda create --name saga python=3.12 -c conda-forge
+# conda activate saga
+# pip install torch==2.4.1+cu118 --extra-index-url https://download.pytorch.org/whl/cu118
+# pip install -r requirements.txt
 torch==2.4.1+cu118
 torchvision==0.19.1+cu118
 torchaudio==2.4.1+cu118

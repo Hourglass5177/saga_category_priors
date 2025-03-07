@@ -70,12 +70,14 @@ class Config:
 
 cfg = Config()
 parser = ArgumentParser(description="Training script parameters")
-parser.add_argument("--data_path", type=str, required=True)
-parser.add_argument("--model_path", type=str, required=True)
+parser.add_argument("--data_path", '-s', type=str, required=True)
+parser.add_argument("--model_path", '-m', type=str, required=True)
+parser.add_argument("--sh_degree", type=int, default=3)
 parser.add_argument("--pos_texts", nargs="+", type=str, default=['plant', 'chair', 'table', 'object'])
 args = parser.parse_args(sys.argv[1:])
 cfg.model_path = args.model_path
 cfg.data_path = args.data_path
+cfg.sh_degree = args.sh_degree
 
 sam = sam_model_registry['vit_h']('./third_party/segment-anything/sam_ckpt/sam_vit_h_4b8939.pth').to('cuda')
 mask_predictor = SamPredictor(sam)
@@ -255,12 +257,12 @@ nembed = clip_processor(text=cfg.neg_texts, return_tensors='pt', padding=True)
 nembed = nembed.to(clip_model.device)
 nembed = clip_model.get_text_features(**nembed)
 nembed = F.normalize(nembed, dim=-1)
-nembed = nembed.detach().cpu()
+nembed = nembed.detach().cpu().float()
 pembed = clip_processor(text=cfg.pos_texts, return_tensors='pt', padding=True)
 pembed = pembed.to(clip_model.device)
 pembed = clip_model.get_text_features(**pembed)
 pembed = F.normalize(pembed, dim=-1)
-pembed = pembed.detach().cpu()
+pembed = pembed.detach().cpu().float()
 sims = get_relevancy(langauge_features, pembed, nembed) # float[p, e, c]
 sims, _ = sims.max(dim=-1)
 _, index = sims.max(dim=0)
