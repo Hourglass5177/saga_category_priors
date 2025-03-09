@@ -84,12 +84,14 @@ scale_gate = torch.nn.Sequential(
         torch.nn.Sigmoid()
     ).cuda()
 scale_gate.load_state_dict(torch.load(cfg.scale_gate_path))
-# cameras = readColmapCameras(read_extrinsics_binary(os.path.join(cfg.data_path, 'sparse/0/images.bin')), 
-#                             read_intrinsics_binary(os.path.join(cfg.data_path, 'sparse/0/cameras.bin')), 
-#                             os.path.join(cfg.data_path, 'images'))
-cameras = readColmapCameras(read_extrinsics_text(os.path.join(cfg.data_path, 'sparse/0/images.txt')), 
-                            read_intrinsics_text(os.path.join(cfg.data_path, 'sparse/0/cameras.txt')), 
-                            os.path.join(cfg.data_path, 'images'))
+try:
+    cameras = readColmapCameras(read_extrinsics_binary(os.path.join(cfg.data_path, 'sparse/0/images.bin')), 
+                                read_intrinsics_binary(os.path.join(cfg.data_path, 'sparse/0/cameras.bin')), 
+                                os.path.join(cfg.data_path, 'images'))
+except:
+    cameras = readColmapCameras(read_extrinsics_text(os.path.join(cfg.data_path, 'sparse/0/images.txt')), 
+                                read_intrinsics_text(os.path.join(cfg.data_path, 'sparse/0/cameras.txt')), 
+                                os.path.join(cfg.data_path, 'images'))
 camera_list = cameraList_from_camInfos(cameras, 1, cfg)
 
 point_features = feat_gs_model.get_point_features
