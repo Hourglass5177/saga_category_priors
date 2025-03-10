@@ -66,20 +66,30 @@ class CONFIG:
 
     white_background = False
 
-    FEATURE_DIM = 32
-    MODEL_PATH = './output/figurines' # 30000
+    feature_dim = 32
+    model_path = None # 30000
+    source_path = None
 
-    FEATURE_GAUSSIAN_ITERATION = 10000
-    SCENE_GAUSSIAN_ITERATION = 30000
-
-    SCALE_GATE_PATH = os.path.join(MODEL_PATH, f'point_cloud/iteration_{str(FEATURE_GAUSSIAN_ITERATION)}/scale_gate.pt')
-
-    FEATURE_PCD_PATH = os.path.join(MODEL_PATH, f'point_cloud/iteration_{str(FEATURE_GAUSSIAN_ITERATION)}/contrastive_feature_point_cloud.ply')
-    SCENE_PCD_PATH = os.path.join(MODEL_PATH, f'point_cloud/iteration_{str(SCENE_GAUSSIAN_ITERATION)}/scene_point_cloud.ply')
-
-    point_ins_labels_path = 'temp/tys/point_ins_labels.pth'
-    langauge_features_path = 'temp/tys/langauge_features.pth'
-    json_path = 'output/temp/tys/output.json'
+    feature_gaussian_iteration = 10000
+    scene_gaussian_iteration = 30000
+    @property
+    def scale_gate_path(self):
+        return os.path.join(self.model_path, f'point_cloud/iteration_{str(self.feature_gaussian_iteration)}/scale_gate.pt')
+    @property
+    def feature_pcd_path(self):
+        return os.path.join(self.model_path, f'point_cloud/iteration_{str(self.feature_gaussian_iteration)}/contrastive_feature_point_cloud.ply')
+    @property
+    def scene_pcd_path(self):
+        return os.path.join(self.model_path, f'point_cloud/iteration_{str(self.scene_gaussian_iteration)}/scene_point_cloud.ply')
+    @property
+    def point_labels_path(self):
+        return os.path.join(self.model_path, 'point_labels.pth')
+    @property
+    def langauge_features_path(self):
+        return os.path.join(self.model_path, 'langauge_features.pth')
+    @property
+    def json_path(self):
+        return os.path.join(self.model_path, 'output.json')
     pos_texts = ['plant', 'chair', 'table', 'object']
     neg_texts = ["object", "things", "stuff", "texture"]
 
@@ -207,7 +217,7 @@ class GaussianSplattingGUI:
         bg_color = [1, 1, 1] if opt.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
-        bg_feature = [0 for i in range(opt.FEATURE_DIM)]
+        bg_feature = [0 for i in range(opt.feature_dim)]
         bg_feature = torch.tensor(bg_feature, dtype=torch.float32, device="cuda")
 
         self.bg_color = background
@@ -221,10 +231,15 @@ class GaussianSplattingGUI:
             'feature': feature_gaussian_model,
             'scale_gate': scale_gate
         }
-        self.cameras = readColmapCameras(read_extrinsics_text(os.path.join(self.opt.DATA_PATH, 'sparse/0/images.txt')), 
-                                         read_intrinsics_text(os.path.join(self.opt.DATA_PATH, 'sparse/0/cameras.txt')), 
-                                         os.path.join(self.opt.DATA_PATH, 'images'))
-        self.camera_list = cameraList_from_camInfos(self.cameras, 1, self.opt)
+        # try:
+        #     self.cameras = readColmapCameras(read_extrinsics_binary(os.path.join(self.opt.DATA_PATH, 'sparse/0/images.bin')), 
+        #                                     read_intrinsics_binary(os.path.join(self.opt.DATA_PATH, 'sparse/0/cameras.bin')), 
+        #                                     os.path.join(self.opt.DATA_PATH, 'images'))
+        # except:
+        #     self.cameras = readColmapCameras(read_extrinsics_text(os.path.join(self.opt.DATA_PATH, 'sparse/0/images.txt')), 
+        #                                     read_intrinsics_text(os.path.join(self.opt.DATA_PATH, 'sparse/0/cameras.txt')), 
+        #                                     os.path.join(self.opt.DATA_PATH, 'images'))
+        # self.camera_list = cameraList_from_camInfos(self.cameras, 1, self.opt)
 
         sam = sam_model_registry['vit_h']('./third_party/segment-anything/sam_ckpt/sam_vit_h_4b8939.pth').to('cuda')
         # self.mask_generator = SamAutomaticMaskGenerator(
@@ -260,16 +275,16 @@ class GaussianSplattingGUI:
 
         self.load_model = False
         print("loading model file...")
-        self.engine['scene'].load_ply(self.opt.SCENE_PCD_PATH)
-        self.engine['feature'].load_ply(self.opt.FEATURE_PCD_PATH)
-        self.engine['scale_gate'].load_state_dict(torch.load(self.opt.SCALE_GATE_PATH))
+        self.engine['scene'].load_ply(self.opt.scene_pcd_path)
+        self.engine['feature'].load_ply(self.opt.feature_pcd_path)
+        self.engine['scale_gate'].load_state_dict(torch.load(self.opt.scale_gate_path))
         self.do_pca()   # calculate self.proj_mat
         self.load_model = True
 
         print("loading model file done.")
 
-        if opt.point_ins_labels_path:
-            self.point_ins_labels = torch.load(opt.point_ins_labels_path)
+        if opt.point_labels_path:
+            self.point_labels = torch.load(opt.point_labels_path)
         if opt.langauge_features_path:
             self.langauge_features = torch.load(opt.langauge_features_path)
 
@@ -382,7 +397,7 @@ class GaussianSplattingGUI:
         def callback_cluster():
             self.cluster_in_3D_flag =True
         def callback_label(sender, app_data, user_data):
-            self.label = (self.label+user_data)%len(torch.unique(self.point_ins_labels))
+            self.label = (self.label+user_data)%len(torch.unique(self.point_labels))
             langauge_feature = self.langauge_features[self.label, ...]
             sims = get_relevancy(langauge_feature, self.pembed, self.nembed)
             sims, _ = torch.max(sims, dim=1)
@@ -642,9 +657,9 @@ class GaussianSplattingGUI:
         # self.point_ins_labels = filter3d(point_xyz, self.point_ins_labels)
         # self.cluster_point_colors = self.label_to_color[self.point_ins_labels.detach().cpu().numpy()]
         import json
-        with open('temp/tys/output.json', 'r') as f:
+        with open(self.opt.json_path, 'r') as f:
             j = json.load(f)
-        self.cluster_point_colors = self.label_to_color[np.array(j['point_instance_labels'])]
+        self.cluster_point_colors = self.label_to_color[np.array(j['point_labels'])]
         # self.cluster_point_colors[self.seg_score.max(dim = -1)[0].detach().cpu().numpy() < 0.5] = (0,0,0)
 
         # extract langauge features
@@ -814,9 +829,9 @@ class GaussianSplattingGUI:
         if self.reload_flag:
             self.reload_flag = False
             print("loading model file...")
-            self.engine['scene'].load_ply(self.opt.SCENE_PCD_PATH)
-            self.engine['feature'].load_ply(self.opt.FEATURE_PCD_PATH)
-            self.engine['scale_gate'].load_state_dict(torch.load(self.opt.SCALE_GATE_PATH))
+            self.engine['scene'].load_ply(self.opt.scene_pcd_path)
+            self.engine['feature'].load_ply(self.opt.feature_pcd_path)
+            self.engine['scale_gate'].load_state_dict(torch.load(self.opt.scale_gate_path))
             self.do_pca()   # calculate self.proj_mat
             self.load_model = True
 
@@ -912,7 +927,7 @@ class GaussianSplattingGUI:
                 self.render_buffer = self.rendered_cluster.cpu().numpy().reshape(-1) if self.render_buffer is None else self.render_buffer + self.rendered_cluster.cpu().numpy().reshape(-1)
             render_num += 1
         if self.render_mode_label:
-            self.render_buffer = render(view_camera, self.engine['scene'], self.opt, self.bg_color, filtered_mask=~(self.point_ins_labels==self.label))['render'].permute(1,2,0).cpu().numpy().reshape(-1)
+            self.render_buffer = render(view_camera, self.engine['scene'], self.opt, self.bg_color, filtered_mask=~(self.point_labels==self.label))['render'].permute(1,2,0).cpu().numpy().reshape(-1)
             render_num += 1
         if self.render_mode_similarity:
             if score_map is not None:
@@ -930,7 +945,8 @@ if __name__ == "__main__":
     parser = ArgumentParser(description="GUI option")
 
     parser.add_argument('-m', '--model_path', type=str, default="./output/temp/tys")
-    parser.add_argument('-s', '--data_path', type=str, default="./data/temp/tys")
+    parser.add_argument('-s', '--source_path', type=str, default="./data/temp/tys")
+    parser.add_argument('--sh_degree', type=int, default=3)
     parser.add_argument('--feature_iteration', type=int, default=10000)
     parser.add_argument('--scene_iteration', type=int, default=30000)
 
@@ -938,21 +954,16 @@ if __name__ == "__main__":
 
     opt = CONFIG()
 
-    opt.MODEL_PATH = args.model_path
-    opt.DATA_PATH = args.data_path
-    opt.FEATURE_GAUSSIAN_ITERATION = args.feature_iteration
-    opt.SCENE_GAUSSIAN_ITERATION = args.scene_iteration
-
-    opt.SCALE_GATE_PATH = os.path.join(opt.MODEL_PATH, f'point_cloud/iteration_{str(opt.FEATURE_GAUSSIAN_ITERATION)}/scale_gate.pt')
-    opt.FEATURE_PCD_PATH = os.path.join(opt.MODEL_PATH, f'point_cloud/iteration_{str(opt.FEATURE_GAUSSIAN_ITERATION)}/contrastive_feature_point_cloud.ply')
-    opt.SCENE_PCD_PATH = os.path.join(opt.MODEL_PATH, f'point_cloud/iteration_{str(opt.SCENE_GAUSSIAN_ITERATION)}/scene_point_cloud.ply')
-    opt.point_ins_labels_path = 'temp/tys/point_ins_labels.pth'
-    opt.langauge_features_path = 'temp/tys/langauge_features.pth'
+    opt.model_path = args.model_path
+    opt.source_path = args.source_path
+    opt.sh_degree = args.sh_degree
+    opt.feature_gaussian_iteration = args.feature_iteration
+    opt.scene_gaussian_iteration = args.scene_iteration
 
     gs_model = GaussianModel(opt.sh_degree)
-    feat_gs_model = FeatureGaussianModel(opt.FEATURE_DIM)
+    feat_gs_model = FeatureGaussianModel(opt.feature_dim)
     scale_gate = torch.nn.Sequential(
-        torch.nn.Linear(1, opt.FEATURE_DIM, bias=True),
+        torch.nn.Linear(1, opt.feature_dim, bias=True),
         torch.nn.Sigmoid()
     ).cuda()
     gui = GaussianSplattingGUI(opt, gs_model, feat_gs_model, scale_gate)
