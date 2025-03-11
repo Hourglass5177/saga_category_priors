@@ -147,7 +147,7 @@ if __name__ == '__main__':
             torch.full((3, 3), 1.0).view(1, 1, 3, 3),
             padding=1,
         )
-        eroded_masks = (eroded_masks >= 5).squeeze()  # (num_masks, H, W)
+        eroded_masks = (eroded_masks >= 5).squeeze(1)  # (num_masks, H, W)
 
         scale = torch.zeros(len(corresponding_masks))
         for mask_id in range(len(corresponding_masks)):
