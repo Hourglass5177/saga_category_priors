@@ -4,6 +4,9 @@
 [submodule "third_party/segment-anything"]
 	path = third_party/segment-anything
 	url = https://github.com/facebookresearch/segment-anything.git
+[submodule "third_party/GroundingDINO"]
+	path = submodules/GroundingDINO
+	url = https://github.com/IDEA-Research/GroundingDINO.git
 [submodule "submodules/torch_kdtree"]
 	path = submodules/torch_kdtree
 	url = git@github.com:moonite1209/torch_kdtree.git
