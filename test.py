@@ -53,7 +53,7 @@ def test_clip():
     device = 'cuda'
     def get_entity(image):
         # from segment_anything import (SamAutomaticMaskGenerator, SamPredictor, sam_model_registry)
-        # sam = sam_model_registry['vit_h'](checkpoint='./third_party/segment-anything/sam_ckpt/sam_vit_h_4b8939.pth').to(device)
+        # sam = sam_model_registry['vit_h'](checkpoint='./third_party/segment-anything/weights/sam_vit_h_4b8939.pth').to(device)
         # mask_generator = SamAutomaticMaskGenerator(
         #     model=sam,
         #     points_per_side=32,

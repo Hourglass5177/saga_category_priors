@@ -22,7 +22,7 @@ Then install the dependencies:
 conda env create --file environment.yml
 conda activate gaussian_splatting
 ```
-In default, we use the public ViT-H model for SAM. You can download the pre-trained model from [here](https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth) and put it under ./third_party/segment-anything/sam_ckpt.
+In default, we use the public ViT-H model for SAM. You can download the pre-trained model from [here](https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth) and put it under ./third_party/segment-anything/weights.
 
 ## Prepare Data
 

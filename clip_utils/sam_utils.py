@@ -256,7 +256,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--image_root', type=str, required=True)
     parser.add_argument('--downsample', type=int, default=1)
-    parser.add_argument('--sam_ckpt_path', type=str, default="/home/cenjiazhong/SegmentAnythingin3D/dependencies/sam_ckpt/sam_vit_h_4b8939.pth")
+    parser.add_argument('--sam_ckpt_path', type=str, default="/home/cenjiazhong/SegmentAnythingin3D/dependencies/weights/sam_vit_h_4b8939.pth")
     args = parser.parse_args()
     torch.set_default_dtype(torch.float32)
 

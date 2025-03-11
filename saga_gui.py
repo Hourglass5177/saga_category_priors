@@ -241,7 +241,7 @@ class GaussianSplattingGUI:
         #                                     os.path.join(self.opt.DATA_PATH, 'images'))
         # self.camera_list = cameraList_from_camInfos(self.cameras, 1, self.opt)
 
-        sam = sam_model_registry['vit_h']('./third_party/segment-anything/sam_ckpt/sam_vit_h_4b8939.pth').to('cuda')
+        sam = sam_model_registry['vit_h']('./third_party/segment-anything/weights/sam_vit_h_4b8939.pth').to('cuda')
         # self.mask_generator = SamAutomaticMaskGenerator(
         #     model=sam,
         #     points_per_side=32,

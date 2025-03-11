@@ -70,7 +70,7 @@ cfg.model_path = args.model_path
 cfg.data_path = args.data_path
 cfg.sh_degree = args.sh_degree
 
-sam = sam_model_registry['vit_h']('./third_party/segment-anything/sam_ckpt/sam_vit_h_4b8939.pth').to('cuda')
+sam = sam_model_registry['vit_h']('./third_party/segment-anything/weights/sam_vit_h_4b8939.pth').to('cuda')
 mask_predictor = SamPredictor(sam)
 clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch16").to('cuda')
 clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch16")
@@ -128,7 +128,7 @@ def filter3d(pos, label):
     new_label = []
     kdtree = KDTree(pos)
     for i,p in enumerate(pos):
-        d, index = kdtree.query(x=p, k=128)
+        d, index = kdtree.query(x=p, k=512)
         # assert i == index[0]
         # print(f'query index {index[1:]} for {index[0]}')
         # print(f'query label {label[index[1:]].tolist()} for {label[index[0]].tolist()}')
