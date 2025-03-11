@@ -21,8 +21,8 @@ def pth_to_json():
         json.dump(output,f)
 
 def sam_masks_rgb():
-    spath = 'data/temp/tys/sam_masks'
-    dpath = 'data/temp/tys/sam_masks_rgb'
+    spath = 'data/temp/282/sam_masks'
+    dpath = 'data/temp/282/sam_masks_rgb'
     os.makedirs(dpath, exist_ok=True)
     for masks_name in os.listdir(spath):
         print(os.path.join(spath, masks_name))
@@ -214,8 +214,8 @@ def test_dinov2():
     print(outputs['last_hidden_state'].shape)
 
 def main():
-    pth_to_json()
-    # sam_masks_rgb()
+    # pth_to_json()
+    sam_masks_rgb()
     # pick_image()
     # test_clip()
     # test_dinov2()
