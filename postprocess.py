@@ -128,7 +128,7 @@ def filter3d(pos, label):
     new_label = []
     kdtree = KDTree(pos)
     for i,p in enumerate(pos):
-        d, index = kdtree.query(x=p, k=10)
+        d, index = kdtree.query(x=p, k=128)
         # assert i == index[0]
         # print(f'query index {index[1:]} for {index[0]}')
         # print(f'query label {label[index[1:]].tolist()} for {label[index[0]].tolist()}')
