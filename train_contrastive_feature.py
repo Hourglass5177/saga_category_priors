@@ -292,13 +292,13 @@ def training(dataset, opt, pipe, iteration, saving_iterations, checkpoint_iterat
         sampled_mask_negative = sampled_mask_negative.bool()
 
         per_pixel_weight = per_pixel_weight.unsqueeze(0)
-        loss = (- per_pixel_weight[:, sampled_mask_positive] * gt_corrs[:, sampled_mask_positive] * corr[:, sampled_mask_positive]).mean() \
-                + (per_pixel_weight[:, sampled_mask_negative] * (1 - gt_corrs[:, sampled_mask_negative]) * torch.relu(corr[:, sampled_mask_negative])).mean() \
+        loss = (- per_pixel_weight[:, sampled_mask_positive] * gt_corrs[:, sampled_mask_positive] * corr[:, sampled_mask_positive]).mean().nan_to_num() \
+                + (per_pixel_weight[:, sampled_mask_negative] * (1 - gt_corrs[:, sampled_mask_negative]) * torch.relu(corr[:, sampled_mask_negative])).mean().nan_to_num() \
                 + opt.rfn * rendered_feature_norm_reg
 
         with torch.no_grad():
-            cosine_pos = corr[gt_corrs == 1].mean()
-            cosine_neg = corr[gt_corrs == 0].mean()
+            cosine_pos = corr[gt_corrs == 1].mean().nan_to_num()
+            cosine_neg = corr[gt_corrs == 0].mean().nan_to_num()
 
         loss.backward()
 
