@@ -120,7 +120,7 @@ if __name__ == '__main__':
 
         # plt.imshow(depth.detach().cpu().squeeze().numpy())
         # corresponding_masks = torch.load(os.path.join(dataset.source_path, 'sam_masks', f'{view.image_name}.pt')).cpu().float()
-        corresponding_masks = view.original_masks
+        corresponding_masks = view.original_masks.cpu()
         if corresponding_masks == None:
             continue
         else:
@@ -149,7 +149,7 @@ if __name__ == '__main__':
 
         eroded_masks = torch.conv2d(
             upsampled_mask.float(),
-            torch.full((3, 3), 1.0).view(1, 1, 3, 3),
+            torch.full((3, 3), 1.0).view(1, 1, 3, 3).to(upsampled_mask.device),
             padding=1,
         )
         eroded_masks = (eroded_masks >= 5).squeeze(1)  # (num_masks, H, W)

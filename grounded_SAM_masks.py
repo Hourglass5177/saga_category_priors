@@ -10,6 +10,7 @@ from segment_anything import (SamAutomaticMaskGenerator, SamPredictor,
                               sam_model_registry)
 from groundingdino.util.inference import Model
 import supervision as sv
+import pickle
 
 if __name__ == '__main__':
     
@@ -49,6 +50,8 @@ if __name__ == '__main__':
     assert os.path.exists(images_path) and "Please specify a valid image root"
     masks_path = os.path.join(args.source_path, 'sam_masks')
     os.makedirs(masks_path, exist_ok=True)
+    detections_path = os.path.join(args.source_path, 'detections')
+    os.makedirs(detections_path, exist_ok=True)
     rgb_masks_path = os.path.join(args.source_path, 'rgb_masks')
     os.makedirs(rgb_masks_path, exist_ok=True)
     
@@ -91,6 +94,8 @@ if __name__ == '__main__':
             image=cv2.cvtColor(image, cv2.COLOR_BGR2RGB),
             xyxy=detections.xyxy
         )
+        with open(os.path.join(detections_path, f'{os.path.splitext(os.path.basename(image_name))[0]}.pkl'), "wb") as file:
+            pickle.dump(detections, file)
 
         mask_list=[]
         background = torch.ones(image.shape[:2], dtype=torch.bool)

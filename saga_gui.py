@@ -459,21 +459,21 @@ class GaussianSplattingGUI:
             dpg.add_button(label="reshuffle_cluster_color", callback=callback_reshuffle_color, user_data="Some Data")
             dpg.add_button(label="reload_data", callback=callback_reload, user_data="Some Data")
 
-            def callback(sender, app_data, user_data):
-                self.load_model = False
-                file_data = app_data["selections"]
-                file_names = []
-                for key in file_data.keys():
-                    file_names.append(key)
+            # def callback(sender, app_data, user_data):
+            #     self.load_model = False
+            #     file_data = app_data["selections"]
+            #     file_names = []
+            #     for key in file_data.keys():
+            #         file_names.append(key)
 
-                self.opt.ply_file = file_data[file_names[0]]
+            #     self.opt.ply_file = file_data[file_names[0]]
 
-                # if not self.load_model:
-                print("loading model file...")
-                self.engine.load_ply(self.opt.ply_file)
-                self.do_pca()   # calculate new self.proj_mat after loading new .ply file
-                print("loading model file done.")
-                self.load_model = True
+            #     # if not self.load_model:
+            #     print("loading model file...")
+            #     self.engine.load_ply(self.opt.ply_file)
+            #     self.do_pca()   # calculate new self.proj_mat after loading new .ply file
+            #     print("loading model file done.")
+            #     self.load_model = True
 
         if self.debug:
             with dpg.collapsing_header(label="Debug"):
@@ -799,7 +799,7 @@ class GaussianSplattingGUI:
         H, W, C = sems.shape
         sems /= (torch.norm(sems, dim=-1, keepdim=True) + 1e-6)
         sem_transed = torch.from_numpy(self.proj_mat.transform(sems.flatten(0,1).detach().cpu())).cuda().reshape(H,W,-1)
-        sem_transed_rgb = torch.clip(sem_transed*0.5+0.5, 0, 1)
+        sem_transed_rgb = torch.clip(sem_transed*0.5+0.5, 0, 1).float()
 
         scale = dpg.get_value('_Scale')
         self.gates = self.engine['scale_gate'](torch.tensor([scale]).cuda())
