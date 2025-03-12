@@ -177,10 +177,12 @@ def training(dataset, opt, pipe, iteration, saving_iterations, checkpoint_iterat
 
             second_big_scale = mask_scales[mask_scales < upper_bound_scale].max()
 
-            ray_sample_rate = opt.ray_sample_rate if opt.ray_sample_rate > 0 else opt.num_sampled_rays / (sam_masks.shape[-1] * sam_masks.shape[-2])
-
-            sampled_ray = torch.rand(sam_masks.shape[-2], sam_masks.shape[-1]).cuda() < ray_sample_rate
             non_mask_region = sam_masks.sum(dim = 0) == 0
+            ray_sample_rate = opt.ray_sample_rate if opt.ray_sample_rate > 0 else torch.clamp(opt.num_sampled_rays / (~non_mask_region).sum(), 0, 1)
+
+            sampled_ray = torch.rand(sam_masks.shape[-2], sam_masks.shape[-1]).cuda()
+            sampled_ray[non_mask_region] = 1e9
+            sampled_ray = sampled_ray < ray_sample_rate
 
             sampled_ray = torch.logical_and(sampled_ray, ~non_mask_region) # sampled pixel mask
 
