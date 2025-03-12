@@ -120,11 +120,11 @@ if __name__ == '__main__':
 
         # plt.imshow(depth.detach().cpu().squeeze().numpy())
         # corresponding_masks = torch.load(os.path.join(dataset.source_path, 'sam_masks', f'{view.image_name}.pt')).cpu().float()
-        corresponding_masks = view.original_masks.cpu()
+        corresponding_masks = view.original_masks
         if corresponding_masks == None:
             continue
         else:
-            corresponding_masks = corresponding_masks.float()
+            corresponding_masks = corresponding_masks.cpu().float()
 
         # generate_grid_index(depth.squeeze())[50, 1]
 
