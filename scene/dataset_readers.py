@@ -105,18 +105,27 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder, features_fo
         else:
             assert False, f"Colmap camera model {intr.model} not handled: only undistorted datasets (PINHOLE or SIMPLE_PINHOLE cameras) supported!"
 
-        image_path = os.path.join(images_folder, os.path.basename(extr.name))
-        if os.path.exists(image_path):
-            image_name = os.path.splitext(os.path.basename(image_path))[0]
-            image = Image.open(image_path)
+        image_name_noext = os.path.splitext(extr.name)[0]
+        
+        image = Image.open(os.path.join(images_folder, extr.name)) \
+            if images_folder!=None and os.path.exists(os.path.join(images_folder, extr.name)) \
+                else None
 
-            features = torch.load(os.path.join(features_folder, image_name + ".pt")) if features_folder is not None else None
-            masks = torch.load(os.path.join(masks_folder, image_name + ".pt")).detach().cpu() if masks_folder is not None else None
-            mask_scales = torch.load(os.path.join(mask_scale_folder, image_name + ".pt")) if mask_scale_folder is not None else None
+        features = torch.load(os.path.join(features_folder, image_name_noext + ".pt")) \
+            if features_folder!=None and os.path.exists(os.path.join(features_folder, image_name_noext + ".pt")) \
+                else None
+        
+        masks = torch.load(os.path.join(masks_folder, image_name_noext + ".pt")) \
+            if masks_folder!=None and os.path.exists(os.path.join(masks_folder, image_name_noext + ".pt")) \
+                else None
 
-            cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image, features=features, masks=masks, mask_scales = mask_scales,
-                                image_path=image_path, image_name=image_name, width=width, height=height, cx=intr.params[2] if len(intr.params) > 3 and allow_principle_point_shift else None, cy=intr.params[3] if len(intr.params) >3 and allow_principle_point_shift else None)
-            cam_infos.append(cam_info)
+        mask_scales = torch.load(os.path.join(mask_scale_folder, image_name_noext + ".pt")) \
+            if mask_scale_folder!=None and os.path.exists(os.path.join(mask_scale_folder, image_name_noext + ".pt")) \
+                else None
+
+        cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image, features=features, masks=masks, mask_scales = mask_scales,
+                            image_path=os.path.join(images_folder, extr.name), image_name=image_name_noext, width=width, height=height, cx=intr.params[2] if len(intr.params) > 3 and allow_principle_point_shift else None, cy=intr.params[3] if len(intr.params) >3 and allow_principle_point_shift else None)
+        cam_infos.append(cam_info)
     sys.stdout.write('\n')
     return cam_infos
 

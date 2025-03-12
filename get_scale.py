@@ -79,7 +79,7 @@ if __name__ == '__main__':
 
     dataset = model.extract(args)
     dataset.need_features = False
-    dataset.need_masks = False
+    dataset.need_masks = True
 
     # ALLOW_PRINCIPLE_POINT_SHIFT = 'lerf' in args.model_path
     dataset.allow_principle_point_shift = ALLOW_PRINCIPLE_POINT_SHIFT
@@ -119,7 +119,12 @@ if __name__ == '__main__':
         depth = rendered_pkg['depth'] # pixel-wise
 
         # plt.imshow(depth.detach().cpu().squeeze().numpy())
-        corresponding_masks = torch.load(os.path.join(dataset.source_path, 'sam_masks', f'{view.image_name}.pt')).cpu().float()
+        # corresponding_masks = torch.load(os.path.join(dataset.source_path, 'sam_masks', f'{view.image_name}.pt')).cpu().float()
+        corresponding_masks = view.original_masks
+        if corresponding_masks == None:
+            continue
+        else:
+            corresponding_masks = corresponding_masks.float()
 
         # generate_grid_index(depth.squeeze())[50, 1]
 

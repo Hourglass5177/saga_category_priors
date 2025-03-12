@@ -109,7 +109,8 @@ def training(dataset, opt, pipe, iteration, saving_iterations, checkpoint_iterat
     # gather scales
     all_scales = []
     for cam in scene.getTrainCameras():
-        all_scales.append(cam.mask_scales)
+        if cam.mask_scales!=None:
+            all_scales.append(cam.mask_scales)
     all_scales = torch.cat(all_scales)
 
     upper_bound_scale = all_scales.max().item()
@@ -141,7 +142,8 @@ def training(dataset, opt, pipe, iteration, saving_iterations, checkpoint_iterat
             viewpoint_cam = viewpoint_stack[0]
         else:
             viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
-        
+        while viewpoint_cam.original_masks==None:
+            viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
         with torch.no_grad():
             # N_mask, H, W
             sam_masks = viewpoint_cam.original_masks.cuda().float()
@@ -188,7 +190,7 @@ def training(dataset, opt, pipe, iteration, saving_iterations, checkpoint_iterat
             ptp_max_size = pixel_to_pixel_mask_size.max()
             pixel_to_pixel_mask_size[pixel_to_pixel_mask_size == 0] = 1e10
             per_pixel_weight = torch.clamp(ptp_max_size / pixel_to_pixel_mask_size, 1.0, None)
-            per_pixel_weight = (per_pixel_weight - per_pixel_weight.min()) / (per_pixel_weight.max() - per_pixel_weight.min()) * 9. + 1. # pixel的平均mask size越大其权重越小, float[sampled pixels, sampled pixels]
+            per_pixel_weight = (per_pixel_weight - per_pixel_weight.min()) / (per_pixel_weight.max() - per_pixel_weight.min() + 1e-9) * 9. + 1. # pixel的平均mask size越大其权重越小, float[sampled pixels, sampled pixels]
             
             sam_masks_sampled_ray = sam_masks[:, sampled_ray]
 

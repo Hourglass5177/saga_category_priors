@@ -106,7 +106,9 @@ if __name__ == '__main__':
             mask_score = mask_score.bool()
             background = background & ~mask_score
             mask_list.append(mask_score)
-        mask_list.append(background)
+        # mask_list.append(background)
+        if len(mask_list)==0:
+            continue
         masks = torch.stack(mask_list, dim=0)
 
         torch.save(masks, os.path.join(masks_path, f'{os.path.splitext(os.path.basename(image_name))[0]}.pt')) # bool[masks, h, w]
