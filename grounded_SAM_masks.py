@@ -70,6 +70,7 @@ if __name__ == '__main__':
         return np.array(result_masks)
     for image_name in tqdm(sorted(os.listdir(images_path))):
         image = cv2.imread(os.path.join(images_path, image_name))
+        image = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
         if downsample_manually:
             image = cv2.resize(image,dsize=(image.shape[1] // args.downsample, image.shape[0] // args.downsample),fx=1,fy=1,interpolation=cv2.INTER_LINEAR)
         detections = grounding_dino_model.predict_with_classes(
@@ -112,11 +113,10 @@ if __name__ == '__main__':
             background = background & ~mask_score
             mask_list.append(mask_score)
         # mask_list.append(background)
-        if len(mask_list)==0:
-            continue
-        masks = torch.stack(mask_list, dim=0)
+        if len(mask_list)!=0:
+            masks = torch.stack(mask_list, dim=0)
+            torch.save(masks.permute(0, 2, 1).flip(2), os.path.join(masks_path, f'{os.path.splitext(os.path.basename(image_name))[0]}.pt')) # bool[masks, h, w]
 
-        torch.save(masks, os.path.join(masks_path, f'{os.path.splitext(os.path.basename(image_name))[0]}.pt')) # bool[masks, h, w]
 
         box_annotator = sv.BoxAnnotator()
         mask_annotator = sv.MaskAnnotator()
@@ -128,4 +128,4 @@ if __name__ == '__main__':
         annotated_image = mask_annotator.annotate(scene=image.copy(), detections=detections)
         annotated_image = box_annotator.annotate(scene=annotated_image, detections=detections)
         annotated_image = label_annotator.annotate(scene=annotated_image, detections=detections, labels=labels)
-        cv2.imwrite(os.path.join(rgb_masks_path, f'{os.path.splitext(os.path.basename(image_name))[0]}.jpg'), annotated_image)
+        cv2.imwrite(os.path.join(rgb_masks_path, f'{os.path.splitext(os.path.basename(image_name))[0]}.jpg'), cv2.rotate(annotated_image, cv2.ROTATE_90_COUNTERCLOCKWISE))

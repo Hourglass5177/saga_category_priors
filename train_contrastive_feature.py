@@ -152,7 +152,7 @@ def training(dataset, opt, pipe, iteration, saving_iterations, checkpoint_iterat
                 viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
         with torch.no_grad():
             # N_mask, H, W
-            sam_masks = viewpoint_cam.original_masks.cuda().float()
+            sam_masks = viewpoint_cam.original_masks.cuda().float() # float[masks, h, w]
             viewpoint_cam.feature_height, viewpoint_cam.feature_width = viewpoint_cam.image_height, viewpoint_cam.image_width
 
             # N_mask
@@ -246,7 +246,7 @@ def training(dataset, opt, pipe, iteration, saving_iterations, checkpoint_iterat
 
         rendered_features = torch.nn.functional.interpolate(rendered_features.unsqueeze(0), viewpoint_cam.original_masks.shape[-2:], mode='bilinear').squeeze(0)
 
-        # float[sampled_scales, 32]
+        # float[sampled_scales, 32] gates
         if scale_aware_dim <= 0 or scale_aware_dim >= 32:
             gates = scale_gate(sampled_scales.unsqueeze(-1))
         else:
