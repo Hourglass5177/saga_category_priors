@@ -143,7 +143,13 @@ def training(dataset, opt, pipe, iteration, saving_iterations, checkpoint_iterat
         else:
             viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
         while viewpoint_cam.original_masks==None:
-            viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
+            if not viewpoint_stack:
+                viewpoint_stack = scene.getTrainCameras().copy()
+            
+            if iteration < -1:
+                viewpoint_cam = viewpoint_stack[0]
+            else:
+                viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
         with torch.no_grad():
             # N_mask, H, W
             sam_masks = viewpoint_cam.original_masks.cuda().float()
