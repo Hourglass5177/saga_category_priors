@@ -24,7 +24,7 @@ if __name__ == '__main__':
     parser.add_argument("--groundingdino_config_path", default='third_party/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py', type=str)
     parser.add_argument("--downsample", default=1, type=int)
     parser.add_argument("--downsample_type", default='image', type=str, choices=['image', 'mask'], help="Downsample then segment, or segment then downsample.")
-    parser.add_argument('--classes', nargs='+', type=str, default=['chair', 'table', 'plant'])
+    parser.add_argument('--classes', nargs='+', type=str, default=['chair', 'table', 'plant', 'object', 'wall', 'ground', 'light', 'person', 'door', 'window'])
     parser.add_argument('--box_threshold', type=float, default=0.35)
     parser.add_argument('--text_threshold', type=float, default=0.35)
     parser.add_argument('--nms_threshold', type=float, default=0.8)
