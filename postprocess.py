@@ -64,6 +64,7 @@ parser = ArgumentParser(description="Training script parameters")
 parser.add_argument("--data_path", '-s', type=str, required=True)
 parser.add_argument("--model_path", '-m', type=str, required=True)
 parser.add_argument("--sh_degree", type=int, default=3)
+parser.add_argument("--k", type=int, default=512)
 parser.add_argument("--pos_texts", nargs="+", type=str, default=['plant', 'chair', 'table', 'object'])
 args = parser.parse_args(sys.argv[1:])
 cfg.model_path = args.model_path
@@ -128,7 +129,7 @@ def filter3d(pos, label):
     new_label = []
     kdtree = KDTree(pos)
     for i,p in enumerate(pos):
-        d, index = kdtree.query(x=p, k=512)
+        d, index = kdtree.query(x=p, k=args.k)
         # assert i == index[0]
         # print(f'query index {index[1:]} for {index[0]}')
         # print(f'query label {label[index[1:]].tolist()} for {label[index[0]].tolist()}')
@@ -146,7 +147,8 @@ def filter3d(pos, label):
     print('finish filter3d')
     return torch.tensor(new_label).cuda()
 start_time = datetime.now()
-point_labels = filter3d(point_xyz, point_labels)
+if args.k>0:
+    point_labels = filter3d(point_xyz, point_labels)
 end_time = datetime.now()
 elapsed_time = end_time - start_time
 print(f'{elapsed_time=}') # 89, pytorch3d.ops.knn_points=49
