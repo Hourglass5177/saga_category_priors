@@ -285,6 +285,7 @@ class GaussianSplattingGUI:
 
         if opt.point_labels_path:
             self.point_labels = torch.load(opt.point_labels_path)
+            self.label = torch.unique(self.point_labels).tolist()[0]
         if opt.langauge_features_path:
             self.langauge_features = torch.load(opt.langauge_features_path)
 
@@ -397,12 +398,12 @@ class GaussianSplattingGUI:
         def callback_cluster():
             self.cluster_in_3D_flag =True
         def callback_label(sender, app_data, user_data):
-            self.label = (self.label+user_data)%len(torch.unique(self.point_labels))
-            langauge_feature = self.langauge_features[self.label, ...]
-            sims = get_relevancy(langauge_feature, self.pembed, self.nembed)
-            sims, _ = torch.max(sims, dim=1)
-            _, index = torch.max(sims, dim=0)
-            dpg.set_value('label', f'{self.label}:{self.json['instance'][str(index.item())]}')
+            self.label = torch.unique(self.point_labels).tolist()[(torch.unique(self.point_labels).tolist().index(self.label)+user_data)%len(torch.unique(self.point_labels))]
+            # langauge_feature = self.langauge_features[self.label, ...]
+            # sims = get_relevancy(langauge_feature, self.pembed, self.nembed)
+            # sims, _ = torch.max(sims, dim=1)
+            # _, index = torch.max(sims, dim=0)
+            dpg.set_value('label', f'{self.label}:{self.json['instances'][str(self.label)]}')
         def callback_reshuffle_color():
             self.label_to_color = np.random.rand(1000, 3)
             try:
