@@ -221,7 +221,7 @@ for label in tqdm(list(range(0, len(np.unique(cluster_labels)))), desc='get lang
     features = []
     for i, camera in enumerate(camera_list):
         render_pkg = render(camera, gs_model, cfg, cfg.bg_color, filtered_mask=~(point_labels==label))
-        if torch.logical_and(render_pkg['visibility_filter'], (point_labels==label)).sum()/(point_labels==label).sum() > 0.9: # valid camera
+        if torch.logical_and(render_pkg['visibility_filter'].to(point_labels.device), (point_labels==label)).sum()/(point_labels==label).sum() > 0.9: # valid camera
             render_image = render_pkg['render']
             original_image = camera.original_image.to('cuda')
             prompt_mask = (render_image!=0).any(dim=0)
