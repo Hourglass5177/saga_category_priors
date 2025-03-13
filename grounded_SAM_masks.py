@@ -115,7 +115,7 @@ if __name__ == '__main__':
         mask_list.append(background)
         if len(mask_list)!=0:
             masks = torch.stack(mask_list, dim=0)
-            torch.save(masks.permute(0, 2, 1).flip(2), os.path.join(masks_path, f'{os.path.splitext(os.path.basename(image_name))[0]}.pt')) # bool[masks, h, w]
+            torch.save(masks.permute(0, 2, 1).flip(1), os.path.join(masks_path, f'{os.path.splitext(os.path.basename(image_name))[0]}.pt')) # bool[masks, h, w]
 
 
         box_annotator = sv.BoxAnnotator()
