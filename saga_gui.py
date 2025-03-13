@@ -90,7 +90,7 @@ class CONFIG:
     @property
     def json_path(self):
         return os.path.join(self.model_path, 'output.json')
-    pos_texts = ['plant', 'chair', 'table', 'object']
+    pos_texts = ['chair', 'table', 'plant', 'wall', 'floor', 'ceiling', 'person']
     neg_texts = ["object", "things", "stuff", "texture"]
 
 
@@ -402,7 +402,7 @@ class GaussianSplattingGUI:
             sims = get_relevancy(langauge_feature, self.pembed, self.nembed)
             sims, _ = torch.max(sims, dim=1)
             _, index = torch.max(sims, dim=0)
-            dpg.set_value('label', f'{self.label}:{self.opt.pos_texts[index.item()]}')
+            dpg.set_value('label', f'{self.label}:{self.json['instance'][str(index.item())]}')
         def callback_reshuffle_color():
             self.label_to_color = np.random.rand(1000, 3)
             try:
@@ -658,8 +658,8 @@ class GaussianSplattingGUI:
         # self.cluster_point_colors = self.label_to_color[self.point_ins_labels.detach().cpu().numpy()]
         import json
         with open(self.opt.json_path, 'r') as f:
-            j = json.load(f)
-        self.cluster_point_colors = self.label_to_color[np.array(j['point_labels'])]
+            self.json = json.load(f)
+        self.cluster_point_colors = self.label_to_color[np.array(self.json['point_labels'])]
         # self.cluster_point_colors[self.seg_score.max(dim = -1)[0].detach().cpu().numpy() < 0.5] = (0,0,0)
 
         # extract langauge features

@@ -14,7 +14,7 @@ import pickle
 
 if __name__ == '__main__':
     
-    parser = ArgumentParser(description="SAM segment everything masks extracting params")
+    parser = ArgumentParser(description="SAM masks extracting params")
     
     parser.add_argument("--source_path", '-s', type=str, required=True)
     parser.add_argument('--images', type=str, default='images')
@@ -24,7 +24,7 @@ if __name__ == '__main__':
     parser.add_argument("--groundingdino_config_path", default='third_party/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py', type=str)
     parser.add_argument("--downsample", default=1, type=int)
     parser.add_argument("--downsample_type", default='image', type=str, choices=['image', 'mask'], help="Downsample then segment, or segment then downsample.")
-    parser.add_argument('--classes', nargs='+', type=str, default=['chair', 'table', 'plant', 'object', 'wall', 'ground', 'light', 'person', 'door', 'window'])
+    parser.add_argument('--classes', nargs='+', type=str, default=['chair', 'table', 'plant', 'wall', 'floor', 'ceiling', 'person'])
     parser.add_argument('--box_threshold', type=float, default=0.35)
     parser.add_argument('--text_threshold', type=float, default=0.35)
     parser.add_argument('--nms_threshold', type=float, default=0.8)
@@ -50,6 +50,8 @@ if __name__ == '__main__':
     assert os.path.exists(images_path) and "Please specify a valid image root"
     masks_path = os.path.join(args.source_path, 'sam_masks')
     os.makedirs(masks_path, exist_ok=True)
+    labels_path = os.path.join(args.source_path, 'labels')
+    os.makedirs(labels_path, exist_ok=True)
     detections_path = os.path.join(args.source_path, 'detections')
     os.makedirs(detections_path, exist_ok=True)
     rgb_masks_path = os.path.join(args.source_path, 'rgb_masks')
@@ -68,17 +70,37 @@ if __name__ == '__main__':
             index = np.argmax(scores)
             result_masks.append(masks[index])
         return np.array(result_masks)
+    def rotate_detections_90_ccw(detections, image_width, image_height):
+        # 提取原始检测框坐标
+        x1, y1, x2, y2 = detections.xyxy.T
+
+        # 计算旋转后的坐标
+        new_x1 = y1
+        new_y1 = image_width - x2
+        new_x2 = y2
+        new_y2 = image_width - x1
+
+        # 更新检测框坐标
+        rotated_boxes = np.stack([new_x1, new_y1, new_x2, new_y2], axis=1)
+        detections.xyxy = rotated_boxes
+
+        return detections
     for image_name in tqdm(sorted(os.listdir(images_path))):
         image = cv2.imread(os.path.join(images_path, image_name))
-        image = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+        rotated_image = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
         if downsample_manually:
-            image = cv2.resize(image,dsize=(image.shape[1] // args.downsample, image.shape[0] // args.downsample),fx=1,fy=1,interpolation=cv2.INTER_LINEAR)
+            rotated_image = cv2.resize(rotated_image,dsize=(rotated_image.shape[1] // args.downsample, rotated_image.shape[0] // args.downsample),fx=1,fy=1,interpolation=cv2.INTER_LINEAR)
         detections = grounding_dino_model.predict_with_classes(
-            image=image,
+            image=rotated_image,
             classes=args.classes,
             box_threshold=args.box_threshold,
             text_threshold=args.text_threshold
         )
+        # detections.metadata.update({
+        #     'label_to_class': dict(enumerate(args.classes)),
+        #     'downsample': args.downsample,
+        #     'image_height': image.shape[0],
+        #     'image_width': image.shape[1]})
         # NMS post process
         nms_idx = torchvision.ops.nms(
             torch.from_numpy(detections.xyxy), 
@@ -92,30 +114,31 @@ if __name__ == '__main__':
         # convert detections to masks
         detections.mask = segment(
             sam_predictor=sam_predictor,
-            image=cv2.cvtColor(image, cv2.COLOR_BGR2RGB),
+            image=cv2.cvtColor(rotated_image, cv2.COLOR_BGR2RGB),
             xyxy=detections.xyxy
         )
         with open(os.path.join(detections_path, f'{os.path.splitext(os.path.basename(image_name))[0]}.pkl'), "wb") as file:
             pickle.dump(detections, file)
 
         mask_list=[]
-        background = torch.ones(image.shape[:2], dtype=torch.bool)
-        if args.downsample_type == 'mask':
-            background = torch.ones((image.shape[0] // args.downsample, image.shape[1] // args.downsample), dtype=torch.bool)
+        # background = torch.ones(image.shape[:2], dtype=torch.bool)
+        # if args.downsample_type == 'mask':
+        #     background = torch.ones((image.shape[0] // args.downsample, image.shape[1] // args.downsample), dtype=torch.bool)
         for mask in detections.mask:
             mask_score = torch.from_numpy(mask).float()
 
             if args.downsample_type == 'mask':
-                mask_score = torch.nn.functional.interpolate(mask_score[None, None, ...], size=(image.shape[0] // args.downsample, image.shape[1] // args.downsample) , mode='bilinear', align_corners=False).squeeze()
+                mask_score = torch.nn.functional.interpolate(mask_score[None, None, ...], size=(rotated_image.shape[0] // args.downsample, rotated_image.shape[1] // args.downsample) , mode='bilinear', align_corners=False).squeeze()
                 mask_score[mask_score >= 0.5] = 1
                 mask_score[mask_score != 1] = 0
             mask_score = mask_score.bool()
-            background = background & ~mask_score
+            # background = background & ~mask_score
             mask_list.append(mask_score)
-        mask_list.append(background)
+        # mask_list.append(background)
         if len(mask_list)!=0:
             masks = torch.stack(mask_list, dim=0)
             torch.save(masks.permute(0, 2, 1).flip(1), os.path.join(masks_path, f'{os.path.splitext(os.path.basename(image_name))[0]}.pt')) # bool[masks, h, w]
+            torch.save(torch.from_numpy(detections.class_id), os.path.join(labels_path, f'{os.path.splitext(os.path.basename(image_name))[0]}.pt')) # int[masks]
 
 
         box_annotator = sv.BoxAnnotator()
@@ -125,7 +148,7 @@ if __name__ == '__main__':
             f"{args.classes[class_id]} {confidence:0.2f}" 
             for _, _, confidence, class_id, _, _ 
             in detections]
-        annotated_image = mask_annotator.annotate(scene=image.copy(), detections=detections)
+        annotated_image = mask_annotator.annotate(scene=rotated_image.copy(), detections=detections)
         annotated_image = box_annotator.annotate(scene=annotated_image, detections=detections)
         annotated_image = label_annotator.annotate(scene=annotated_image, detections=detections, labels=labels)
         cv2.imwrite(os.path.join(rgb_masks_path, f'{os.path.splitext(os.path.basename(image_name))[0]}.jpg'), cv2.rotate(annotated_image, cv2.ROTATE_90_COUNTERCLOCKWISE))
