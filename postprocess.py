@@ -165,8 +165,8 @@ for i, camera in enumerate(camera_list):
     masks = masks.bool()
     labels = torch.load(os.path.join(cfg.source_path, 'labels', f'{camera.image_name}.pt'))
     render_pkg = render_with_max_contributor(camera, gs_model, cfg, cfg.bg_color)
-    max_contributor = render_pkg['max_contributor']
-    max_contribute = render_pkg['max_contribute']
+    max_contributor = render_pkg['max_contributor'].to(point_labels.device)
+    max_contribute = render_pkg['max_contribute'].to(point_labels.device)
     max_instance_contributor = point_labels[max_contributor]
     background_label = len(args.classes)
     background = torch.ones_like(masks[0])
