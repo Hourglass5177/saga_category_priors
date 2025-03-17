@@ -241,31 +241,31 @@ class GaussianSplattingGUI:
         #                                     os.path.join(self.opt.DATA_PATH, 'images'))
         # self.camera_list = cameraList_from_camInfos(self.cameras, 1, self.opt)
 
-        sam = sam_model_registry['vit_h']('./third_party/segment-anything/weights/sam_vit_h_4b8939.pth').to('cuda')
-        # self.mask_generator = SamAutomaticMaskGenerator(
-        #     model=sam,
-        #     points_per_side=32,
-        #     pred_iou_thresh=0.88,
-        #     box_nms_thresh=0.7,
-        #     stability_score_thresh=0.95,
-        #     crop_n_layers=0,
-        #     crop_n_points_downscale_factor=1,
-        #     min_mask_region_area=100,
-        # )
-        self.mask_predictor = SamPredictor(sam)
+        # sam = sam_model_registry['vit_h']('./third_party/segment-anything/weights/sam_vit_h_4b8939.pth').to('cuda')
+        # # self.mask_generator = SamAutomaticMaskGenerator(
+        # #     model=sam,
+        # #     points_per_side=32,
+        # #     pred_iou_thresh=0.88,
+        # #     box_nms_thresh=0.7,
+        # #     stability_score_thresh=0.95,
+        # #     crop_n_layers=0,
+        # #     crop_n_points_downscale_factor=1,
+        # #     min_mask_region_area=100,
+        # # )
+        # self.mask_predictor = SamPredictor(sam)
         
-        self.clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch16").to('cuda')
-        self.clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch16")
-        self.nembed = self.clip_processor(text=self.opt.neg_texts, return_tensors='pt', padding=True)
-        self.nembed = self.nembed.to(self.clip_model.device)
-        self.nembed = self.clip_model.get_text_features(**self.nembed)
-        self.nembed = F.normalize(self.nembed, dim=-1)
-        self.nembed = self.nembed.detach().cpu()
-        self.pembed = self.clip_processor(text=self.opt.pos_texts, return_tensors='pt', padding=True)
-        self.pembed = self.pembed.to(self.clip_model.device)
-        self.pembed = self.clip_model.get_text_features(**self.pembed)
-        self.pembed = F.normalize(self.pembed, dim=-1)
-        self.pembed = self.pembed.detach().cpu()
+        # self.clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch16").to('cuda')
+        # self.clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch16")
+        # self.nembed = self.clip_processor(text=self.opt.neg_texts, return_tensors='pt', padding=True)
+        # self.nembed = self.nembed.to(self.clip_model.device)
+        # self.nembed = self.clip_model.get_text_features(**self.nembed)
+        # self.nembed = F.normalize(self.nembed, dim=-1)
+        # self.nembed = self.nembed.detach().cpu()
+        # self.pembed = self.clip_processor(text=self.opt.pos_texts, return_tensors='pt', padding=True)
+        # self.pembed = self.pembed.to(self.clip_model.device)
+        # self.pembed = self.clip_model.get_text_features(**self.pembed)
+        # self.pembed = F.normalize(self.pembed, dim=-1)
+        # self.pembed = self.pembed.detach().cpu()
 
         self.cluster_point_colors = None
         self.label_to_color = np.random.rand(1000, 3)
@@ -286,8 +286,8 @@ class GaussianSplattingGUI:
         if opt.point_labels_path:
             self.point_labels = torch.load(opt.point_labels_path)
             self.label = torch.unique(self.point_labels).tolist()[0]
-        if opt.langauge_features_path:
-            self.langauge_features = torch.load(opt.langauge_features_path)
+        # if opt.langauge_features_path:
+        #     self.langauge_features = torch.load(opt.langauge_features_path)
 
         self.mode = "image"  # choose from ['image', 'depth']
 
@@ -397,7 +397,7 @@ class GaussianSplattingGUI:
             self.reload_flag = True
         def callback_cluster():
             self.cluster_in_3D_flag =True
-        def callback_label(sender, app_data, user_data):
+        def callback_label_change(sender, app_data, user_data):
             self.label = torch.unique(self.point_labels).tolist()[(torch.unique(self.point_labels).tolist().index(self.label)+user_data)%len(torch.unique(self.point_labels))]
             # langauge_feature = self.langauge_features[self.label, ...]
             # sims = get_relevancy(langauge_feature, self.pembed, self.nembed)
@@ -455,8 +455,8 @@ class GaussianSplattingGUI:
 
             dpg.add_button(label="cluster3d", callback=callback_cluster, user_data="Some Data")
             dpg.add_input_text(label='label', tag='label')
-            dpg.add_button(label="prev", callback=callback_label, user_data=-1)
-            dpg.add_button(label="next", callback=callback_label, user_data=1)
+            dpg.add_button(label="prev", callback=callback_label_change, user_data=-1)
+            dpg.add_button(label="next", callback=callback_label_change, user_data=1)
             dpg.add_button(label="reshuffle_cluster_color", callback=callback_reshuffle_color, user_data="Some Data")
             dpg.add_button(label="reload_data", callback=callback_reload, user_data="Some Data")
 
@@ -661,6 +661,7 @@ class GaussianSplattingGUI:
         with open(self.opt.json_path, 'r') as f:
             self.json = json.load(f)
         self.cluster_point_colors = self.label_to_color[np.array(self.json['point_labels'])]
+        self.point_labels = torch.tensor(self.json['point_labels'])
         # self.cluster_point_colors[self.seg_score.max(dim = -1)[0].detach().cpu().numpy() < 0.5] = (0,0,0)
 
         # extract langauge features
@@ -748,7 +749,7 @@ class GaussianSplattingGUI:
         #     self.langauge_features.append(torch.concat(features, dim=0))
         # self.langauge_features = torch.stack(self.langauge_features, dim=0)
         # torch.save(self.langauge_features, f'{self.opt.langauge_features_path}')
-        self.langauge_features = torch.load(f'{self.opt.langauge_features_path}')
+        # self.langauge_features = torch.load(f'{self.opt.langauge_features_path}')
 
 
     def pca(self, X, n_components=3):

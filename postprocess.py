@@ -68,7 +68,7 @@ cfg.model_path = args.model_path
 cfg.source_path = args.source_path
 cfg.sh_degree = args.sh_degree
 cfg.classes = args.classes
-
+torch.manual_seed(0)
 # sam = sam_model_registry['vit_h']('./third_party/segment-anything/weights/sam_vit_h_4b8939.pth').to('cuda')
 # mask_predictor = SamPredictor(sam)
 # clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch16").to('cuda')
