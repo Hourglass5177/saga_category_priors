@@ -94,11 +94,11 @@ class Scene:
         self.train_cameras = {}
         self.test_cameras = {}
 
-        if os.path.exists(os.path.join(args.source_path, "sparse")):
+        if os.path.exists(os.path.join(args.sparse_path)):
         # used for testing lerf transforms,json
         # and not os.path.exists(os.path.join(args.source_path, "transforms.json")):
             print(f"Allow Camera Principle Point Shift: {args.allow_principle_point_shift}")
-            scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval, need_features = args.need_features, need_masks = args.need_masks, sample_rate = sample_rate, allow_principle_point_shift = args.allow_principle_point_shift, replica = 'replica' in args.model_path)
+            scene_info = sceneLoadTypeCallbacks["Colmap"](args.sparse_path, args.images, args.eval, need_features = args.need_features, need_masks = args.need_masks, sample_rate = sample_rate, allow_principle_point_shift = args.allow_principle_point_shift, replica = 'replica' in args.model_path, args=args)
         elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
             print("Found transforms_train.json file, assuming Blender data set!")
             scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval)
@@ -108,19 +108,19 @@ class Scene:
         else:
             assert False, "Could not recognize scene type!"
 
-        if not self.loaded_iter:
-            with open(scene_info.ply_path, 'rb') as src_file, open(os.path.join(self.model_path, "input.ply") , 'wb') as dest_file:
-                dest_file.write(src_file.read())
-            json_cams = []
-            camlist = []
-            if scene_info.test_cameras:
-                camlist.extend(scene_info.test_cameras)
-            if scene_info.train_cameras:
-                camlist.extend(scene_info.train_cameras)
-            for id, cam in enumerate(camlist):
-                json_cams.append(camera_to_JSON(id, cam))
-            with open(os.path.join(self.model_path, "cameras.json"), 'w') as file:
-                json.dump(json_cams, file)
+        # if not self.loaded_iter:
+        #     with open(scene_info.ply_path, 'rb') as src_file, open(os.path.join(self.model_path, "input.ply") , 'wb') as dest_file:
+        #         dest_file.write(src_file.read())
+        #     json_cams = []
+        #     camlist = []
+        #     if scene_info.test_cameras:
+        #         camlist.extend(scene_info.test_cameras)
+        #     if scene_info.train_cameras:
+        #         camlist.extend(scene_info.train_cameras)
+        #     for id, cam in enumerate(camlist):
+        #         json_cams.append(camera_to_JSON(id, cam))
+        #     with open(os.path.join(self.model_path, "cameras.json"), 'w') as file:
+        #         json.dump(json_cams, file)
 
         if shuffle:
             random.shuffle(scene_info.train_cameras)  # Multi-res consistent random shuffling
@@ -137,26 +137,30 @@ class Scene:
         # Load or initialize scene / seg gaussians
         if self.loaded_iter and self.gaussians is not None:
             if mode == 'train':
-                self.gaussians.load_ply(os.path.join(self.model_path,
-                                                        "point_cloud",
-                                                        "iteration_" + str(self.loaded_iter),
-                                                        "scene_point_cloud.ply"))
+                # self.gaussians.load_ply(os.path.join(self.model_path,
+                #                                         "point_cloud",
+                #                                         "iteration_" + str(self.loaded_iter),
+                #                                         "scene_point_cloud.ply"))
+                self.gaussians.load_ply(args.point_cloud_path)
             else:
                 if target == 'coarse_seg_everything':
-                    self.gaussians.load_ply(os.path.join(self.model_path,
-                                                            "point_cloud",
-                                                            "iteration_" + str(self.loaded_iter),
-                                                            "scene_point_cloud.ply"))
+                    # self.gaussians.load_ply(os.path.join(self.model_path,
+                    #                                         "point_cloud",
+                    #                                         "iteration_" + str(self.loaded_iter),
+                    #                                         "scene_point_cloud.ply"))
+                    self.gaussians.load_ply(args.point_cloud_path)
                 elif 'feature' not in target:
-                    self.gaussians.load_ply(os.path.join(self.model_path,
-                                                            "point_cloud",
-                                                            "iteration_" + str(self.loaded_iter),
-                                                            target+"_point_cloud.ply"))
+                    # self.gaussians.load_ply(os.path.join(self.model_path,
+                    #                                         "point_cloud",
+                    #                                         "iteration_" + str(self.loaded_iter),
+                    #                                         target+"_point_cloud.ply"))
+                    self.gaussians.load_ply(args.point_cloud_path)
                 else:
-                    self.gaussians.load_ply(os.path.join(self.model_path,
-                                                            "point_cloud",
-                                                            "iteration_" + str(self.loaded_iter),
-                                                            "scene_point_cloud.ply"))
+                    # self.gaussians.load_ply(os.path.join(self.model_path,
+                    #                                         "point_cloud",
+                    #                                         "iteration_" + str(self.loaded_iter),
+                    #                                         "scene_point_cloud.ply"))
+                    self.gaussians.load_ply(args.point_cloud_path)
 
         elif self.gaussians is not None:
             self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
@@ -170,10 +174,11 @@ class Scene:
                                                         "feature_point_cloud.ply"))
             elif target == 'coarse_seg_everything':
                 if mode == 'train':
-                    self.feature_gaussians.load_ply_from_3dgs(os.path.join(self.model_path,
-                                                            "point_cloud",
-                                                            "iteration_" + str(self.loaded_iter),
-                                                            "scene_point_cloud.ply"))
+                    # self.feature_gaussians.load_ply_from_3dgs(os.path.join(self.model_path,
+                    #                                         "point_cloud",
+                    #                                         "iteration_" + str(self.loaded_iter),
+                    #                                         "scene_point_cloud.ply"))
+                    self.feature_gaussians.load_ply_from_3dgs(args.point_cloud_path)
                 elif mode == 'eval':
                     self.feature_gaussians.load_ply(os.path.join(self.model_path,
                                                         "point_cloud",
@@ -181,42 +186,52 @@ class Scene:
                                                         "coarse_seg_everything_point_cloud.ply"))
             elif target == 'contrastive_feature':
                 if mode == 'train':
-                    self.feature_gaussians.load_ply_from_3dgs(os.path.join(self.model_path,
-                                                            "point_cloud",
-                                                            "iteration_" + str(self.loaded_iter),
-                                                            "scene_point_cloud.ply"))
+                    # self.feature_gaussians.load_ply_from_3dgs(os.path.join(self.model_path,
+                    #                                         "point_cloud",
+                    #                                         "iteration_" + str(self.loaded_iter),
+                    #                                         "scene_point_cloud.ply"))
+                    self.feature_gaussians.load_ply_from_3dgs(args.point_cloud_path)
                 elif mode == 'eval':
-                    self.feature_gaussians.load_ply(os.path.join(self.model_path,
-                                                        "point_cloud",
-                                                        "iteration_" + str(self.feature_loaded_iter),
-                                                        "contrastive_feature_point_cloud.ply"))
+                    # self.feature_gaussians.load_ply(os.path.join(self.model_path,
+                    #                                     "point_cloud",
+                    #                                     "iteration_" + str(self.feature_loaded_iter),
+                    #                                     "contrastive_feature_point_cloud.ply"))
+                    self.feature_gaussians.load_ply(args.contrastive_feature_point_cloud_path)
 
 
         elif self.feature_gaussians is not None:
             if target=='feature' and init_from_3dgs_pcd:
                 print("Initialize feature gaussians from 3DGS point cloud")
+                # self.feature_gaussians.create_from_pcd(fetchPly(
+                #         os.path.join(
+                #             self.model_path, 
+                #             "point_cloud",
+                #             "iteration_" + str(searchForMaxIteration(os.path.join(self.model_path, "point_cloud"), target="scene") if (self.loaded_iter is None or self.loaded_iter == -1) else self.loaded_iter), 
+                #             "scene_point_cloud.ply"
+                #         ), 
+                #         only_xyz=True
+                #     ), 
+                # self.cameras_extent
+                # )
                 self.feature_gaussians.create_from_pcd(fetchPly(
-                        os.path.join(
-                            self.model_path, 
-                            "point_cloud",
-                            "iteration_" + str(searchForMaxIteration(os.path.join(self.model_path, "point_cloud"), target="scene") if (self.loaded_iter is None or self.loaded_iter == -1) else self.loaded_iter), 
-                            "scene_point_cloud.ply"
-                        ), 
+                        args.point_cloud_path, 
                         only_xyz=True
                     ), 
                 self.cameras_extent
                 )
             elif target == 'contrastive_feature':
                 if mode == 'train':
-                    self.feature_gaussians.load_ply_from_3dgs(os.path.join(self.model_path,
-                                                            "point_cloud",
-                                                            "iteration_" + str(self.loaded_iter),
-                                                            "scene_point_cloud.ply"))
+                    # self.feature_gaussians.load_ply_from_3dgs(os.path.join(self.model_path,
+                    #                                         "point_cloud",
+                    #                                         "iteration_" + str(self.loaded_iter),
+                    #                                         "scene_point_cloud.ply"))
+                    self.feature_gaussians.load_ply_from_3dgs(args.point_cloud_path)
                 elif mode == 'eval':
-                    self.feature_gaussians.load_ply(os.path.join(self.model_path,
-                                                        "point_cloud",
-                                                        "iteration_" + str(self.feature_loaded_iter),
-                                                        "contrastive_feature_point_cloud.ply"))
+                    # self.feature_gaussians.load_ply(os.path.join(self.model_path,
+                    #                                     "point_cloud",
+                    #                                     "iteration_" + str(self.feature_loaded_iter),
+                    #                                     "contrastive_feature_point_cloud.ply"))
+                    self.feature_gaussians.load_ply(args.contrastive_feature_point_cloud_path)
             else:
                 print("Initialize feature gaussians from Colmap point cloud")
                 self.feature_gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)

@@ -62,6 +62,16 @@ class ModelParams(ParamGroup):
         self.need_masks = False
         self.allow_principle_point_shift = False
 
+        self.images_path = ''
+        self.masks_path = ''
+        self.labels_path = ''
+        self.mask_scales_path = ''
+        self.point_cloud_path = ''
+        self.contrastive_feature_point_cloud_path = ''
+        self.scale_gate_path = ''
+        self.sparse_path = ''
+        self.json_path = ''
+
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):

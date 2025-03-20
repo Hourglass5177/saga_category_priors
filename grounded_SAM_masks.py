@@ -16,7 +16,9 @@ if __name__ == '__main__':
     
     parser = ArgumentParser(description="SAM masks extracting params")
     
-    parser.add_argument("--source_path", '-s', type=str, required=True)
+    parser.add_argument("--images_path", '-s', type=str, required=True)
+    parser.add_argument("--masks_path", type=str, required=True)
+    parser.add_argument("--labels_path", type=str, required=True)
     parser.add_argument('--images', type=str, default='images')
     parser.add_argument("--sam_checkpoint_path", default='third_party/segment-anything/weights/sam_vit_h_4b8939.pth', type=str)
     parser.add_argument("--sam_arch", default="vit_h", type=str)
@@ -39,23 +41,21 @@ if __name__ == '__main__':
 
     downsample_manually = False
     if args.downsample == 1 or args.downsample_type == 'mask':
-        images_path = os.path.join(args.source_path, args.images)
+        images_path = args.images_path
     else:
-        images_path = os.path.join(args.source_path, f'{args.images}_{str(args.downsample)}')
-        if not os.path.exists(images_path):
-            images_path = os.path.join(args.source_path, args.images)
-            downsample_manually = True
-            print("No downsampled images, do it manually.")
+        images_path = args.images_path
+        downsample_manually = True
+        print("No downsampled images, do it manually.")
 
     assert os.path.exists(images_path) and "Please specify a valid image root"
-    masks_path = os.path.join(args.source_path, 'sam_masks')
+    masks_path = args.masks_path
     os.makedirs(masks_path, exist_ok=True)
-    labels_path = os.path.join(args.source_path, 'labels')
+    labels_path = args.labels_path
     os.makedirs(labels_path, exist_ok=True)
-    detections_path = os.path.join(args.source_path, 'detections')
-    os.makedirs(detections_path, exist_ok=True)
-    rgb_masks_path = os.path.join(args.source_path, 'rgb_masks')
-    os.makedirs(rgb_masks_path, exist_ok=True)
+    # detections_path = os.path.join(args.output_path, 'detections')
+    # os.makedirs(detections_path, exist_ok=True)
+    # rgb_masks_path = os.path.join(args.output_path, 'rgb_masks')
+    # os.makedirs(rgb_masks_path, exist_ok=True)
     
     print("Extracting Grounded SAM masks...")
     # Prompting SAM with detected boxes
@@ -85,7 +85,7 @@ if __name__ == '__main__':
         detections.xyxy = rotated_boxes
 
         return detections
-    for image_name in tqdm(sorted(os.listdir(images_path))):
+    for image_name in tqdm(sorted([e for e in os.listdir(images_path) if e.endswith('.jpg')])):
         image = cv2.imread(os.path.join(images_path, image_name))
         rotated_image = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
         if downsample_manually:
@@ -117,8 +117,8 @@ if __name__ == '__main__':
             image=cv2.cvtColor(rotated_image, cv2.COLOR_BGR2RGB),
             xyxy=detections.xyxy
         )
-        with open(os.path.join(detections_path, f'{os.path.splitext(os.path.basename(image_name))[0]}.pkl'), "wb") as file:
-            pickle.dump(detections, file)
+        # with open(os.path.join(detections_path, f'{os.path.splitext(os.path.basename(image_name))[0]}.pkl'), "wb") as file:
+        #     pickle.dump(detections, file)
 
         mask_list=[]
         # background = torch.ones(image.shape[:2], dtype=torch.bool)
@@ -151,4 +151,4 @@ if __name__ == '__main__':
         annotated_image = mask_annotator.annotate(scene=rotated_image.copy(), detections=detections)
         annotated_image = box_annotator.annotate(scene=annotated_image, detections=detections)
         annotated_image = label_annotator.annotate(scene=annotated_image, detections=detections, labels=labels)
-        cv2.imwrite(os.path.join(rgb_masks_path, f'{os.path.splitext(os.path.basename(image_name))[0]}.jpg'), cv2.rotate(annotated_image, cv2.ROTATE_90_COUNTERCLOCKWISE))
+        # cv2.imwrite(os.path.join(rgb_masks_path, f'{os.path.splitext(os.path.basename(image_name))[0]}.jpg'), cv2.rotate(annotated_image, cv2.ROTATE_90_COUNTERCLOCKWISE))

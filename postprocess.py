@@ -1,3 +1,4 @@
+import shutil
 import torch
 from scene import Scene
 import os
@@ -24,78 +25,43 @@ from utils.clip_utils import get_relevancy
 
 from scipy.spatial import KDTree
 from hdbscan import HDBSCAN
-from segment_anything import (SamAutomaticMaskGenerator, SamPredictor,
-                              sam_model_registry)
-from transformers import CLIPProcessor, CLIPModel
 
-class Config:
-    scale = 1.0
-
-    model_path = ''
-    source_path = ''
-
-    @property
-    def scale_gate_path(self):
-        return os.path.join(self.model_path, f'point_cloud/iteration_10000/scale_gate.pt')
-    @property
-    def feature_pcd_path(self):
-        return os.path.join(self.model_path, f'point_cloud/iteration_10000/contrastive_feature_point_cloud.ply')
-    @property
-    def scene_pcd_path(self):
-        return os.path.join(self.model_path, f'point_cloud/iteration_30000/scene_point_cloud.ply')
-
-    data_device = 'cpu'
-
-    sh_degree = 3
-    feature_dim = 32
-    bg_color = torch.tensor([0, 0, 0], dtype=torch.float32, device="cuda")
-    resolution = 1
-    debug = False
-    convert_SHs_python = False
-    compute_cov3D_python = False
-
-    classes = ['chair', 'table', 'plant', 'wall', 'floor', 'ceiling', 'person']
-
-cfg = Config()
 parser = ArgumentParser(description="Training script parameters")
-parser.add_argument("--source_path", '-s', type=str, required=True)
-parser.add_argument("--model_path", '-m', type=str, required=True)
-parser.add_argument("--sh_degree", type=int, default=3)
+lp = ModelParams(parser)
+pp = PipelineParams(parser)
+parser.add_argument("--scale", type=float, default=1.0)
 parser.add_argument("--k", type=int, default=128)
 parser.add_argument("--classes", nargs="+", type=str, default=['chair', 'table', 'plant', 'wall', 'floor', 'ceiling', 'person'])
 args = parser.parse_args(sys.argv[1:])
-cfg.model_path = args.model_path
-cfg.source_path = args.source_path
-cfg.sh_degree = args.sh_degree
-cfg.classes = args.classes
-torch.manual_seed(0)
+bg_color = torch.tensor([1,1,1] if args.white_background else [0, 0, 0], dtype=torch.float32, device="cuda")
+torch.manual_seed(42)
 # sam = sam_model_registry['vit_h']('./third_party/segment-anything/weights/sam_vit_h_4b8939.pth').to('cuda')
 # mask_predictor = SamPredictor(sam)
 # clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch16").to('cuda')
 # clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch16")
 
-gs_model = GaussianModel(cfg.sh_degree)
-gs_model.load_ply(cfg.scene_pcd_path)
-feat_gs_model = FeatureGaussianModel(cfg.feature_dim)
-feat_gs_model.load_ply(cfg.feature_pcd_path)
+gs_model = GaussianModel(args.sh_degree)
+gs_model.load_ply(args.point_cloud_path)
+feat_gs_model = FeatureGaussianModel(args.feature_dim)
+feat_gs_model.load_ply(args.contrastive_feature_point_cloud_path)
 scale_gate = torch.nn.Sequential(
-        torch.nn.Linear(1, cfg.feature_dim, bias=True),
+        torch.nn.Linear(1, args.feature_dim, bias=True),
         torch.nn.Sigmoid()
     ).cuda()
-scale_gate.load_state_dict(torch.load(cfg.scale_gate_path))
+scale_gate.load_state_dict(torch.load(args.scale_gate_path))
 try:
-    cameras = readColmapCameras(read_extrinsics_binary(os.path.join(cfg.source_path, 'sparse/0/images.bin')), 
-                                read_intrinsics_binary(os.path.join(cfg.source_path, 'sparse/0/cameras.bin')), 
-                                os.path.join(cfg.source_path, 'images'))
+    cameras = readColmapCameras(read_extrinsics_binary(os.path.join(args.sparse_path, 'images.bin')), 
+                                read_intrinsics_binary(os.path.join(args.sparse_path, 'cameras.bin')), 
+                                args.images_path)
 except:
-    cameras = readColmapCameras(read_extrinsics_text(os.path.join(cfg.source_path, 'sparse/0/images.txt')), 
-                                read_intrinsics_text(os.path.join(cfg.source_path, 'sparse/0/cameras.txt')), 
-                                os.path.join(cfg.source_path, 'images'))
-camera_list = cameraList_from_camInfos(cameras, 1, cfg)
+    cameras = readColmapCameras(read_extrinsics_text(os.path.join(args.sparse_path, 'images.txt')), 
+                                read_intrinsics_text(os.path.join(args.sparse_path, 'cameras.txt')), 
+                                args.images_path)
+camera_list = cameraList_from_camInfos(cameras, 1, args)
 
 point_features = feat_gs_model.get_point_features
 point_xyz = feat_gs_model.get_xyz
-gates = scale_gate(torch.tensor([cfg.scale]).cuda()).unsqueeze(0)
+gates = scale_gate(torch.tensor([args.scale]).cuda()).unsqueeze(0)
 print(f'{point_features.shape=}, {point_xyz.shape=}')
 
 scale_conditioned_point_features = F.normalize(point_features, dim = -1, p = 2) * gates
@@ -110,7 +76,6 @@ start_time = datetime.now()
 cluster_labels = clusterer.fit_predict(normed_sampled_point_features.detach().cpu().numpy())
 end_time = datetime.now()
 elapsed_time = end_time - start_time
-print(f'{elapsed_time=}') # 3
 
 cluster_centers = torch.zeros(len(np.unique(cluster_labels)), normed_sampled_point_features.shape[-1])
 for i in range(0, len(np.unique(cluster_labels))):
@@ -118,6 +83,7 @@ for i in range(0, len(np.unique(cluster_labels))):
 
 seg_score = torch.einsum('nc,bc->bn', cluster_centers.cpu(), normed_point_features.cpu())
 point_labels = seg_score.argmax(dim = -1)
+print(f'{elapsed_time=}, {len(torch.unique(point_labels))=}') # 3
 print(f'HDBSCAN finish')
 def filter3d(pos, label, k):
     print('begin filter3d')
@@ -149,22 +115,22 @@ if args.k>0:
     point_labels = filter3d(point_xyz, point_labels, args.k)
 end_time = datetime.now()
 elapsed_time = end_time - start_time
-print(f'{elapsed_time=}') # 89, pytorch3d.ops.knn_points=49
+print(f'{elapsed_time=}, {len(torch.unique(point_labels))=}') # 89, pytorch3d.ops.knn_points=49
 print(f'knn finish')
-torch.save(point_labels, os.path.join(cfg.model_path, 'point_labels.pth'))
-point_labels = torch.load(os.path.join(cfg.model_path, 'point_labels.pth'))
+# torch.save(point_labels, os.path.join(args.model_path, 'point_labels.pth'))
+# point_labels = torch.load(os.path.join(args.model_path, 'point_labels.pth'))
 
 vote = {instance: [0 for _ in range(len(args.classes)+1)] for instance in torch.unique(point_labels).tolist()} 
 for i, camera in enumerate(camera_list):
-    if not os.path.exists(os.path.join(cfg.source_path, 'sam_masks', f'{camera.image_name}.pt')):
+    if not os.path.exists(os.path.join(args.masks_path, f'{camera.image_name}.pt')):
         continue
-    masks = torch.load(os.path.join(cfg.source_path, 'sam_masks', f'{camera.image_name}.pt')).float()
+    masks = torch.load(os.path.join(args.masks_path, f'{camera.image_name}.pt')).float()
     masks = torch.nn.functional.interpolate(masks.unsqueeze(1), mode = 'bilinear', size = (camera.image_height, camera.image_width), align_corners = False).squeeze(1)
     masks[masks>0.5] = 1
     masks[masks!=1] = 0
     masks = masks.bool()
-    labels = torch.load(os.path.join(cfg.source_path, 'labels', f'{camera.image_name}.pt'))
-    render_pkg = render_with_max_contributor(camera, gs_model, cfg, cfg.bg_color)
+    labels = torch.load(os.path.join(args.labels_path, f'{camera.image_name}.pt'))
+    render_pkg = render_with_max_contributor(camera, gs_model, args, bg_color)
     max_contributor = render_pkg['max_contributor'].to(point_labels.device)
     max_contribute = render_pkg['max_contribute'].to(point_labels.device)
     max_instance_contributor = point_labels[max_contributor]
@@ -182,6 +148,11 @@ for i, camera in enumerate(camera_list):
 
 output = dict()
 output['point_labels'] = point_labels.tolist()
-output['instances'] = {instance: {'class': [*cfg.classes, 'background'][vote[instance].index(max(vote[instance]))]} for instance in torch.unique(point_labels).tolist()}
-with open(os.path.join(cfg.model_path, 'output.json'),'w') as f:
+output['instances'] = {instance: {'class': [*args.classes, 'background'][vote[instance].index(max(vote[instance]))]} for instance in torch.unique(point_labels).tolist()}
+with open(args.json_path,'w') as f:
     json.dump(output,f)
+
+if os.path.exists(args.masks_path):
+    shutil.rmtree(args.masks_path)
+if os.path.exists(args.labels_path):
+    shutil.rmtree(args.labels_path)

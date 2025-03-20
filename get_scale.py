@@ -65,7 +65,8 @@ if __name__ == '__main__':
     
     parser = ArgumentParser(description="Get scales for SAM masks")
 
-    model = ModelParams(parser, sentinel=True)
+    # model = ModelParams(parser, sentinel=True)
+    model = ModelParams(parser)
     pipeline = PipelineParams(parser)
     parser.add_argument("--iteration", default=-1, type=int)
     parser.add_argument("--skip_train", action="store_true")
@@ -75,7 +76,8 @@ if __name__ == '__main__':
     parser.add_argument('--idx', default=0, type=int)
     parser.add_argument('--precomputed_mask', default=None, type=str)
 
-    args = get_combined_args(parser)
+    # args = get_combined_args(parser)
+    args = parser.parse_args()
 
     dataset = model.extract(args)
     dataset.need_features = False
@@ -90,8 +92,8 @@ if __name__ == '__main__':
     scene = Scene(dataset, scene_gaussians, feature_gaussians, load_iteration=-1, feature_load_iteration=-1, shuffle=False, mode='eval', target='scene')
 
 
-    assert os.path.exists(os.path.join(dataset.source_path, 'images')) and "Please specify a valid image root."
-    assert os.path.join(dataset.source_path, 'sam_masks') and "Please run extract_segment_everything_masks first."
+    # assert os.path.exists(dataset.images_path) and "Please specify a valid image root."
+    assert os.path.exists(dataset.masks_path) and "Please specify a valid masks root."
 
     from tqdm import tqdm
     # images_masks = {}
@@ -105,7 +107,7 @@ if __name__ == '__main__':
     #     images_masks[os.path.splitext(os.path.basename(image_path))[0]] = masks.cpu().float()
 
 
-    OUTPUT_DIR = os.path.join(dataset.source_path, 'mask_scales')
+    OUTPUT_DIR = dataset.mask_scales_path
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     cameras = scene.getTrainCameras()

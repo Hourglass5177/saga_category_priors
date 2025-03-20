@@ -108,19 +108,19 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder, features_fo
         image_name_noext = os.path.splitext(extr.name)[0]
         
         image = Image.open(os.path.join(images_folder, extr.name)) \
-            if images_folder!=None and os.path.exists(os.path.join(images_folder, extr.name)) \
+            if images_folder and os.path.exists(os.path.join(images_folder, extr.name)) \
                 else None
 
         features = torch.load(os.path.join(features_folder, image_name_noext + ".pt")) \
-            if features_folder!=None and os.path.exists(os.path.join(features_folder, image_name_noext + ".pt")) \
+            if features_folder and os.path.exists(os.path.join(features_folder, image_name_noext + ".pt")) \
                 else None
         
         masks = torch.load(os.path.join(masks_folder, image_name_noext + ".pt")) \
-            if masks_folder!=None and os.path.exists(os.path.join(masks_folder, image_name_noext + ".pt")) \
+            if masks_folder and os.path.exists(os.path.join(masks_folder, image_name_noext + ".pt")) \
                 else None
 
         mask_scales = torch.load(os.path.join(mask_scale_folder, image_name_noext + ".pt")) \
-            if mask_scale_folder!=None and os.path.exists(os.path.join(mask_scale_folder, image_name_noext + ".pt")) \
+            if mask_scale_folder and os.path.exists(os.path.join(mask_scale_folder, image_name_noext + ".pt")) \
                 else None
 
         cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image, features=features, masks=masks, mask_scales = mask_scales,
@@ -156,15 +156,15 @@ def storePly(path, xyz, rgb):
     ply_data = PlyData([vertex_element])
     ply_data.write(path)
 
-def readColmapSceneInfo(path, images, eval, llffhold=8, need_features=False, need_masks=False, sample_rate = 1.0, allow_principle_point_shift = False, replica=False):
+def readColmapSceneInfo(path, images, eval, llffhold=8, need_features=False, need_masks=False, sample_rate = 1.0, allow_principle_point_shift = False, replica=False, args=None):
     try:
-        cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.bin")
-        cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.bin")
+        cameras_extrinsic_file = os.path.join(path, "images.bin")
+        cameras_intrinsic_file = os.path.join(path, "cameras.bin")
         cam_extrinsics = read_extrinsics_binary(cameras_extrinsic_file)
         cam_intrinsics = read_intrinsics_binary(cameras_intrinsic_file)
     except:
-        cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.txt")
-        cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.txt")
+        cameras_extrinsic_file = os.path.join(path, "images.txt")
+        cameras_intrinsic_file = os.path.join(path, "cameras.txt")
         cam_extrinsics = read_extrinsics_text(cameras_extrinsic_file)
         cam_intrinsics = read_intrinsics_text(cameras_intrinsic_file)
 
@@ -173,7 +173,7 @@ def readColmapSceneInfo(path, images, eval, llffhold=8, need_features=False, nee
     mask_dir = "sam_masks"
     mask_scale_dir = "mask_scales"
 
-    cam_infos_unsorted = readColmapCameras(cam_extrinsics=cam_extrinsics, cam_intrinsics=cam_intrinsics, images_folder=os.path.join(path, reading_dir), features_folder=os.path.join(path, feature_dir) if need_features else None, masks_folder=os.path.join(path, mask_dir) if need_masks else None, mask_scale_folder=os.path.join(path, mask_scale_dir) if need_masks else None, sample_rate=sample_rate, allow_principle_point_shift = allow_principle_point_shift)
+    cam_infos_unsorted = readColmapCameras(cam_extrinsics=cam_extrinsics, cam_intrinsics=cam_intrinsics, images_folder=args.images_path, features_folder=args.features_path, masks_folder=args.masks_path, mask_scale_folder=args.mask_scales_path, sample_rate=sample_rate, allow_principle_point_shift = allow_principle_point_shift)
 
     if not replica:
         cam_infos = sorted(cam_infos_unsorted.copy(), key = lambda x : x.image_name)
@@ -189,9 +189,9 @@ def readColmapSceneInfo(path, images, eval, llffhold=8, need_features=False, nee
 
     nerf_normalization = getNerfppNorm(train_cam_infos)
 
-    ply_path = os.path.join(path, "sparse/0/points3D.ply")
-    bin_path = os.path.join(path, "sparse/0/points3D.bin")
-    txt_path = os.path.join(path, "sparse/0/points3D.txt")
+    ply_path = os.path.join(path, "0/points3D.ply")
+    bin_path = os.path.join(path, "0/points3D.bin")
+    txt_path = os.path.join(path, "0/points3D.txt")
     if not os.path.exists(ply_path):
         print("Converting point3d.bin to .ply, will happen only the first time you open the scene.")
         try:

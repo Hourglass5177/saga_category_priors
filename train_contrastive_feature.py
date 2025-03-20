@@ -74,7 +74,7 @@ def training(dataset, opt, pipe, iteration, saving_iterations, checkpoint_iterat
 
     feature_gaussians = FeatureGaussianModel(dataset.feature_dim)
 
-    sample_rate = 0.2 if 'Replica' in dataset.source_path else 1.0
+    sample_rate = 1.0
     scene = Scene(dataset, gaussians, feature_gaussians, load_iteration=iteration, shuffle=False, target='contrastive_feature', mode='train', sample_rate=sample_rate)
 
     feature_gaussians.change_to_segmentation_mode(opt, "contrastive_feature", fixed_feature=False)
@@ -325,8 +325,13 @@ def training(dataset, opt, pipe, iteration, saving_iterations, checkpoint_iterat
             progress_bar.update(10)
 
     
-    scene.save_feature(iteration, target = 'contrastive_feature', smooth_weights = torch.softmax(smooth_weights, dim = -1) if smooth_weights is not None else None, smooth_type = 'traditional', smooth_K = opt.smooth_K)
-    torch.save(scale_gate.state_dict(), os.path.join(scene.model_path, "point_cloud/iteration_{}/".format(iteration) + "scale_gate.pt"))
+    # scene.save_feature(iteration, target = 'contrastive_feature', smooth_weights = torch.softmax(smooth_weights, dim = -1) if smooth_weights is not None else None, smooth_type = 'traditional', smooth_K = opt.smooth_K)
+    scene.feature_gaussians.save_ply(args.contrastive_feature_point_cloud_path, 
+                                     smooth_weights=torch.softmax(smooth_weights, dim = -1) if smooth_weights is not None else None,
+                                     smooth_type = 'traditional', 
+                                     smooth_K = opt.smooth_K)
+    # torch.save(scale_gate.state_dict(), os.path.join(scene.model_path, "point_cloud/iteration_{}/".format(iteration) + "scale_gate.pt"))
+    torch.save(scale_gate.state_dict(), args.scale_gate_path)
 
 def prepare_output_and_logger(args):    
     if not args.model_path:
@@ -351,7 +356,7 @@ def prepare_output_and_logger(args):
 if __name__ == "__main__":
     # Set up command line argument parser
     parser = ArgumentParser(description="Training script parameters")
-    lp = ModelParams(parser, sentinel=True)
+    lp = ModelParams(parser)
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
     parser.add_argument('--ip', type=str, default="127.0.0.1")
@@ -366,8 +371,8 @@ if __name__ == "__main__":
     parser.add_argument('--target', default='contrastive_feature', const='contrastive_feature', nargs='?', choices=['scene', 'seg', 'feature', 'coarse_seg_everything', 'contrastive_feature'])
     parser.add_argument("--iteration", default=-1, type=int)
     
-    # args = parser.parse_args(sys.argv[1:])
-    args = get_combined_args(parser, target_cfg_file = 'cfg_args')
+    # args = get_combined_args(parser, target_cfg_file = 'cfg_args')
+    args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     
     print("Optimizing " + args.model_path)
