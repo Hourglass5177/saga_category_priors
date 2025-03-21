@@ -69,6 +69,7 @@ def training(dataset, opt, pipe, iteration, saving_iterations, checkpoint_iterat
 
     dataset.need_features = False
     dataset.need_masks = True
+    dataset.allow_principle_point_shift = False
 
     gaussians = GaussianModel(dataset.sh_degree)
 

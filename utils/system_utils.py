@@ -33,6 +33,8 @@ def searchForMaxIteration(folder, target = "scene"):
     saved_iters = []
     for fname in fnames:
         cur_dir = os.path.join(folder, fname)
+        if not os.path.isdir(cur_dir):
+            continue
         plys = os.listdir(cur_dir)
         has_target_ply = False
         for p in plys:

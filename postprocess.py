@@ -149,6 +149,7 @@ for i, camera in enumerate(camera_list):
 output = dict()
 output['point_labels'] = point_labels.tolist()
 output['instances'] = {instance: {'class': [*args.classes, 'background'][vote[instance].index(max(vote[instance]))]} for instance in torch.unique(point_labels).tolist()}
+output['instances'] = {k: v for k, v in output['instances'].items() if v.get('class') in ['chair','table', 'plant']}
 with open(args.json_path,'w') as f:
     json.dump(output,f)
 
