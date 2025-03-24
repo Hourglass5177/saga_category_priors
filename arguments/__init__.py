@@ -71,6 +71,7 @@ class ModelParams(ParamGroup):
         self.scale_gate_path = ''
         self.sparse_path = ''
         self.json_path = ''
+        self.features_path = ''
 
         super().__init__(parser, "Loading Parameters", sentinel)
 

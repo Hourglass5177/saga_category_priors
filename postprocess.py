@@ -29,6 +29,7 @@ from hdbscan import HDBSCAN
 parser = ArgumentParser(description="Training script parameters")
 lp = ModelParams(parser)
 pp = PipelineParams(parser)
+parser.add_argument("--clean", action='store_true')
 parser.add_argument("--scale", type=float, default=1.0)
 parser.add_argument("--k", type=int, default=128)
 parser.add_argument("--classes", nargs="+", type=str, default=['chair', 'table', 'plant', 'wall', 'floor', 'ceiling', 'person'])
@@ -121,7 +122,7 @@ print(f'knn finish')
 # point_labels = torch.load(os.path.join(args.model_path, 'point_labels.pth'))
 
 vote = {instance: [0 for _ in range(len(args.classes)+1)] for instance in torch.unique(point_labels).tolist()} 
-for i, camera in enumerate(camera_list):
+for i, camera in tqdm(list(enumerate(camera_list))):
     if not os.path.exists(os.path.join(args.masks_path, f'{camera.image_name}.pt')):
         continue
     masks = torch.load(os.path.join(args.masks_path, f'{camera.image_name}.pt')).float()
@@ -152,8 +153,14 @@ output['instances'] = {instance: {'class': [*args.classes, 'background'][vote[in
 output['instances'] = {k: v for k, v in output['instances'].items() if v.get('class') in ['chair','table', 'plant']}
 with open(args.json_path,'w') as f:
     json.dump(output,f)
-
-if os.path.exists(args.masks_path):
-    shutil.rmtree(args.masks_path)
-if os.path.exists(args.labels_path):
-    shutil.rmtree(args.labels_path)
+if(args.clean):
+    if os.path.isdir(args.masks_path):
+        shutil.rmtree(args.masks_path)
+    if os.path.isdir(args.labels_path):
+        shutil.rmtree(args.labels_path)
+    if os.path.isdir(args.mask_scales_path):
+        shutil.rmtree(args.mask_scales_path)
+    if os.path.isfile(args.contrastive_feature_point_cloud_path):
+        os.remove(args.contrastive_feature_point_cloud_path)
+    if os.path.isfile(args.scale_gate_path):
+        os.remove(args.scale_gate_path)

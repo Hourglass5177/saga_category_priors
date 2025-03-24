@@ -35,61 +35,61 @@ class Scene:
         self.gaussians = gaussians
         self.feature_gaussians = feature_gaussians
 
-        if load_iteration:
-            if load_iteration == -1:
-                if mode == 'train':
-                    # only load feature gaussians when doing segmentation
-                    if target == 'seg' or target == 'coarse_seg_everything':
-                        self.feature_loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"), target="feature") if (feature_load_iteration is None or feature_load_iteration == -1) else feature_load_iteration
-                        self.loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"), target="scene")
-                    elif target == 'scene':
-                        self.feature_loaded_iter = None
-                        self.loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"), target="scene")
-                    elif target == 'feature' or target == 'contrastive_feature':
-                        self.feature_loaded_iter = None
-                        self.loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"), target="scene")
-                    else:
-                        assert False and "Unknown target!"
-                elif mode == 'eval':
-                    if target == 'seg':
-                        self.feature_loaded_iter = None
-                        self.feature_gaussians = None
-                        self.loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"), target="seg")
-                    elif target == 'scene':
-                        self.feature_gaussians = None
-                        self.feature_loaded_iter = None
-                        self.loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"), target="scene")
-                    elif target in ['feature', 'contrastive_feature']:
-                        self.feature_loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"), target=target) if (feature_load_iteration is None or feature_load_iteration == -1) else feature_load_iteration
-                        self.loaded_iter = -1 if gaussians is None else searchForMaxIteration(os.path.join(self.model_path, "point_cloud"), target='scene')
-                    elif target == 'coarse_seg_everything':
-                        self.feature_loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"), target=target)
-                        self.loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"), target="scene")
-                    else:
-                        assert False and "Unknown target!"
-            else:
-                self.loaded_iter = load_iteration
-                if mode == 'train':
-                    if target == 'seg' or target == 'coarse_seg_everything':
-                        self.feature_loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"), target="feature") if (feature_load_iteration is None or feature_load_iteration == -1) else feature_load_iteration
-                    elif target == 'scene' or 'feature' in target:
-                        self.feature_loaded_iter = None
-                    else:
-                        assert False and "Unknown target!"
-                elif mode == 'eval':
-                    if target == 'seg':
-                        self.feature_loaded_iter = None
-                        self.feature_gaussians = None
-                    elif target == 'scene':
-                        self.feature_gaussians = None
-                        self.feature_loaded_iter = None
-                    elif target == 'feature' or target == 'coarse_seg_everything' or target == 'contrastive_feature':
-                        self.feature_loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"), target=target) if (feature_load_iteration is None or feature_load_iteration == -1) else feature_load_iteration
-                        self.loaded_iter = -1
-                    else:
-                        assert False and "Unknown target!"
+        # if load_iteration:
+        #     if load_iteration == -1:
+        #         if mode == 'train':
+        #             # only load feature gaussians when doing segmentation
+        #             if target == 'seg' or target == 'coarse_seg_everything':
+        #                 self.feature_loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"), target="feature") if (feature_load_iteration is None or feature_load_iteration == -1) else feature_load_iteration
+        #                 self.loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"), target="scene")
+        #             elif target == 'scene':
+        #                 self.feature_loaded_iter = None
+        #                 self.loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"), target="scene")
+        #             elif target == 'feature' or target == 'contrastive_feature':
+        #                 self.feature_loaded_iter = None
+        #                 self.loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"), target="scene")
+        #             else:
+        #                 assert False and "Unknown target!"
+        #         elif mode == 'eval':
+        #             if target == 'seg':
+        #                 self.feature_loaded_iter = None
+        #                 self.feature_gaussians = None
+        #                 self.loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"), target="seg")
+        #             elif target == 'scene':
+        #                 self.feature_gaussians = None
+        #                 self.feature_loaded_iter = None
+        #                 self.loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"), target="scene")
+        #             elif target in ['feature', 'contrastive_feature']:
+        #                 self.feature_loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"), target=target) if (feature_load_iteration is None or feature_load_iteration == -1) else feature_load_iteration
+        #                 self.loaded_iter = -1 if gaussians is None else searchForMaxIteration(os.path.join(self.model_path, "point_cloud"), target='scene')
+        #             elif target == 'coarse_seg_everything':
+        #                 self.feature_loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"), target=target)
+        #                 self.loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"), target="scene")
+        #             else:
+        #                 assert False and "Unknown target!"
+        #     else:
+        #         self.loaded_iter = load_iteration
+        #         if mode == 'train':
+        #             if target == 'seg' or target == 'coarse_seg_everything':
+        #                 self.feature_loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"), target="feature") if (feature_load_iteration is None or feature_load_iteration == -1) else feature_load_iteration
+        #             elif target == 'scene' or 'feature' in target:
+        #                 self.feature_loaded_iter = None
+        #             else:
+        #                 assert False and "Unknown target!"
+        #         elif mode == 'eval':
+        #             if target == 'seg':
+        #                 self.feature_loaded_iter = None
+        #                 self.feature_gaussians = None
+        #             elif target == 'scene':
+        #                 self.feature_gaussians = None
+        #                 self.feature_loaded_iter = None
+        #             elif target == 'feature' or target == 'coarse_seg_everything' or target == 'contrastive_feature':
+        #                 self.feature_loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"), target=target) if (feature_load_iteration is None or feature_load_iteration == -1) else feature_load_iteration
+        #                 self.loaded_iter = -1
+        #             else:
+        #                 assert False and "Unknown target!"
 
-            print("Loading trained model at iteration {}, {}".format(self.loaded_iter, self.feature_loaded_iter))
+        #     print("Loading trained model at iteration {}, {}".format(self.loaded_iter, self.feature_loaded_iter))
             
         self.train_cameras = {}
         self.test_cameras = {}
