@@ -4,7 +4,7 @@ python SegAnyGAussians/grounded_SAM_masks.py --images_path data/282/images/ --ma
 控制参数：
 sam_arch:SAM的类型，要与sam_checkpoint_path指定的权重文件类型一致，默认为vit_h
 downsample：图像分辨率下采样的倍数，一般可设置为1，2，4等等，默认为1即使用原图
-classes：要分割的类别，默认为['chair', 'table', 'plant', 'wall', 'floor', 'ceiling', 'person']
+classes：要分割的类别，默认为['chair', 'table', 'plant', 'flower', 'foliage', 'wall', 'floor', 'ceiling', 'person']
 box_threshold：过滤box的置信度阈值，默认为0.35
 text_threshold：过滤text的置信度阈值，默认为0.35
 nms_threshold：对检测结果执行非极大值抑制的阈值，默认为0.8
@@ -50,7 +50,7 @@ scale_gate_path：输出的训练后的scale gate权重，应为一个文件路�
 
 4.提取label
 示例：
-python SegAnyGAussians/postprocess.py --sh_degree 0 --feature_dim 32 --images_path data/282/images/ --sparse_path data/282/sparse/0/ --masks_path data/282/test/masks --labels_path data/282/test/labels --mask_scales_path data/282/test/mask_scales --point_cloud_path data/282/point_cloud/iteration_30000/scene_point_cloud.ply --contrastive_feature_point_cloud_path data/282/test/contrastive_feature_point_cloud.ply --scale_gate_path data/282/test/scale_gate.pt --json_path data/282/test/output.json
+python postprocess.py --sh_degree 0 --feature_dim 32 --images_path ../data/282/images/ --sparse_path ../data/282/sparse/0/ --masks_path ../data/282/masks/ --labels_path ../data/282/labels/ --mask_scales_path ../data/282/mask_scales/ --point_cloud_path ../data/282/point_cloud/iteration_30000/scene_point_cloud.ply --contrastive_feature_point_cloud_path ../data/282/distance_contrastive_feature_point_cloud.ply --scale_gate_path ../data/282/distance_scale_gate.pt --json_path ../data/282/output.json
 控制参数：
 sh_degree：模型的sh参数的阶数，默认为3
 feature_dim：高斯模型的实例特征的通道数，默认为32
@@ -66,3 +66,9 @@ contrastive_feature_point_cloud_path：带有实例特征的高斯模型的路�
 scale_gate_path：scale gate的权重，应为一个权重文件与train_contrastive_feature.py中的保持一致，必要参数
 输出参数：
 json_path：输出的json结果文件路径，必要参数
+
+
+
+python train_contrastive_feature.py --sh_degree 3 --feature_dim 32 --images_path data/temp/tys/images/ --sparse_path data/temp/tys/sparse/0/ --masks_path data/temp/tys/masks --mask_scales_path data/temp/tys/mask_scales --point_cloud_path data/temp/tys/point_cloud/iteration_30000/scene_point_cloud.ply --contrastive_feature_point_cloud_path data/temp/tys/contrastive_feature_point_cloud.ply --scale_gate_path data/temp/tys/scale_gate.pt --iterations 10000 --num_sampled_rays 1000
+
+zip -r SegAnyGAussians.zip . -x './data/**' './output/**' './third_party/**' './weights/**

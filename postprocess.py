@@ -26,13 +26,28 @@ from utils.clip_utils import get_relevancy
 from scipy.spatial import KDTree
 from hdbscan import HDBSCAN
 
+def uniform_sample(xyz, n_samples):
+    device = xyz.device
+    N, _ = xyz.shape
+    # 生成均匀随机采样的索引
+    selected_indices = torch.randperm(N,device=device)[:n_samples]
+    # 创建全False的布尔张量
+    mask = torch.zeros(N, dtype=torch.bool, device=device)
+    # 将选中的位置设置为True
+    mask[selected_indices] = True
+    return mask
+
 parser = ArgumentParser(description="Training script parameters")
 lp = ModelParams(parser)
 pp = PipelineParams(parser)
 parser.add_argument("--clean", action='store_true')
 parser.add_argument("--scale", type=float, default=1.0)
-parser.add_argument("--k", type=int, default=128)
-parser.add_argument("--classes", nargs="+", type=str, default=['chair', 'table', 'plant', 'wall', 'floor', 'ceiling', 'person'])
+parser.add_argument("--k", type=int, default=256)
+parser.add_argument("--feature_ratio", type=float, default=0.5)
+parser.add_argument("--instance_threshold", type=float, default=0.3)
+parser.add_argument("--label_threshold", type=float, default=0.3)
+parser.add_argument("--sample_num", type=int, default=10000)
+parser.add_argument("--classes", nargs="+", type=str, default=['chair', 'table', 'plant', 'flower', 'foliage', 'wall', 'floor', 'ceiling', 'person'])
 args = parser.parse_args(sys.argv[1:])
 bg_color = torch.tensor([1,1,1] if args.white_background else [0, 0, 0], dtype=torch.float32, device="cuda")
 torch.manual_seed(42)
@@ -60,30 +75,64 @@ except:
                                 args.images_path)
 camera_list = cameraList_from_camInfos(cameras, 1, args)
 
-point_features = feat_gs_model.get_point_features
-point_xyz = feat_gs_model.get_xyz
-gates = scale_gate(torch.tensor([args.scale]).cuda()).unsqueeze(0)
+point_features = feat_gs_model.get_point_features.detach().cpu()
+point_xyz = feat_gs_model.get_xyz.detach().cpu()
+gates = scale_gate(torch.tensor([args.scale]).cuda()).unsqueeze(0).detach().cpu()
 print(f'{point_features.shape=}, {point_xyz.shape=}')
 
+sampled_mask = uniform_sample(point_xyz, args.sample_num)
+# sampled_mask = torch.rand(point_features.shape[0]) > 0.99
+
 scale_conditioned_point_features = F.normalize(point_features, dim = -1, p = 2) * gates
-
 normed_point_features = F.normalize(scale_conditioned_point_features, dim = -1, p = 2)
-sampled_index = torch.rand(normed_point_features.shape[0]) > 0.98
-normed_sampled_point_features = normed_point_features[sampled_index]
+sampled_normed_point_features = normed_point_features[sampled_mask]
 
-clusterer = HDBSCAN(min_cluster_size=10, cluster_selection_epsilon=0.01, allow_single_cluster = False) # HDBSCAN
+min_val = torch.min(point_xyz, dim=0).values
+max_val = torch.max(point_xyz, dim=0).values
+new_min = 0.0
+new_max = 1.0
+std_point_xyz = (point_xyz - min_val) / (max_val - min_val) * (new_max - new_min) + new_min
+sampled_std_point_xyz = std_point_xyz[sampled_mask]
+
+hybird_point_features = torch.cat((normed_point_features, std_point_xyz), dim=1)
+sampled_hybird_point_features = torch.cat((sampled_normed_point_features, sampled_std_point_xyz), dim=1)
+
+sampled_normed_point_features_distance = torch.clamp(1-torch.einsum('ac,bc -> ab', sampled_normed_point_features, sampled_normed_point_features), 0)
+sampled_std_point_xyz_distance = torch.clamp(torch.norm(sampled_std_point_xyz[:,None,:] - sampled_std_point_xyz[None,:,:], dim=-1), 0)
+hybird_distance = args.feature_ratio*sampled_normed_point_features_distance + (1-args.feature_ratio)*sampled_std_point_xyz_distance
+
+# def hybird_distance(u, v):
+#     u_feature, u_xyz = u[:args.feature_dim], u[args.feature_dim:]
+#     v_feature, v_xyz = v[:args.feature_dim], v[args.feature_dim:]
+
+#     feature_distance = 1-np.dot(u_feature, v_feature)
+#     xyz_distance = np.linalg.norm(u_xyz-v_xyz)
+
+#     return 0.2*feature_distance+0.8*xyz_distance
+
+clusterer = HDBSCAN(min_cluster_size=10, cluster_selection_epsilon=0.01, allow_single_cluster = False, metric='precomputed') # HDBSCAN
 
 start_time = datetime.now()
-cluster_labels = clusterer.fit_predict(normed_sampled_point_features.detach().cpu().numpy())
+cluster_labels = clusterer.fit_predict(hybird_distance.numpy().astype(np.float64))
 end_time = datetime.now()
 elapsed_time = end_time - start_time
 
-cluster_centers = torch.zeros(len(np.unique(cluster_labels)), normed_sampled_point_features.shape[-1])
-for i in range(0, len(np.unique(cluster_labels))):
-    cluster_centers[i] = F.normalize(normed_sampled_point_features[cluster_labels == i-1].mean(dim = 0), dim = -1)
+feature_cluster_centers = torch.zeros(len(np.unique(cluster_labels)) - 1, point_features.shape[-1])
+xyz_cluster_centers = torch.zeros(len(np.unique(cluster_labels)) - 1, point_xyz.shape[-1])
+for i in np.unique(cluster_labels):
+    if i<0:
+        continue
+    feature_cluster_centers[i] = F.normalize(sampled_normed_point_features[cluster_labels == i].mean(dim = 0), dim = -1)
+    xyz_cluster_centers[i] = sampled_std_point_xyz[cluster_labels == i].mean(dim = 0)
 
-seg_score = torch.einsum('nc,bc->bn', cluster_centers.cpu(), normed_point_features.cpu())
-point_labels = seg_score.argmax(dim = -1)
+normed_point_features_sim = torch.clamp(torch.einsum('ac,bc->ab', normed_point_features, feature_cluster_centers), -1, 1)
+std_point_xyz_sim = torch.clamp(torch.exp(-torch.norm(std_point_xyz[:,None,:] - xyz_cluster_centers[None,:,:], dim=-1)), 0, 1)
+hybird_sim = args.feature_ratio*normed_point_features_sim + (1-args.feature_ratio)*std_point_xyz_sim
+confidence = torch.softmax(hybird_sim*10, dim=-1)
+mask, point_labels = confidence.max(dim=-1)
+mask = mask>args.instance_threshold
+print(f'{mask.sum()=}, {(~mask).sum()=}')
+point_labels[~mask] = -1
 print(f'{elapsed_time=}, {len(torch.unique(point_labels))=}') # 3
 print(f'HDBSCAN finish')
 def filter3d(pos, label, k):
@@ -146,11 +195,21 @@ for i, camera in tqdm(list(enumerate(camera_list))):
     for instance in torch.unique(point_labels).tolist():
         vote[instance][background_label]+=(vote_for_background_label==instance).sum().item()
 
+instance_ratio = {}
+for instance, votes in vote.items():
+    votes = np.array(votes)
+    votes = votes[:-1]/votes.sum()
+    instance_ratio[instance] = votes
+
+def get_class(classes, ratio:np.ndarray):
+    if ratio.max()<args.label_threshold:
+        return 'background'
+    return classes[ratio.argmax()]
 
 output = dict()
 output['point_labels'] = point_labels.tolist()
-output['instances'] = {instance: {'class': [*args.classes, 'background'][vote[instance].index(max(vote[instance]))]} for instance in torch.unique(point_labels).tolist()}
-output['instances'] = {k: v for k, v in output['instances'].items() if v.get('class') in ['chair','table', 'plant']}
+output['instances'] = {instance: {'class': get_class(args.classes, ratio)} for instance, ratio in instance_ratio.items()}
+output['instances'] = {k: v for k, v in output['instances'].items() if v.get('class') in ['chair','table', 'plant', 'flower', 'foliage']}
 with open(args.json_path,'w') as f:
     json.dump(output,f)
 if(args.clean):

@@ -67,30 +67,11 @@ class CONFIG:
     white_background = False
 
     feature_dim = 32
-    model_path = None # 30000
-    source_path = None
-
-    feature_gaussian_iteration = 10000
-    scene_gaussian_iteration = 30000
-    @property
-    def scale_gate_path(self):
-        return os.path.join(self.model_path, f'point_cloud/iteration_{str(self.feature_gaussian_iteration)}/scale_gate.pt')
-    @property
-    def feature_pcd_path(self):
-        return os.path.join(self.model_path, f'point_cloud/iteration_{str(self.feature_gaussian_iteration)}/contrastive_feature_point_cloud.ply')
-    @property
-    def scene_pcd_path(self):
-        return os.path.join(self.model_path, f'point_cloud/iteration_{str(self.scene_gaussian_iteration)}/scene_point_cloud.ply')
-    @property
-    def point_labels_path(self):
-        return os.path.join(self.model_path, 'point_labels.pth')
-    @property
-    def langauge_features_path(self):
-        return os.path.join(self.model_path, 'langauge_features.pth')
-    @property
-    def json_path(self):
-        return os.path.join(self.model_path, 'output.json')
-    pos_texts = ['chair', 'table', 'plant', 'wall', 'floor', 'ceiling', 'person']
+    scale_gate_path = ''
+    feature_pcd_path = ''
+    scene_pcd_path = ''
+    json_path = ''
+    pos_texts = ['chair', 'table', 'plant', 'flower', 'foliage', 'wall', 'floor', 'ceiling', 'person']
     neg_texts = ["object", "things", "stuff", "texture"]
 
 
@@ -231,41 +212,6 @@ class GaussianSplattingGUI:
             'feature': feature_gaussian_model,
             'scale_gate': scale_gate
         }
-        # try:
-        #     self.cameras = readColmapCameras(read_extrinsics_binary(os.path.join(self.opt.DATA_PATH, 'sparse/0/images.bin')), 
-        #                                     read_intrinsics_binary(os.path.join(self.opt.DATA_PATH, 'sparse/0/cameras.bin')), 
-        #                                     os.path.join(self.opt.DATA_PATH, 'images'))
-        # except:
-        #     self.cameras = readColmapCameras(read_extrinsics_text(os.path.join(self.opt.DATA_PATH, 'sparse/0/images.txt')), 
-        #                                     read_intrinsics_text(os.path.join(self.opt.DATA_PATH, 'sparse/0/cameras.txt')), 
-        #                                     os.path.join(self.opt.DATA_PATH, 'images'))
-        # self.camera_list = cameraList_from_camInfos(self.cameras, 1, self.opt)
-
-        # sam = sam_model_registry['vit_h']('./third_party/segment-anything/weights/sam_vit_h_4b8939.pth').to('cuda')
-        # # self.mask_generator = SamAutomaticMaskGenerator(
-        # #     model=sam,
-        # #     points_per_side=32,
-        # #     pred_iou_thresh=0.88,
-        # #     box_nms_thresh=0.7,
-        # #     stability_score_thresh=0.95,
-        # #     crop_n_layers=0,
-        # #     crop_n_points_downscale_factor=1,
-        # #     min_mask_region_area=100,
-        # # )
-        # self.mask_predictor = SamPredictor(sam)
-        
-        # self.clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch16").to('cuda')
-        # self.clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch16")
-        # self.nembed = self.clip_processor(text=self.opt.neg_texts, return_tensors='pt', padding=True)
-        # self.nembed = self.nembed.to(self.clip_model.device)
-        # self.nembed = self.clip_model.get_text_features(**self.nembed)
-        # self.nembed = F.normalize(self.nembed, dim=-1)
-        # self.nembed = self.nembed.detach().cpu()
-        # self.pembed = self.clip_processor(text=self.opt.pos_texts, return_tensors='pt', padding=True)
-        # self.pembed = self.pembed.to(self.clip_model.device)
-        # self.pembed = self.clip_model.get_text_features(**self.pembed)
-        # self.pembed = F.normalize(self.pembed, dim=-1)
-        # self.pembed = self.pembed.detach().cpu()
 
         self.cluster_point_colors = None
         self.label_to_color = np.random.rand(1000, 3)
@@ -283,9 +229,9 @@ class GaussianSplattingGUI:
 
         print("loading model file done.")
 
-        if opt.point_labels_path:
-            self.point_labels = torch.load(opt.point_labels_path)
-            self.label = torch.unique(self.point_labels).tolist()[0]
+        # if opt.point_labels_path:
+        #     self.point_labels = torch.load(opt.point_labels_path)
+        #     self.label = torch.unique(self.point_labels).tolist()[0]
         # if opt.langauge_features_path:
         #     self.langauge_features = torch.load(opt.langauge_features_path)
 
@@ -398,7 +344,7 @@ class GaussianSplattingGUI:
         def callback_cluster():
             self.cluster_in_3D_flag =True
         def callback_label_change(sender, app_data, user_data):
-            self.label = torch.unique(self.point_labels).tolist()[(torch.unique(self.point_labels).tolist().index(self.label)+user_data)%len(torch.unique(self.point_labels))]
+            self.label = int(list(self.json['instances'].keys())[(list(self.json['instances'].keys()).index(str(self.label))+user_data)%len(list(self.json['instances'].keys()))])
             # langauge_feature = self.langauge_features[self.label, ...]
             # sims = get_relevancy(langauge_feature, self.pembed, self.nembed)
             # sims, _ = torch.max(sims, dim=1)
@@ -459,22 +405,6 @@ class GaussianSplattingGUI:
             dpg.add_button(label="next", callback=callback_label_change, user_data=1)
             dpg.add_button(label="reshuffle_cluster_color", callback=callback_reshuffle_color, user_data="Some Data")
             dpg.add_button(label="reload_data", callback=callback_reload, user_data="Some Data")
-
-            # def callback(sender, app_data, user_data):
-            #     self.load_model = False
-            #     file_data = app_data["selections"]
-            #     file_names = []
-            #     for key in file_data.keys():
-            #         file_names.append(key)
-
-            #     self.opt.ply_file = file_data[file_names[0]]
-
-            #     # if not self.load_model:
-            #     print("loading model file...")
-            #     self.engine.load_ply(self.opt.ply_file)
-            #     self.do_pca()   # calculate new self.proj_mat after loading new .ply file
-            #     print("loading model file done.")
-            #     self.load_model = True
 
         if self.debug:
             with dpg.collapsing_header(label="Debug"):
@@ -599,69 +529,12 @@ class GaussianSplattingGUI:
         return cam
     
     def cluster_in_3D(self):
-        # try:
-        #     self.engine['scene'].roll_back()
-        #     self.engine['feature'].roll_back()
-        # except:
-        #     pass
-        # point_features = self.engine['feature'].get_point_features
-        # point_xyz = self.engine['feature'].get_xyz
-        # print(point_features.shape, point_xyz.shape)
-
-        # scale_conditioned_point_features = torch.nn.functional.normalize(point_features, dim = -1, p = 2) * self.gates.unsqueeze(0)
-
-        # normed_point_features = torch.nn.functional.normalize(scale_conditioned_point_features, dim = -1, p = 2)
-        # # normed_point_xyz = point_xyz
-        # # normed_point_xyz = torch.nn.functional.normalize(point_xyz, dim = 0, p = 2)
-        # # normed_point_xyz = 20*point_xyz / (point_xyz.abs().max())
-        # # normed_point_features = torch.cat((normed_point_features, normed_point_xyz), dim=-1)
-        # sampled_index = torch.rand(normed_point_features.shape[0]) > 0.98
-        # normed_sampled_point_features = normed_point_features[sampled_index]
-
-        # # normed_sampled_point_features = sampled_point_features / torch.norm(sampled_point_features, dim = -1, keepdim = True)
-
-        # clusterer = HDBSCAN(min_cluster_size=10, cluster_selection_epsilon=0.01, allow_single_cluster = False) # HDBSCAN
-
-        # cluster_labels = clusterer.fit_predict(normed_sampled_point_features.detach().cpu().numpy())
-
-        # cluster_centers = torch.zeros(len(np.unique(cluster_labels)), normed_sampled_point_features.shape[-1])
-        # for i in range(0, len(np.unique(cluster_labels))):
-        #     cluster_centers[i] = torch.nn.functional.normalize(normed_sampled_point_features[cluster_labels == i-1].mean(dim = 0), dim = -1)
-
-        # self.seg_score = torch.einsum('nc,bc->bn', cluster_centers.cpu(), normed_point_features.cpu())
-        # self.point_ins_labels = self.seg_score.argmax(dim = -1)
-        # def filter3d(pos, label):
-        #     print('begin filter3d')
-        #     assert pos.shape[0] == label.shape[0]
-        #     pos=pos.detach().cpu().numpy()
-        #     label=label.detach().cpu().numpy()
-        #     new_label = []
-        #     kdtree = KDTree(pos)
-        #     for i,p in enumerate(pos):
-        #         d, index = kdtree.query(x=p, k=512)
-        #         assert i == index[0]
-        #         # print(f'query index {index[1:]} for {index[0]}')
-        #         # print(f'query label {label[index[1:]].tolist()} for {label[index[0]].tolist()}')
-        #         index = index[1:]
-        #         bin = []
-        #         counts = []
-        #         for l in label[index]:
-        #             try:
-        #                 counts[bin.index(l)]+=1
-        #             except:
-        #                 bin.append(l)
-        #                 counts.append(1)
-        #         # print(f'{bin}\n{counts}')
-        #         new_label.append(bin[counts.index(max(counts))])
-        #     print('finish filter3d')
-        #     return torch.tensor(new_label).cuda()
-        # self.point_ins_labels = filter3d(point_xyz, self.point_ins_labels)
-        # self.cluster_point_colors = self.label_to_color[self.point_ins_labels.detach().cpu().numpy()]
         import json
         with open(self.opt.json_path, 'r') as f:
             self.json = json.load(f)
         self.cluster_point_colors = self.label_to_color[np.array(self.json['point_labels'])]
         self.point_labels = torch.tensor(self.json['point_labels'])
+        self.label = int(list(self.json['instances'].keys())[0])
         # self.cluster_point_colors[self.seg_score.max(dim = -1)[0].detach().cpu().numpy() < 0.5] = (0,0,0)
 
         # extract langauge features
@@ -722,34 +595,6 @@ class GaussianSplattingGUI:
                 paded_img[(w-h)//2:(w-h)//2 + h, :, :] = image
             paded_img = cv2.resize(paded_img, (224,224))
             return paded_img
-        
-        # self.langauge_features = []
-        # for label in range(0, len(np.unique(cluster_labels))):
-        #     features = []
-        #     for i, camera in enumerate(self.camera_list):
-        #         render_pkg = render(camera, self.engine['scene'], self.opt, self.bg_color, filtered_mask=~(self.point_ins_labels==label))
-        #         if torch.logical_and(render_pkg['visibility_filter'], (self.point_ins_labels==label)).sum()/(self.point_ins_labels==label).sum() > 0.9: # valid camera
-        #             render_image = render_pkg['render']
-        #             original_image = camera.original_image.to('cuda')
-        #             prompt_mask = (render_image!=0).any(dim=0)
-        #             prompt_bbox = torch.Tensor(mask_to_bbox(prompt_mask)).to('cuda')
-        #             transformed_bbox = self.mask_predictor.transform.apply_boxes_torch(prompt_bbox, original_image.shape[-2:])
-        #             batched_image = original_image.unsqueeze(0)
-        #             transformed_image = self.mask_predictor.transform.apply_image_torch(batched_image)
-        #             self.mask_predictor.set_torch_image(transformed_image, original_image.shape[-2:])
-        #             masks, scores, _ = self.mask_predictor.predict_torch(point_coords=None, point_labels=None, boxes=transformed_bbox, multimask_output=False)
-
-        #             inputs = self.clip_processor(images=get_entity_image((original_image*255).permute(1,2,0).to('cpu', torch.uint8).numpy()*masks[0,0,...][None,...].permute(1,2,0).cpu().numpy(), masks[0,0].cpu().numpy()), return_tensors='pt')
-        #             inputs = inputs.to(self.clip_model.device)
-        #             semantic0 = self.clip_model.get_image_features(**inputs)
-        #             semantic0 = F.normalize(semantic0,dim=-1).detach().cpu()
-        #         else:
-        #             semantic0 = torch.zeros((1,512), dtype=torch.float32, device='cpu')
-        #         features.append(semantic0)
-        #     self.langauge_features.append(torch.concat(features, dim=0))
-        # self.langauge_features = torch.stack(self.langauge_features, dim=0)
-        # torch.save(self.langauge_features, f'{self.opt.langauge_features_path}')
-        # self.langauge_features = torch.load(f'{self.opt.langauge_features_path}')
 
 
     def pca(self, X, n_components=3):
@@ -946,21 +791,21 @@ class GaussianSplattingGUI:
 if __name__ == "__main__":
     parser = ArgumentParser(description="GUI option")
 
-    parser.add_argument('-m', '--model_path', type=str, default="./output/temp/tys")
-    parser.add_argument('-s', '--source_path', type=str, default="./data/temp/tys")
     parser.add_argument('--sh_degree', type=int, default=3)
-    parser.add_argument('--feature_iteration', type=int, default=10000)
-    parser.add_argument('--scene_iteration', type=int, default=30000)
+    parser.add_argument('--scale_gate_path', type=str, required=True)
+    parser.add_argument('--feature_pcd_path', type=str, required=True)
+    parser.add_argument('--scene_pcd_path', type=str, required=True)
+    parser.add_argument('--json_path', type=str, required=True)
 
     args = parser.parse_args()
 
     opt = CONFIG()
 
-    opt.model_path = args.model_path
-    opt.source_path = args.source_path
     opt.sh_degree = args.sh_degree
-    opt.feature_gaussian_iteration = args.feature_iteration
-    opt.scene_gaussian_iteration = args.scene_iteration
+    opt.scale_gate_path = args.scale_gate_path
+    opt.feature_pcd_path = args.feature_pcd_path
+    opt.scene_pcd_path = args.scene_pcd_path
+    opt.json_path = args.json_path
 
     gs_model = GaussianModel(opt.sh_degree)
     feat_gs_model = FeatureGaussianModel(opt.feature_dim)

@@ -19,6 +19,7 @@ if __name__ == '__main__':
     parser.add_argument("--images_path", '-s', type=str, required=True)
     parser.add_argument("--masks_path", type=str, required=True)
     parser.add_argument("--labels_path", type=str, required=True)
+    parser.add_argument("--annotated_images_path", '-a', type=str, default=None)
     parser.add_argument('--images', type=str, default='images')
     parser.add_argument("--sam_checkpoint_path", default='third_party/segment-anything/weights/sam_vit_h_4b8939.pth', type=str)
     parser.add_argument("--sam_arch", default="vit_h", type=str)
@@ -26,7 +27,7 @@ if __name__ == '__main__':
     parser.add_argument("--groundingdino_config_path", default='third_party/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py', type=str)
     parser.add_argument("--downsample", default=1, type=int)
     parser.add_argument("--downsample_type", default='image', type=str, choices=['image', 'mask'], help="Downsample then segment, or segment then downsample.")
-    parser.add_argument('--classes', nargs='+', type=str, default=['chair', 'table', 'plant', 'wall', 'floor', 'ceiling', 'person'])
+    parser.add_argument('--classes', nargs='+', type=str, default=['chair', 'table', 'plant', 'flower', 'foliage', 'wall', 'floor', 'ceiling', 'person'])
     parser.add_argument('--box_threshold', type=float, default=0.35)
     parser.add_argument('--text_threshold', type=float, default=0.35)
     parser.add_argument('--nms_threshold', type=float, default=0.8)
@@ -52,6 +53,8 @@ if __name__ == '__main__':
     os.makedirs(masks_path, exist_ok=True)
     labels_path = args.labels_path
     os.makedirs(labels_path, exist_ok=True)
+    if args.annotated_images_path:
+        os.makedirs(args.annotated_images_path, exist_ok=True)
     # detections_path = os.path.join(args.output_path, 'detections')
     # os.makedirs(detections_path, exist_ok=True)
     # rgb_masks_path = os.path.join(args.output_path, 'rgb_masks')
@@ -140,15 +143,15 @@ if __name__ == '__main__':
             torch.save(masks.permute(0, 2, 1).flip(1), os.path.join(masks_path, f'{os.path.splitext(os.path.basename(image_name))[0]}.pt')) # bool[masks, h, w]
             torch.save(torch.from_numpy(detections.class_id), os.path.join(labels_path, f'{os.path.splitext(os.path.basename(image_name))[0]}.pt')) # int[masks]
 
-
-        box_annotator = sv.BoxAnnotator()
-        mask_annotator = sv.MaskAnnotator()
-        label_annotator = sv.LabelAnnotator()
-        labels = [
-            f"{args.classes[class_id]} {confidence:0.2f}" 
-            for _, _, confidence, class_id, _, _ 
-            in detections]
-        annotated_image = mask_annotator.annotate(scene=rotated_image.copy(), detections=detections)
-        annotated_image = box_annotator.annotate(scene=annotated_image, detections=detections)
-        annotated_image = label_annotator.annotate(scene=annotated_image, detections=detections, labels=labels)
-        # cv2.imwrite(os.path.join(rgb_masks_path, f'{os.path.splitext(os.path.basename(image_name))[0]}.jpg'), cv2.rotate(annotated_image, cv2.ROTATE_90_COUNTERCLOCKWISE))
+        if args.annotated_images_path:
+            box_annotator = sv.BoxAnnotator()
+            mask_annotator = sv.MaskAnnotator()
+            label_annotator = sv.LabelAnnotator()
+            labels = [
+                f"{args.classes[class_id]} {confidence:0.2f}" 
+                for _, _, confidence, class_id, _, _ 
+                in detections]
+            annotated_image = mask_annotator.annotate(scene=rotated_image.copy(), detections=detections)
+            annotated_image = box_annotator.annotate(scene=annotated_image, detections=detections)
+            annotated_image = label_annotator.annotate(scene=annotated_image, detections=detections, labels=labels)
+            cv2.imwrite(os.path.join(args.annotated_images_path, f'{os.path.splitext(os.path.basename(image_name))[0]}.jpg'), cv2.rotate(annotated_image, cv2.ROTATE_90_COUNTERCLOCKWISE))

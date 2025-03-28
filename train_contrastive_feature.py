@@ -38,6 +38,58 @@ except ImportError:
     TENSORBOARD_FOUND = False
 
 from sklearn.preprocessing import QuantileTransformer
+
+import torch
+
+def uniform_sample(xyz, n_samples):
+    device = xyz.device
+    N, _ = xyz.shape
+    # 生成均匀随机采样的索引
+    selected_indices = torch.randperm(N,device=device)[:n_samples]
+    # 创建全False的布尔张量
+    mask = torch.zeros(N, dtype=torch.bool, device=device)
+    # 将选中的位置设置为True
+    mask[selected_indices] = True
+    return mask
+
+def farthest_point_sample(xyz, n_samples):
+    """
+    输入：
+        xyz:       点云坐标，形状为 [N, 3] 的PyTorch张量
+        n_samples: 需要采样的点数
+    输出：
+        mask:      布尔掩码，形状为 [N]，True表示被采样的点
+    """
+    xyz = xyz.detach().cpu()
+    device = xyz.device
+    N, _ = xyz.shape
+    
+    # 初始化采样点索引和距离矩阵
+    centroids = torch.zeros(n_samples, dtype=torch.long, device=device)
+    distance = torch.full((N,), float('inf'), device=device)
+    
+    # 随机选择第一个点（或按质心优化选择）
+    farthest = torch.randint(0, N, (1,), device=device).item()
+    
+    for i in range(n_samples):
+        centroids[i] = farthest
+        centroid = xyz[farthest].view(1, 3)
+        
+        # 计算所有点到当前采样点的欧氏距离
+        dist = torch.sum((xyz - centroid) ** 2, dim=1)
+        
+        # 更新每个点的最小距离（与已选点集的最近距离）
+        mask = dist < distance
+        distance[mask] = dist[mask]
+        
+        # 选择距离最大的点作为下一个采样点
+        farthest = torch.argmax(distance)
+    
+    # 生成布尔掩码
+    mask = torch.zeros(N, dtype=torch.bool, device=device)
+    mask[centroids] = True
+    return mask
+
 # Borrowed from GARField but modified
 def get_quantile_func(scales: torch.Tensor, distribution="normal"):
     """
@@ -71,7 +123,7 @@ def training(dataset, opt, pipe, iteration, saving_iterations, checkpoint_iterat
     dataset.need_masks = True
     dataset.allow_principle_point_shift = False
 
-    gaussians = GaussianModel(dataset.sh_degree)
+    gaussians = None #GaussianModel(dataset.sh_degree)
 
     feature_gaussians = FeatureGaussianModel(dataset.feature_dim)
 
@@ -103,6 +155,8 @@ def training(dataset, opt, pipe, iteration, saving_iterations, checkpoint_iterat
     
     first_iter = 0
     viewpoint_stack = None
+    if not opt.iterations:
+        opt.iterations = min(len(scene.getTrainCameras())*10, 10000)
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
 
@@ -301,9 +355,23 @@ def training(dataset, opt, pipe, iteration, saving_iterations, checkpoint_iterat
         sampled_mask_negative = sampled_mask_negative.bool()
 
         per_pixel_weight = per_pixel_weight.unsqueeze(0)
+
+        min_val = torch.min(feature_gaussians.get_xyz, dim=0).values
+        max_val = torch.max(feature_gaussians.get_xyz, dim=0).values
+        new_min = 0.0
+        new_max = 1.0
+        std_point_xyz = (feature_gaussians.get_xyz - min_val) / (max_val - min_val) * (new_max - new_min) + new_min
+        sample_mask = uniform_sample(feature_gaussians.get_xyz, opt.distance_sample_num)
+        sample_xyz = std_point_xyz[sample_mask]
+        sample_features = feature_gaussians.get_point_features[sample_mask]
+        sample_scaled_features = torch.nn.functional.normalize(sample_features[None,...]*gates[:,None,...])
+        ptp_xyz_distance = torch.norm(sample_xyz[:,None,:] - sample_xyz[None,:,:], dim=-1) # float[fps,fps]
+        ptp_feature_sim = torch.einsum('sac, sbc -> sab', sample_scaled_features, sample_scaled_features) # float[scale,fps,fps]
+        distance_loss = (ptp_xyz_distance*torch.clamp(ptp_feature_sim,0)).mean()
+
         loss = (- per_pixel_weight[:, sampled_mask_positive] * gt_corrs[:, sampled_mask_positive] * corr[:, sampled_mask_positive]).mean().nan_to_num() \
                 + (per_pixel_weight[:, sampled_mask_negative] * (1 - gt_corrs[:, sampled_mask_negative]) * torch.relu(corr[:, sampled_mask_negative])).mean().nan_to_num() \
-                + opt.rfn * rendered_feature_norm_reg
+                + opt.rfn * rendered_feature_norm_reg + opt.distance_weight * distance_loss
 
         with torch.no_grad():
             cosine_pos = corr[gt_corrs == 1].mean().nan_to_num()
