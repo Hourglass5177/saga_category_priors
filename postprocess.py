@@ -47,7 +47,7 @@ parser.add_argument("--feature_ratio", type=float, default=0.5)
 parser.add_argument("--instance_threshold", type=float, default=0.3)
 parser.add_argument("--label_threshold", type=float, default=0.3)
 parser.add_argument("--sample_num", type=int, default=10000)
-parser.add_argument("--classes", nargs="+", type=str, default=['chair', 'table', 'plant', 'flower', 'foliage', 'wall', 'floor', 'ceiling', 'person'])
+parser.add_argument("--classes", nargs="+", type=str, default=['chair', 'table', 'plant', 'flower', 'foliage', 'tv', 'painting', 'sofa', 'cabinet', 'bed', 'wall', 'floor', 'ceiling', 'person'])
 args = parser.parse_args(sys.argv[1:])
 bg_color = torch.tensor([1,1,1] if args.white_background else [0, 0, 0], dtype=torch.float32, device="cuda")
 torch.manual_seed(42)
@@ -209,7 +209,7 @@ def get_class(classes, ratio:np.ndarray):
 output = dict()
 output['point_labels'] = point_labels.tolist()
 output['instances'] = {instance: {'class': get_class(args.classes, ratio)} for instance, ratio in instance_ratio.items()}
-output['instances'] = {k: v for k, v in output['instances'].items() if v.get('class') in ['chair','table', 'plant', 'flower', 'foliage']}
+output['instances'] = {k: v for k, v in output['instances'].items() if v.get('class') in ['chair', 'table', 'plant', 'flower', 'foliage', 'tv', 'painting', 'sofa', 'cabinet', 'bed']}
 with open(args.json_path,'w') as f:
     json.dump(output,f)
 if(args.clean):
