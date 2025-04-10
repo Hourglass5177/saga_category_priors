@@ -345,11 +345,8 @@ class GaussianSplattingGUI:
             self.cluster_in_3D_flag =True
         def callback_label_change(sender, app_data, user_data):
             self.label = int(list(self.json['instances'].keys())[(list(self.json['instances'].keys()).index(str(self.label))+user_data)%len(list(self.json['instances'].keys()))])
-            # langauge_feature = self.langauge_features[self.label, ...]
-            # sims = get_relevancy(langauge_feature, self.pembed, self.nembed)
-            # sims, _ = torch.max(sims, dim=1)
-            # _, index = torch.max(sims, dim=0)
             dpg.set_value('label', f'{self.label}:{self.json['instances'][str(self.label)]}')
+            self.engine['scene'].get_xyz[self.point_labels==self.label]
         def callback_reshuffle_color():
             self.label_to_color = np.random.rand(1000, 3)
             try:
@@ -774,7 +771,7 @@ class GaussianSplattingGUI:
                 self.render_buffer = self.rendered_cluster.cpu().numpy().reshape(-1) if self.render_buffer is None else self.render_buffer + self.rendered_cluster.cpu().numpy().reshape(-1)
             render_num += 1
         if self.render_mode_label:
-            self.render_buffer = render(view_camera, self.engine['scene'], self.opt, self.bg_color, filtered_mask=~(self.point_labels==self.label))['render'].permute(1,2,0).cpu().numpy().reshape(-1)
+            self.render_buffer = render(view_camera, self.engine['scene'], self.opt, self.bg_color, filtered_mask=~((self.point_labels==self.label)))['render'].permute(1,2,0).cpu().numpy().reshape(-1)
             render_num += 1
         if self.render_mode_similarity:
             if score_map is not None:

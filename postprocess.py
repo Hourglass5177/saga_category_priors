@@ -46,7 +46,8 @@ parser.add_argument("--k", type=int, default=256)
 parser.add_argument("--feature_ratio", type=float, default=0.5)
 parser.add_argument("--instance_threshold", type=float, default=0.3)
 parser.add_argument("--label_threshold", type=float, default=0.3)
-parser.add_argument("--big_gaussian_threshold", type=float, default=0.8)
+parser.add_argument("--scale_threshold", type=float, default=0.8)
+parser.add_argument("--opcity_threshold", type=float, default=0.005)
 parser.add_argument("--sample_num", type=int, default=10000)
 parser.add_argument("--classes", nargs="+", type=str, default=['chair', 'table', 'plant', 'flower', 'foliage', 'tv', 'painting', 'sofa', 'cabinet', 'bed', 'wall', 'floor', 'ceiling', 'person'])
 args = parser.parse_args(sys.argv[1:])
@@ -79,7 +80,9 @@ camera_list = cameraList_from_camInfos(cameras, 1, args)
 point_features = feat_gs_model.get_point_features.detach().cpu()
 point_xyz = feat_gs_model.get_xyz.detach().cpu()
 point_scales = feat_gs_model.get_scaling.detach().cpu()
-is_big_gaussian = point_scales.max(dim=-1).values>point_scales.max(dim=-1).values.median()*args.big_gaussian_threshold
+is_big_gaussian = point_scales.max(dim=-1).values>point_scales.max(dim=-1).values.median()*args.scale_threshold
+point_opacities = feat_gs_model.get_opacity.detach().cpu()
+is_transparent_gaissian = point_opacities<args.opcity_threshold
 gates = scale_gate(torch.tensor([args.scale]).cuda()).unsqueeze(0).detach().cpu()
 print(f'{point_features.shape=}, {point_xyz.shape=}')
 
@@ -212,6 +215,7 @@ def get_class(classes, ratio:np.ndarray):
 output = dict()
 output['point_labels'] = point_labels.tolist()
 output['is_big_gaussian'] = is_big_gaussian.tolist()
+output['is_transparent_gaissian'] = is_transparent_gaissian.tolist()
 output['instances'] = {instance: {'class': get_class(args.classes, ratio)} for instance, ratio in instance_ratio.items()}
 output['instances'] = {k: v for k, v in output['instances'].items() if v.get('class') in ['chair', 'table', 'plant', 'flower', 'foliage', 'tv', 'painting', 'sofa', 'cabinet', 'bed']}
 with open(args.json_path,'w') as f:
