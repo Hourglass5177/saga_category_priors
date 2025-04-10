@@ -81,7 +81,7 @@ point_features = feat_gs_model.get_point_features.detach().cpu()
 point_xyz = feat_gs_model.get_xyz.detach().cpu()
 point_scales = feat_gs_model.get_scaling.detach().cpu()
 is_big_gaussian = point_scales.max(dim=-1).values>point_scales.max(dim=-1).values.median()*args.scale_threshold
-point_opacities = feat_gs_model.get_opacity.detach().cpu()
+point_opacities = feat_gs_model.get_opacity.detach().cpu().squeeze()
 is_transparent_gaissian = point_opacities<args.opcity_threshold
 gates = scale_gate(torch.tensor([args.scale]).cuda()).unsqueeze(0).detach().cpu()
 print(f'{point_features.shape=}, {point_xyz.shape=}')
