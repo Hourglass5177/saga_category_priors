@@ -71,4 +71,4 @@ json_path：输出的json结果文件路径，必要参数
 
 python train_contrastive_feature.py --sh_degree 3 --feature_dim 32 --images_path data/temp/tys/images/ --sparse_path data/temp/tys/sparse/0/ --masks_path data/temp/tys/masks --mask_scales_path data/temp/tys/mask_scales --point_cloud_path data/temp/tys/point_cloud/iteration_30000/scene_point_cloud.ply --contrastive_feature_point_cloud_path data/temp/tys/contrastive_feature_point_cloud.ply --scale_gate_path data/temp/tys/scale_gate.pt --iterations 10000 --num_sampled_rays 1000
 
-zip -r SegAnyGAussians.zip . -x './data/**' './output/**' './third_party/**' './weights/**
+zip -r SegAnyGAussians.zip . -x './data/**' './output/**' './third_party/**' './weights/**'
