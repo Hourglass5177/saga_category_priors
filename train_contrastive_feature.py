@@ -187,6 +187,8 @@ def training(dataset, opt, pipe, iteration, saving_iterations, checkpoint_iterat
         fixed_scale_gate = torch.tensor([[1 for j in range(32 - scale_aware_dim + i)] + [0 for k in range(scale_aware_dim - i)] for i in range(scale_aware_dim+1)]).cuda()
 
     for iteration in range(first_iter, opt.iterations + 1):
+        with open(args.progress_path, 'w') as f:
+            f.write(str(50+(iteration)*25//opt.iterations))
         iter_start.record()
 
         # Pick a random Camera
@@ -428,6 +430,7 @@ if __name__ == "__main__":
     lp = ModelParams(parser)
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
+    parser.add_argument("--progress_path", typr=str, required=True)
     parser.add_argument('--ip', type=str, default="127.0.0.1")
     parser.add_argument('--port', type=int, default=np.random.randint(10000, 20000))
     parser.add_argument('--debug_from', type=int, default=-1)

@@ -13,18 +13,19 @@ import supervision as sv
 import pickle
 
 if __name__ == '__main__':
-    
+
     parser = ArgumentParser(description="SAM masks extracting params")
     
     parser.add_argument("--images_path", '-s', type=str, required=True)
     parser.add_argument("--masks_path", type=str, required=True)
     parser.add_argument("--labels_path", type=str, required=True)
+    parser.add_argument("--progress_path", type=str, required=True)
     parser.add_argument("--annotated_images_path", '-a', type=str, default=None)
     parser.add_argument('--images', type=str, default='images')
-    parser.add_argument("--sam_checkpoint_path", default='third_party/segment-anything/weights/sam_vit_h_4b8939.pth', type=str)
+    parser.add_argument("--sam_checkpoint_path", default='weights/sam_vit_h_4b8939.pth', type=str)
     parser.add_argument("--sam_arch", default="vit_h", type=str)
-    parser.add_argument("--groundingdino_checkpoint_path", default='third_party/GroundingDINO/weights/groundingdino_swint_ogc.pth', type=str)
-    parser.add_argument("--groundingdino_config_path", default='third_party/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py', type=str)
+    parser.add_argument("--groundingdino_checkpoint_path", default='weights/groundingdino_swint_ogc.pth', type=str)
+    parser.add_argument("--groundingdino_config_path", default='weights/GroundingDINO_SwinT_OGC.py', type=str)
     parser.add_argument("--downsample", default=1, type=int)
     parser.add_argument("--downsample_type", default='image', type=str, choices=['image', 'mask'], help="Downsample then segment, or segment then downsample.")
     parser.add_argument('--classes', nargs='+', type=str, default=['chair', 'table', 'plant', 'flower', 'foliage', 'tv', 'painting', 'sofa', 'cabinet', 'bed', 'wall', 'floor', 'ceiling', 'person'])
@@ -88,7 +89,10 @@ if __name__ == '__main__':
         detections.xyxy = rotated_boxes
 
         return detections
-    for image_name in tqdm(sorted([e for e in os.listdir(images_path) if e.endswith('.jpg')])):
+    length = len(sorted([e for e in os.listdir(images_path) if e.endswith('.jpg')]))
+    for i, image_name in tqdm(list(enumerate(sorted([e for e in os.listdir(images_path) if e.endswith('.jpg')])))):
+        with open(args.progress_path, 'w') as f:
+            f.write(str((i+1)*25//length))
         image = cv2.imread(os.path.join(images_path, image_name))
         rotated_image = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
         if downsample_manually:

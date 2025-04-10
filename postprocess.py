@@ -40,6 +40,7 @@ def uniform_sample(xyz, n_samples):
 parser = ArgumentParser(description="Training script parameters")
 lp = ModelParams(parser)
 pp = PipelineParams(parser)
+parser.add_argument("--progress_path", type=str, required=True)
 parser.add_argument("--clean", action='store_true')
 parser.add_argument("--scale", type=float, default=1.0)
 parser.add_argument("--k", type=int, default=256)
@@ -178,6 +179,8 @@ print(f'knn finish')
 
 vote = {instance: [0 for _ in range(len(args.classes)+1)] for instance in torch.unique(point_labels).tolist()} 
 for i, camera in tqdm(list(enumerate(camera_list))):
+    with open(args.progress_path, 'w') as f:
+        f.write(str(75+(i+1)*25//len(camera_list)))
     if not os.path.exists(os.path.join(args.masks_path, f'{camera.image_name}.pt')):
         continue
     masks = torch.load(os.path.join(args.masks_path, f'{camera.image_name}.pt')).float()

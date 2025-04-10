@@ -62,12 +62,13 @@ def generate_grid_index(depth):
 
 
 if __name__ == '__main__':
-    
+
     parser = ArgumentParser(description="Get scales for SAM masks")
 
     # model = ModelParams(parser, sentinel=True)
     model = ModelParams(parser)
     pipeline = PipelineParams(parser)
+    parser.add_argument("--progress_path", type=str, required=True)
     parser.add_argument("--iteration", default=-1, type=int)
     parser.add_argument("--skip_train", action="store_true")
     parser.add_argument("--skip_test", action="store_true")
@@ -114,8 +115,9 @@ if __name__ == '__main__':
 
     background = torch.zeros(scene_gaussians.get_mask.shape[0], 3, device = 'cuda')
 
-    for it, view in tqdm(enumerate(cameras)):
-
+    for it, view in tqdm(list(enumerate(cameras))):
+        with open(args.progress_path, 'w') as f:
+            f.write(25+str((it+1)*25//len(cameras)))
         rendered_pkg = gaussian_renderer.render_with_depth(view, scene_gaussians, pipeline.extract(args), background)
 
         depth = rendered_pkg['depth'] # pixel-wise
