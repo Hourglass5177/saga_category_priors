@@ -257,7 +257,7 @@ def training(dataset, opt, pipe, iteration, saving_iterations, checkpoint_iterat
             per_pixel_weight = torch.clamp(ptp_max_size / pixel_to_pixel_mask_size, 1.0, None)
             per_pixel_weight = (per_pixel_weight - per_pixel_weight.min()) / (per_pixel_weight.max() - per_pixel_weight.min() + 1e-9) * 9. + 1. # pixel的平均mask size越大其权重越小, float[sampled pixels, sampled pixels]
             
-            sam_masks_sampled_ray = sam_masks[:, sampled_ray]
+            sam_masks_sampled_ray = sam_masks[:, sampled_ray] # bool[masks, sampled pixels]
 
             gt_corrs = []
 
@@ -430,7 +430,7 @@ if __name__ == "__main__":
     lp = ModelParams(parser)
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
-    parser.add_argument("--progress_path", typr=str, required=True)
+    parser.add_argument("--progress_path", type=str, required=True)
     parser.add_argument('--ip', type=str, default="127.0.0.1")
     parser.add_argument('--port', type=int, default=np.random.randint(10000, 20000))
     parser.add_argument('--debug_from', type=int, default=-1)

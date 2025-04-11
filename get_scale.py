@@ -117,7 +117,7 @@ if __name__ == '__main__':
 
     for it, view in tqdm(list(enumerate(cameras))):
         with open(args.progress_path, 'w') as f:
-            f.write(25+str((it+1)*25//len(cameras)))
+            f.write(str(25+(it+1)*25//len(cameras)))
         rendered_pkg = gaussian_renderer.render_with_depth(view, scene_gaussians, pipeline.extract(args), background)
 
         depth = rendered_pkg['depth'] # pixel-wise
