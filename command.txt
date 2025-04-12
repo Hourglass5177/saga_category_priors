@@ -69,7 +69,7 @@ json_path：输出的json结果文件路径，必要参数
 
 
 
-base_path="data/temp/1743586632566.099"
+base_path="data/temp/suzongbangongshi"
 images_path="${base_path}/fastRecon/dense/sparse/0/images/"
 sparse_path="${base_path}/fastRecon/dense/sparse/0/"
 point_cloud_path="${base_path}/output_models/point_cloud/iteration_30000/point_cloud.ply"
