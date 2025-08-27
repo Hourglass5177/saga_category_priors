@@ -131,7 +131,11 @@ def training(dataset, opt, pipe, iteration, saving_iterations, checkpoint_iterat
     scene = Scene(dataset, gaussians, feature_gaussians, load_iteration=iteration, shuffle=False, target='contrastive_feature', mode='train', sample_rate=sample_rate)
 
     feature_gaussians.change_to_segmentation_mode(opt, "contrastive_feature", fixed_feature=False)
-
+    feature_gaussians._xyz.requires_grad_(False)
+    feature_gaussians._scaling.requires_grad_(False)
+    feature_gaussians._rotation.requires_grad_(False)
+    feature_gaussians._opacity.requires_grad_(False)
+    feature_gaussians._point_features.requires_grad_(True)
     # 30030
     scale_gate = torch.nn.Sequential(
         torch.nn.Linear(1, 32, bias=True),
@@ -188,7 +192,7 @@ def training(dataset, opt, pipe, iteration, saving_iterations, checkpoint_iterat
 
     for iteration in range(first_iter, opt.iterations + 1):
         with open(args.progress_path, 'w') as f:
-            f.write(str(50+(iteration)*25//opt.iterations))
+            f.write(str(0+(iteration)*100//opt.iterations))
         iter_start.record()
 
         # Pick a random Camera
@@ -199,7 +203,7 @@ def training(dataset, opt, pipe, iteration, saving_iterations, checkpoint_iterat
             viewpoint_cam = viewpoint_stack[0]
         else:
             viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
-        while viewpoint_cam.original_masks==None:
+        while viewpoint_cam.original_masks==None or viewpoint_cam.original_masks.shape[0]<2:
             if not viewpoint_stack:
                 viewpoint_stack = scene.getTrainCameras().copy()
             

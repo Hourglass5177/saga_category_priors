@@ -92,7 +92,7 @@ if __name__ == '__main__':
     length = len(sorted([e for e in os.listdir(images_path) if e.endswith('.jpg')]))
     for i, image_name in tqdm(list(enumerate(sorted([e for e in os.listdir(images_path) if e.endswith('.jpg')])))):
         with open(args.progress_path, 'w') as f:
-            f.write(str((i+1)*25//length))
+            f.write(str((i+1)*100//length))
         image = cv2.imread(os.path.join(images_path, image_name))
         rotated_image = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
         if downsample_manually:
