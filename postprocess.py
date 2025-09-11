@@ -214,12 +214,93 @@ def get_class(classes, ratio:np.ndarray):
     if ratio.max()<args.label_threshold:
         return 'background'
     return classes[ratio.argmax()]
-
+def get_bbox(point_labels, xyz, is_big_gaussian):
+    from trimesh.bounds import oriented_bounds_2D
+    dir1 = torch.tensor([0.,1.,0.])
+    bbox = {}
+    for instance_id in torch.unique(point_labels).tolist():
+        instance_xyz = xyz[(point_labels==instance_id)&~is_big_gaussian]
+        points_3d = instance_xyz.numpy()
+        # --- 1. 投影到X-Z平面 (忽略Y) ---
+        N, D = points_3d.shape
+        points_2d = points_3d[:, [0, 2]]  # shape: (N, 2), X和Z坐标
+        
+        # --- 2. 使用trimesh计算2D定向包围盒 ---
+        # 注意：oriented_bounds_2D 返回的是一个变换矩阵，将点变换后，其AABB中心在原点
+        transform_2d, rectangle_extents_2d = oriented_bounds_2D(
+            points_2d,
+        )
+        # transform_2d: (3, 3) 2D齐次变换矩阵
+        # rectangle_extents_2d: (2,) [width, height] in the transformed 2D space
+        
+        # --- 3. 将2D变换扩展为3D变换 ---
+        # 我们需要构造一个 (4, 4) 的3D齐次变换矩阵
+        transform_3d = np.eye(4)  # 初始化为单位矩阵
+        
+        # 将2D变换的旋转和平移部分复制到3D变换中
+        # transform_2d 是:
+        # [ R_xx  R_xz  tx ]
+        # [ R_zx  R_zz  tz ]
+        # [  0     0    1 ]
+        transform_3d[0, 0] = transform_2d[0, 0]  # R_xx
+        transform_3d[0, 2] = transform_2d[0, 1]  # R_xz
+        transform_3d[0, 3] = transform_2d[0, 2]  # tx
+        
+        transform_3d[2, 0] = transform_2d[1, 0]  # R_zx
+        transform_3d[2, 2] = transform_2d[1, 1]  # R_zz
+        transform_3d[2, 3] = transform_2d[1, 2]  # tz
+        
+        # Y轴保持不变: transform_3d[1,1] = 1, 其他为0 (已由eye(4)设置)
+        
+        # --- 4. 应用3D变换，将点云"摆正" ---
+        # 将3D点云转换为齐次坐标
+        points_3d_hom = np.hstack([points_3d, np.ones((N, 1))])  # (N, 4)
+        points_3d_transformed = (transform_3d @ points_3d_hom.T).T  # (N, 4)
+        points_3d_transformed = points_3d_transformed[:, :3]  # 去掉齐次维度 (N, 3)
+        
+        # --- 5. 计算变换后点云的AABB ---
+        aabb_min = points_3d_transformed.min(axis=0)  # (3,)
+        aabb_max = points_3d_transformed.max(axis=0)  # (3,)
+        
+        # Y方向的尺寸来自原始点云的Y范围
+        y_extent = points_3d[:, 1].max() - points_3d[:, 1].min()
+        # 注意：transform_3d 不改变Y坐标，所以 aabb_min[1] 和 aabb_max[1] 就是原始Y的平移
+        
+        # 在变换空间中构建8个角点 (局部坐标)
+        # 注意：X和Z来自rectangle_extents_2d，Y来自原始范围
+        half_extents_xz = rectangle_extents_2d / 2.0
+        # 由于transform_2d已经将AABB中心移到原点，所以角点在±half_extents
+        corners_local = np.array([
+            [ half_extents_xz[0],  aabb_max[1],  half_extents_xz[1]],
+            [ half_extents_xz[0],  aabb_max[1], -half_extents_xz[1]],
+            [ half_extents_xz[0],  aabb_min[1], -half_extents_xz[1]],
+            [ half_extents_xz[0],  aabb_min[1],  half_extents_xz[1]],
+            [-half_extents_xz[0],  aabb_max[1],  half_extents_xz[1]],
+            [-half_extents_xz[0],  aabb_max[1], -half_extents_xz[1]],
+            [-half_extents_xz[0],  aabb_min[1], -half_extents_xz[1]],
+            [-half_extents_xz[0],  aabb_min[1],  half_extents_xz[1]]
+        ])  # (8, 3)
+        
+        # --- 6. 将局部角点转换回世界坐标 ---
+        # 需要应用 transform_3d 的逆矩阵
+        transform_3d_inv = np.linalg.inv(transform_3d)
+        corners_local_hom = np.hstack([corners_local, np.ones((8, 1))])  # (8, 4)
+        bbox_corners_world_hom = (transform_3d_inv @ corners_local_hom.T).T  # (8, 4)
+        bbox_corners_world = bbox_corners_world_hom[:, :3]  # (8, 3)
+        bbox[instance_id] = torch.from_numpy(bbox_corners_world).flatten().tolist()
+    return bbox
+def combine_prop(bbox, clazz):
+    merged = {instance: {"bbox": bbox[instance], "class": clazz[instance]}
+            for instance in bbox.keys() & clazz.keys()}
+    return merged
+bbox = get_bbox(point_labels.cpu(), point_xyz, is_big_gaussian)
+clazz = {instance: get_class(args.classes, ratio) for instance, ratio in instance_ratio.items()}
 output = dict()
 output['point_labels'] = point_labels.tolist()
 output['is_big_gaussian'] = is_big_gaussian.tolist()
 output['is_transparent_gaissian'] = is_transparent_gaissian.tolist()
-output['instances'] = {instance: {'class': get_class(args.classes, ratio)} for instance, ratio in instance_ratio.items()}
+# output['instances'] = {instance: {'class': get_class(args.classes, ratio)} for instance, ratio in instance_ratio.items()}
+output['instances'] = combine_prop(bbox, clazz)
 output['instances'] = {k: v for k, v in output['instances'].items() if v.get('class') in ['chair', 'table', 'plant', 'flower', 'foliage', 'tv', 'painting', 'sofa', 'cabinet', 'bed']}
 with open(args.json_path,'w') as f:
     json.dump(output,f)
