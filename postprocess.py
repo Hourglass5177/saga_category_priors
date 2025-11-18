@@ -167,9 +167,23 @@ def filter3d(pos, label, k):
         new_label.append(bin[counts.index(max(counts))])
     print('finish filter3d')
     return torch.tensor(new_label).cuda()
+def filter_num(point_labels, min_num=10):
+    print('begin filter_num')
+    point_labels = point_labels.detach().cpu().numpy()
+    unique, counts = np.unique(point_labels, return_counts=True)
+    count_dict = dict(zip(unique, counts))
+    new_label = point_labels.copy()
+    for instance, count in count_dict.items():
+        if instance==-1:
+            continue
+        if count<min_num:
+            new_label[point_labels==instance] = -1
+    print('finish filter_num')
+    return torch.tensor(new_label)
 start_time = datetime.now()
 if args.k>0:
     point_labels = filter3d(point_xyz, point_labels, args.k)
+point_labels = filter_num(point_labels, min_num=10)
 end_time = datetime.now()
 elapsed_time = end_time - start_time
 print(f'{elapsed_time=}, {len(torch.unique(point_labels))=}') # 89, pytorch3d.ops.knn_points=49

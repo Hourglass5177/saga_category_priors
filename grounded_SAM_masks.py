@@ -11,6 +11,28 @@ from segment_anything import (SamAutomaticMaskGenerator, SamPredictor,
 from groundingdino.util.inference import Model
 import supervision as sv
 import pickle
+import hashlib
+
+def words_to_tensors(word_list, dim=32, device='cpu'):
+    """使用正弦余弦函数生成确定性向量"""
+    vectors = torch.zeros((len(word_list), dim), device=device)
+    
+    for i, word in enumerate(word_list):
+        hash_val = int(hashlib.md5(word.encode()).hexdigest()[:8], 16)
+        np.random.seed(hash_val)
+        
+        frequencies = np.random.randn(dim // 2) * 10
+        phases = np.random.rand(dim // 2) * 2 * np.pi
+        
+        for j in range(dim // 2):
+            vectors[i, 2*j] = torch.tensor(np.sin(frequencies[j] + phases[j]))
+            vectors[i, 2*j + 1] = torch.tensor(np.cos(frequencies[j] + phases[j]))
+    
+    # 添加归一化步骤
+    norms = torch.norm(vectors, p=2, dim=1, keepdim=True)
+    normalized_vectors = vectors / norms
+    
+    return normalized_vectors
 
 if __name__ == '__main__':
 
@@ -89,6 +111,7 @@ if __name__ == '__main__':
         detections.xyxy = rotated_boxes
 
         return detections
+    torch.save(words_to_tensors(args.classes), os.path.join(labels_path, 'features.pt'))
     length = len(sorted([e for e in os.listdir(images_path) if e.endswith('.jpg')]))
     for i, image_name in tqdm(list(enumerate(sorted([e for e in os.listdir(images_path) if e.endswith('.jpg')])))):
         with open(args.progress_path, 'w') as f:
