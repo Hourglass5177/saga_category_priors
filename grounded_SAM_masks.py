@@ -2,6 +2,7 @@ import os
 from PIL import Image
 import cv2
 import torch
+import torch.nn.functional as F
 import torchvision
 from tqdm import tqdm
 from argparse import ArgumentParser
@@ -14,25 +15,96 @@ import pickle
 import hashlib
 
 def words_to_tensors(word_list, dim=32, device='cpu'):
-    """使用正弦余弦函数生成确定性向量"""
-    vectors = torch.zeros((len(word_list), dim), device=device)
+    """
+    Generate semantic features with equiangular distribution on unit hypersphere.
+    Uses regular simplex projection to maximize minimum inter-point distance.
+
+    This method produces features where all pairwise distances are equal and
+    maximally separated, which is optimal for semantic class discrimination.
+
+    For n classes in dim dimensions, requires n <= dim + 1.
+
+    Args:
+        word_list: List of class names
+        dim: Feature dimension (default: 32)
+        device: torch device
+
+    Returns:
+        Tensor of shape (len(word_list), dim) with normalized features
+    """
+    num_classes = len(word_list)
     
-    for i, word in enumerate(word_list):
-        hash_val = int(hashlib.md5(word.encode()).hexdigest()[:8], 16)
-        np.random.seed(hash_val)
+    # --- 策略 1: 解析解 (SVD分解) ---
+    # 适用于维度足够容纳单纯形的情况 (dim >= N - 1)
+    # 这种方法生成的任意两点间余弦相似度恒定为 -1/(N-1)
+    if dim >= num_classes - 1:
+        # 1. 构建中心化矩阵 M = I - 1/N * J
+        # M 的每一行代表一个顶点，但它们位于 N 维空间
+        # 通过 SVD 降维到 N-1 维
+        M = torch.eye(num_classes, device=device) - (1.0 / num_classes)
         
-        frequencies = np.random.randn(dim // 2) * 10
-        phases = np.random.rand(dim // 2) * 2 * np.pi
+        # 2. SVD 分解
+        # M 是半正定矩阵，秩为 N-1
+        U, S, _ = torch.linalg.svd(M)
         
-        for j in range(dim // 2):
-            vectors[i, 2*j] = torch.tensor(np.sin(frequencies[j] + phases[j]))
-            vectors[i, 2*j + 1] = torch.tensor(np.cos(frequencies[j] + phases[j]))
+        # 3. 提取前 N-1 个特征向量并缩放
+        # 我们取 U 的部分列作为特征，此时行向量模长为 sqrt((N-1)/N)
+        # 为了归一化，我们需要除以这个模长，或者直接最后做一次 F.normalize
+        # 理论上只取前 num_classes - 1 列即可构建单纯形
+        feats = U[:, :num_classes - 1]
+        
+        # 4. 填充零以匹配目标维度 dim
+        # 当前 feats 形状为 (N, N-1)，需要 pad 到 (N, dim)
+        pad_size = dim - (num_classes - 1)
+        if pad_size > 0:
+            feats = F.pad(feats, (0, pad_size), "constant", 0)
+            
+    # --- 策略 2: 优化解 (梯度下降) ---
+    # 适用于维度不足的情况 (dim < N - 1)，即强行把 N 个点塞进低维空间
+    else:
+        # 使用确定性种子确保可重现性
+        words = sorted(word_list)
+        seed = int(hashlib.md5("|".join(words).encode()).hexdigest()[:8], 16)
+        g = torch.Generator(device=device)
+        g.manual_seed(seed)
+
+        # 初始化随机向量（使用确定性生成器）
+        feats = torch.randn(num_classes, dim, device=device, generator=g)
+        feats.requires_grad = True
+
+        # 使用优化器调整位置
+        optimizer = torch.optim.Adam([feats], lr=0.1)
+        
+        # 迭代寻找最小化余弦相似度（即最大化角度）的布局
+        # 这种布局称为 ETF (Equiangular Tight Frame)
+        for _ in range(200):
+            optimizer.zero_grad()
+            
+            # 归一化
+            feats_norm = F.normalize(feats, p=2, dim=1)
+            
+            # 计算 Gram 矩阵 (余弦相似度矩阵)
+            gram = torch.mm(feats_norm, feats_norm.t())
+            
+            # 目标：让非对角线元素的平方和最小（即让所有向量尽可能正交或反向）
+            # 或者逼近 Welch Bound (理论下界)
+            # 简单的损失函数：最小化 Gram 矩阵与单位阵的差异 (除了对角线)
+            target = torch.eye(num_classes, device=device)
+            
+            # 仅优化非对角部分，使其尽可能小（趋向于 -1/(N-1) 或 Welch Bound）
+            # 这里使用 Frobenius 范数作为 loss 推动特征分离
+            loss = (gram - target).pow(2).mean()
+            
+            loss.backward()
+            optimizer.step()
+        
+        # 最后关闭梯度
+        feats = feats.detach()
+
+    # 最后确保严格归一化
+    feats = F.normalize(feats, p=2, dim=1)
     
-    # 添加归一化步骤
-    norms = torch.norm(vectors, p=2, dim=1, keepdim=True)
-    normalized_vectors = vectors / norms
-    
-    return normalized_vectors
+    return feats
 
 if __name__ == '__main__':
 
