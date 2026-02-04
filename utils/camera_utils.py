@@ -49,11 +49,13 @@ def loadCam(args, id, cam_info, resolution_scale):
     gt_features = cam_info.features
     gt_masks = cam_info.masks
     mask_scales = cam_info.mask_scales
+    labels = cam_info.labels
+    label_features = cam_info.label_features
 
-    return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
-                  FoVx=cam_info.FovX, FoVy=cam_info.FovY, 
+    return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T,
+                  FoVx=cam_info.FovX, FoVy=cam_info.FovY,
                   image=gt_image, gt_alpha_mask=loaded_mask,
-                  image_name=cam_info.image_name, cx=cam_info.cx, cy=cam_info.cy, features=gt_features, masks = gt_masks, mask_scales = mask_scales, uid=id, data_device=args.data_device)
+                  image_name=cam_info.image_name, cx=cam_info.cx, cy=cam_info.cy, features=gt_features, masks=gt_masks, mask_scales=mask_scales, labels=labels, label_features=label_features, uid=id, data_device=args.data_device)
 
 # def loadCam(emmm):
 

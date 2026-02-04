@@ -65,6 +65,7 @@ class ModelParams(ParamGroup):
         self.images_path = ''
         self.masks_path = ''
         self.labels_path = ''
+        self.label_features_path = ''
         self.mask_scales_path = ''
         self.point_cloud_path = ''
         self.contrastive_feature_point_cloud_path = ''
@@ -95,6 +96,7 @@ class OptimizationParams(ParamGroup):
         self.position_lr_delay_mult = 0.01
         self.position_lr_max_steps = 30_000
         self.feature_lr = 0.0025
+        self.semantic_feature_lr = 0.0025
         # self.feature_lr = 0.01
         self.opacity_lr = 0.05
         self.scaling_lr = 0.005

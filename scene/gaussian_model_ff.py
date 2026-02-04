@@ -92,12 +92,13 @@ class FeatureGaussianModel:
         self.rotation_activation = torch.nn.functional.normalize
 
 
-    def __init__(self, feature_dim : int):
+    def __init__(self, feature_dim : int, semantic_feature_dim : int):
 
         self.active_sh_degree = 0
         self.max_sh_degree = 0
 
         self.feature_dim = feature_dim
+        self.semantic_feature_dim = semantic_feature_dim
 
         self.feature_smooth_map = None
         self.multi_res_feature_smooth_map = []
@@ -107,6 +108,7 @@ class FeatureGaussianModel:
         # self._features_dc = torch.empty(0)
         # self._features_rest = torch.empty(0)
         self._point_features = torch.empty(0)
+        self._point_semantic_features = torch.empty(0)
         self._scaling = torch.empty(0)
         self._rotation = torch.empty(0)
         self._opacity = torch.empty(0)
@@ -125,6 +127,7 @@ class FeatureGaussianModel:
         self.old_xyz = []
 
         self.old_point_features = []
+        self.old_semantic_features = []
         self.old_opacity = []
         self.old_scaling = []
         self.old_rotation = []
@@ -136,7 +139,8 @@ class FeatureGaussianModel:
             self._point_features.data[:,:] = 0
         elif target == 'contrastive_feature':
             self._point_features.data = torch.randn_like(self._point_features.data) * 1e-2
-
+        
+        self._point_semantic_features.data = torch.randn_like(self._point_semantic_features.data) * 1e-2
             # output [N,27] pe 
             # emb_func, dim = get_embedder(4)
             # xyz = self.get_xyz
@@ -154,6 +158,7 @@ class FeatureGaussianModel:
                 l = [
                     # {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
                     {'params': [self._point_features], 'lr': training_args.feature_lr, "name": "f"},
+                    {'params': [self._point_semantic_features], 'lr': training_args.semantic_feature_lr, "name": "sf"},
                     # {'params': [self._features_rest], 'lr': training_args.feature_lr / 20.0, "name": "f_rest"},
                     # {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
                     # {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
@@ -266,10 +271,11 @@ class FeatureGaussianModel:
 
         self.old_xyz.append(self._xyz)
         self.old_point_features.append(self._point_features)
+        self.old_semantic_features.append(self._point_semantic_features)
         self.old_opacity.append(self._opacity)
         self.old_scaling.append(self._scaling)
         self.old_rotation.append(self._rotation)
-        
+
         assert self.optimizer is None and "Please set optimizer to None"
 
         self._xyz = self._xyz[mask]
@@ -278,6 +284,8 @@ class FeatureGaussianModel:
         self._scaling = self._scaling[mask]
         self._rotation = self._rotation[mask]
         self._point_features = self._point_features[mask]
+        if self._point_semantic_features.shape[0] > 0:
+            self._point_semantic_features = self._point_semantic_features[mask]
 
         self.segment_times += 1
         tmp = self._mask[self._mask == self.segment_times]
@@ -288,10 +296,11 @@ class FeatureGaussianModel:
         try:
             self._xyz = self.old_xyz.pop()
             self._point_features = self.old_point_features.pop()
+            self._point_semantic_features = self.old_semantic_features.pop()
             self._opacity = self.old_opacity.pop()
             self._scaling = self.old_scaling.pop()
             self._rotation = self.old_rotation.pop()
-            
+
             self._mask[self._mask == self.segment_times+1] -= 1
             self.segment_times -= 1
         except:
@@ -303,12 +312,14 @@ class FeatureGaussianModel:
         try:
             self._xyz = self.old_xyz[0]
             self._point_features = self.old_point_features[0]
+            self._point_semantic_features = self.old_semantic_features[0]
             self._opacity = self.old_opacity[0]
             self._scaling = self.old_scaling[0]
             self._rotation = self.old_rotation[0]
 
             self.old_xyz = []
             self.old_point_features = []
+            self.old_semantic_features = []
             self.old_opacity = []
             self.old_scaling = []
             self.old_rotation = []
@@ -403,10 +414,12 @@ class FeatureGaussianModel:
     def capture(self):
         return (
             self.feature_dim,
+            self.semantic_feature_dim,
             self._xyz,
             # self._features_dc,
             # self._features_rest,
             self.get_point_features,
+            self.get_point_semantic_features,
             self._scaling,
             self._rotation,
             self._opacity,
@@ -416,20 +429,22 @@ class FeatureGaussianModel:
             self.optimizer.state_dict(),
             self.spatial_lr_scale,
         )
-    
+
     def restore(self, model_args, training_args):
-        (self.feature_dim, 
-        self._xyz, 
-        # self._features_dc, 
+        (self.feature_dim,
+        self.semantic_feature_dim,
+        self._xyz,
+        # self._features_dc,
         # self._features_rest,
         self.get_point_features,
-        self._scaling, 
-        self._rotation, 
+        self.get_point_semantic_features,
+        self._scaling,
+        self._rotation,
         self._opacity,
-        self.max_radii2D, 
-        xyz_gradient_accum, 
+        self.max_radii2D,
+        xyz_gradient_accum,
         denom,
-        opt_dict, 
+        opt_dict,
         self.spatial_lr_scale) = model_args
         self.training_setup(training_args)
         self.xyz_gradient_accum = xyz_gradient_accum
@@ -467,7 +482,11 @@ class FeatureGaussianModel:
             ], dim=1)
 
             return combined_feature
-    
+
+    @property
+    def get_point_semantic_features(self):
+        return self._point_semantic_features
+
     @property
     def get_opacity(self):
         return self.opacity_activation(self._opacity)
@@ -498,6 +517,7 @@ class FeatureGaussianModel:
         # features[:, :3, 0 ] = fused_color
         # features[:, 3:, 1:] = 0.0
         features = torch.zeros((fused_point_cloud.shape[0], self.feature_dim)).float().cuda()
+        semantic_features = torch.zeros((fused_point_cloud.shape[0], self.semantic_feature_dim)).float().cuda()
 
         print("Number of points at initialisation : ", fused_point_cloud.shape[0])
 
@@ -514,6 +534,7 @@ class FeatureGaussianModel:
         # self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
         # self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
         self._point_features = nn.Parameter(features.contiguous().requires_grad_(True))
+        self._point_semantic_features = nn.Parameter(semantic_features.contiguous().requires_grad_(True))
         self._scaling = nn.Parameter(scales.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
@@ -529,6 +550,7 @@ class FeatureGaussianModel:
         l = [
             {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
             {'params': [self._point_features], 'lr': training_args.feature_lr, "name": "f"},
+            {'params': [self._point_semantic_features], 'lr': training_args.semantic_feature_lr, "name": "sf"},
             # {'params': [self._features_rest], 'lr': training_args.feature_lr / 20.0, "name": "f_rest"},
             {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
             {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
@@ -554,6 +576,9 @@ class FeatureGaussianModel:
         # All channels except the 3 DC
         for i in range(self.get_point_features.shape[1]):
             l.append('f_{}'.format(i))
+        # Semantic features
+        for i in range(self.get_point_semantic_features.shape[1]):
+            l.append('sf_{}'.format(i))
         # for i in range(self._features_rest.shape[1]*self._features_rest.shape[2]):
         #     l.append('f_rest_{}'.format(i))
         l.append('opacity')
@@ -578,7 +603,9 @@ class FeatureGaussianModel:
             f = self.get_point_features.detach().contiguous().cpu().numpy()
         elif smooth_type == 'traditional':
             f = self.get_smoothed_point_features(K=smooth_K, dropout=-1).detach().contiguous().cpu().numpy()
-        
+
+        sf = self.get_point_semantic_features.detach().contiguous().cpu().numpy()
+
         opacities = self._opacity.detach().cpu().numpy()
         scale = self._scaling.detach().cpu().numpy()
         rotation = self._rotation.detach().cpu().numpy()
@@ -586,7 +613,7 @@ class FeatureGaussianModel:
         dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
 
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
-        attributes = np.concatenate((xyz, normals, f, opacities, scale, rotation), axis=1)
+        attributes = np.concatenate((xyz, normals, f, sf, opacities, scale, rotation), axis=1)
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, 'vertex')
         PlyData([el]).write(path)
@@ -623,6 +650,17 @@ class FeatureGaussianModel:
         # Reshape (P,F*SH_coeffs) to (P, F, SH_coeffs except DC)
         # features_extra = features_extra.reshape((features_extra.shape[0], self.feature_dim))
 
+        # Load semantic features if present
+        sf_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("sf_")]
+        assert self.semantic_feature_dim == len(sf_names)
+        if len(sf_names) > 0:
+            sf_names = sorted(sf_names, key = lambda x: int(x.split('_')[-1]))
+            semantic_features_extra = np.zeros((xyz.shape[0], len(sf_names)))
+            for idx, attr_name in enumerate(sf_names):
+                semantic_features_extra[:, idx] = np.asarray(plydata.elements[0][attr_name])
+        else:
+            semantic_features_extra = np.zeros((xyz.shape[0], 0))
+
         scale_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("scale_")]
         scale_names = sorted(scale_names, key = lambda x: int(x.split('_')[-1]))
         scales = np.zeros((xyz.shape[0], len(scale_names)))
@@ -639,6 +677,7 @@ class FeatureGaussianModel:
         # self._features_dc = nn.Parameter(torch.tensor(features_dc, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
         # self._features_rest = nn.Parameter(torch.tensor(features_extra, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
         self._point_features = nn.Parameter(torch.tensor(features_extra, dtype=torch.float, device="cuda").contiguous().requires_grad_(True))
+        self._point_semantic_features = nn.Parameter(torch.tensor(semantic_features_extra, dtype=torch.float, device="cuda").contiguous().requires_grad_(True))
         self._opacity = nn.Parameter(torch.tensor(opacities, dtype=torch.float, device="cuda").requires_grad_(True))
         self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device="cuda").requires_grad_(True))
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
@@ -664,6 +703,9 @@ class FeatureGaussianModel:
 
         features = torch.zeros((xyz.shape[0], self.feature_dim)).float().cuda()
         self._point_features = nn.Parameter(features.contiguous().requires_grad_(True))
+
+        semantic_features = torch.zeros((xyz.shape[0], self.semantic_feature_dim)).float().cuda()
+        self._point_semantic_features = nn.Parameter(semantic_features.contiguous().requires_grad_(True))
 
         scale_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("scale_")]
         scale_names = sorted(scale_names, key = lambda x: int(x.split('_')[-1]))
@@ -731,6 +773,9 @@ class FeatureGaussianModel:
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
+
+        if self._point_semantic_features.shape[0] > 0:
+            self._point_semantic_features = self._point_semantic_features[valid_points_mask]
 
         self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
 

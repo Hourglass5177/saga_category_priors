@@ -34,6 +34,8 @@ class CameraInfo(NamedTuple):
     features: torch.tensor
     masks: torch.tensor
     mask_scales: torch.tensor
+    labels: torch.tensor
+    label_features: torch.tensor
     image_path: str
     image_name: str
     width: int
@@ -71,8 +73,14 @@ def getNerfppNorm(cam_info):
 
     return {"translate": translate, "radius": radius}
 
-def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder, features_folder = None, masks_folder = None, mask_scale_folder = None, sample_rate = 1.0, allow_principle_point_shift = False):
+def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder, features_folder = None, masks_folder = None, mask_scale_folder = None, labels_folder = None, label_features_path = None, sample_rate = 1.0, allow_principle_point_shift = False):
     cam_infos = []
+
+    # Load label_features globally (same for all cameras)
+    label_features = None
+    if label_features_path and os.path.exists(label_features_path):
+        label_features = torch.load(label_features_path)
+
     for idx, key in enumerate(cam_extrinsics):
         if idx % 10 >= sample_rate * 10:
             continue
@@ -123,7 +131,11 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder, features_fo
             if mask_scale_folder and os.path.exists(os.path.join(mask_scale_folder, image_name_noext + ".pt")) \
                 else None
 
-        cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image, features=features, masks=masks, mask_scales = mask_scales,
+        labels = torch.load(os.path.join(labels_folder, image_name_noext + ".pt")) \
+            if labels_folder and os.path.exists(os.path.join(labels_folder, image_name_noext + ".pt")) \
+                else None
+
+        cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image, features=features, masks=masks, mask_scales=mask_scales, labels=labels, label_features=label_features,
                             image_path=os.path.join(images_folder, extr.name), image_name=image_name_noext, width=width, height=height, cx=intr.params[2] if len(intr.params) > 3 and allow_principle_point_shift else None, cy=intr.params[3] if len(intr.params) >3 and allow_principle_point_shift else None)
         cam_infos.append(cam_info)
     sys.stdout.write('\n')
@@ -173,7 +185,7 @@ def readColmapSceneInfo(path, images, eval, llffhold=8, need_features=False, nee
     mask_dir = "sam_masks"
     mask_scale_dir = "mask_scales"
 
-    cam_infos_unsorted = readColmapCameras(cam_extrinsics=cam_extrinsics, cam_intrinsics=cam_intrinsics, images_folder=args.images_path, features_folder=args.features_path, masks_folder=args.masks_path, mask_scale_folder=args.mask_scales_path, sample_rate=sample_rate, allow_principle_point_shift = allow_principle_point_shift)
+    cam_infos_unsorted = readColmapCameras(cam_extrinsics=cam_extrinsics, cam_intrinsics=cam_intrinsics, images_folder=args.images_path, features_folder=args.features_path, masks_folder=args.masks_path, mask_scale_folder=args.mask_scales_path, labels_folder=args.labels_path, label_features_path=args.label_features_path, sample_rate=sample_rate, allow_principle_point_shift = allow_principle_point_shift)
 
     if not replica:
         cam_infos = sorted(cam_infos_unsorted.copy(), key = lambda x : x.image_name)

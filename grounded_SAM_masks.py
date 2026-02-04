@@ -183,7 +183,7 @@ if __name__ == '__main__':
         detections.xyxy = rotated_boxes
 
         return detections
-    torch.save(words_to_tensors(args.classes), os.path.join(labels_path, 'features.pt'))
+    torch.save(words_to_tensors(args.classes), os.path.join(labels_path, 'label_features.pt'))
     length = len(sorted([e for e in os.listdir(images_path) if e.endswith('.jpg')]))
     for i, image_name in tqdm(list(enumerate(sorted([e for e in os.listdir(images_path) if e.endswith('.jpg')])))):
         with open(args.progress_path, 'w') as f:
