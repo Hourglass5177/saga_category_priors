@@ -37,6 +37,198 @@ def uniform_sample(xyz, n_samples):
     mask[selected_indices] = True
     return mask
 
+def select_points_by_semantic_similarity(point_features, label_features, class_idx,
+                                         threshold, device='cpu'):
+    """
+    Select points based on semantic feature similarity to a specific class.
+
+    Args:
+        point_features: [N, feature_dim] - Normalized point features
+        label_features: [num_classes, feature_dim] - Normalized class features
+        class_idx: int - Index of target class in label_features
+        threshold: float - Minimum cosine similarity for selection
+        device: torch device
+
+    Returns:
+        selection_mask: [N] boolean tensor - True if point matches class
+        similarity_scores: [N] tensor - Cosine similarity scores
+    """
+    # Compute cosine similarity between all points and target class feature
+    class_feature = label_features[class_idx:class_idx+1]  # [1, feature_dim]
+    similarity = torch.einsum('nc,mc->nm', point_features, class_feature).squeeze(-1)  # [N]
+
+    # Select points above threshold
+    selection_mask = similarity >= threshold
+
+    return selection_mask, similarity
+
+def cluster_other_classes(point_features, point_xyz, label_features, class_to_idx,
+                          other_classes, args, device='cpu'):
+    """
+    Perform semantic-guided clustering for 'other_classes' (small objects).
+
+    Pipeline:
+    1. For each class in other_classes:
+       a. Select points with high similarity to class semantic feature
+       b. Sample selected points for efficiency
+       c. Apply HDBSCAN clustering with hybrid distance (instance + spatial + semantic)
+       d. Assign class label directly (no voting needed)
+
+    Args:
+        point_features: [N, feature_dim] - Normalized point features
+        point_xyz: [N, 3] - Spatial coordinates
+        label_features: [num_classes, feature_dim] - Semantic embeddings
+        class_to_idx: dict - Class name to index mapping
+        other_classes: list[str] - Classes to cluster with this method
+        args: ArgumentParser namespace with hyperparameters
+        device: torch device
+
+    Returns:
+        other_point_labels: [N] tensor - Instance labels (-1 for unassigned)
+        other_instance_to_class: dict - Mapping instance_id -> class_name
+    """
+    N = point_features.shape[0]
+    other_point_labels = torch.full((N,), -1, dtype=torch.long, device=device)
+    other_instance_to_class = {}
+    current_instance_id = 0
+
+    # Normalize spatial coordinates
+    min_val = torch.min(point_xyz, dim=0).values
+    max_val = torch.max(point_xyz, dim=0).values
+    std_point_xyz = (point_xyz - min_val) / (max_val - min_val)
+
+    for class_name in other_classes:
+        if class_name not in class_to_idx:
+            print(f"Warning: Class '{class_name}' not in label_features, skipping")
+            continue
+
+        class_idx = class_to_idx[class_name]
+        print(f"\nProcessing other class: {class_name} (idx={class_idx})")
+
+        # Step 1: Select points by semantic similarity
+        selection_mask, similarity_scores = select_points_by_semantic_similarity(
+            point_features, label_features, class_idx,
+            args.other_classes_similarity_threshold, device
+        )
+
+        num_selected = selection_mask.sum().item()
+        print(f"  Selected {num_selected} points (similarity >= {args.other_classes_similarity_threshold})")
+
+        if num_selected < args.other_classes_min_cluster_size:
+            print(f"  Skipping: insufficient points")
+            continue
+
+        # Step 2: Sample selected points for efficiency
+        selected_features = point_features[selection_mask]
+        selected_xyz = std_point_xyz[selection_mask]
+        selected_similarities = similarity_scores[selection_mask]
+
+        sample_size = min(num_selected, args.other_classes_sample_num)
+        sampled_indices = torch.randperm(num_selected, device=device)[:sample_size]
+        sampled_features = selected_features[sampled_indices]
+        sampled_xyz = selected_xyz[sampled_indices]
+        sampled_similarities = selected_similarities[sampled_indices]
+
+        # Step 3: Compute hybrid distance (instance feature + spatial + semantic)
+        # Instance feature distance
+        instance_feature_dist = torch.clamp(
+            1 - torch.einsum('ac,bc->ab', sampled_features, sampled_features), 0
+        )
+
+        # Spatial distance
+        spatial_dist = torch.clamp(
+            torch.norm(sampled_xyz[:, None, :] - sampled_xyz[None, :, :], dim=-1), 0
+        )
+
+        # Semantic distance: 1 - similarity to class feature (lower is better)
+        # Both points should be similar to the class semantic feature
+        semantic_sim_matrix = torch.outer(sampled_similarities, sampled_similarities)
+        # Use negative correlation: if both points have high similarity, semantic distance should be low
+        semantic_dist = 1 - semantic_sim_matrix
+        semantic_dist = torch.clamp(semantic_dist, 0, 1)
+
+        # Normalize distances to [0, 1] range
+        if instance_feature_dist.max() > 0:
+            instance_feature_dist = instance_feature_dist / (instance_feature_dist.max() + 1e-8)
+        if spatial_dist.max() > 0:
+            spatial_dist = spatial_dist / (spatial_dist.max() + 1e-8)
+
+        # Hybrid distance with three components
+        hybrid_distance = (args.other_classes_feature_ratio * instance_feature_dist +
+                          args.other_classes_spatial_ratio * spatial_dist +
+                          args.other_classes_semantic_ratio * semantic_dist)
+
+        # Step 4: HDBSCAN clustering
+        clusterer = HDBSCAN(
+            min_cluster_size=args.other_classes_min_cluster_size,
+            cluster_selection_epsilon=0.01,
+            allow_single_cluster=False,
+            metric='precomputed'
+        )
+        cluster_labels = clusterer.fit_predict(hybrid_distance.numpy().astype(np.float64))
+
+        num_clusters = len([l for l in np.unique(cluster_labels) if l >= 0])
+        print(f"  Found {num_clusters} clusters")
+
+        if num_clusters == 0:
+            print(f"  Skipping: no valid clusters")
+            continue
+
+        # Step 5: Compute cluster centers for full assignment
+        feature_cluster_centers = []
+        xyz_cluster_centers = []
+
+        for i in np.unique(cluster_labels):
+            if i < 0:
+                continue
+            feature_cluster_centers.append(
+                F.normalize(sampled_features[cluster_labels == i].mean(dim=0), dim=-1)
+            )
+            xyz_cluster_centers.append(sampled_xyz[cluster_labels == i].mean(dim=0))
+
+        feature_cluster_centers = torch.stack(feature_cluster_centers)  # [num_clusters, feature_dim]
+        xyz_cluster_centers = torch.stack(xyz_cluster_centers)  # [num_clusters, 3]
+
+        # Step 6: Assign all selected points to clusters (not just sampled)
+        selected_feature_sim = torch.clamp(
+            torch.einsum('ac,bc->ab', selected_features, feature_cluster_centers), -1, 1
+        )
+        selected_xyz_sim = torch.clamp(
+            torch.exp(-torch.norm(selected_xyz[:, None, :] - xyz_cluster_centers[None, :, :], dim=-1)), 0, 1
+        )
+        selected_hybrid_sim = (args.other_classes_feature_ratio * selected_feature_sim +
+                              (1 - args.other_classes_feature_ratio) * selected_xyz_sim)
+        selected_confidence = torch.softmax(selected_hybrid_sim * 10, dim=-1)
+        selected_mask, selected_cluster_labels = selected_confidence.max(dim=-1)
+
+        # Apply threshold
+        below_threshold = selected_mask < args.instance_threshold
+        selected_cluster_labels[below_threshold] = -1
+
+        # Step 7: Map back to original point indices and assign instance IDs
+        selected_indices_original = torch.where(selection_mask)[0]
+
+        for local_cluster_id in range(num_clusters):
+            # Find points assigned to this cluster
+            points_in_cluster = (selected_cluster_labels == local_cluster_id)
+
+            if points_in_cluster.sum() < args.other_classes_min_cluster_size:
+                continue
+
+            # Get original point indices
+            original_indices = selected_indices_original[points_in_cluster]
+
+            # Assign instance ID (negative to avoid collision with main clustering)
+            instance_id = -(current_instance_id + 1)  # Use negative IDs
+            other_point_labels[original_indices] = instance_id
+            other_instance_to_class[instance_id] = class_name
+
+            current_instance_id += 1
+            print(f"  Instance {instance_id}: {points_in_cluster.sum()} points -> {class_name}")
+
+    print(f"\nSemantic-guided clustering complete: {current_instance_id} instances created")
+    return other_point_labels, other_instance_to_class
+
 parser = ArgumentParser(description="Training script parameters")
 lp = ModelParams(parser)
 pp = PipelineParams(parser)
@@ -50,7 +242,22 @@ parser.add_argument("--label_threshold", type=float, default=0.3)
 parser.add_argument("--scale_threshold", type=float, default=0.8)
 parser.add_argument("--opcity_threshold", type=float, default=0.005)
 parser.add_argument("--sample_num", type=int, default=10000)
-parser.add_argument("--classes", nargs="+", type=str, default=['chair', 'table', 'plant', 'flower', 'foliage', 'tv', 'painting', 'sofa', 'cabinet', 'bed', 'wall', 'floor', 'ceiling', 'person'])
+parser.add_argument("--classes", nargs="+", type=str, default=['chair', 'table', 'plant', 'flower', 'foliage', 'tv', 'painting', 'sofa', 'cabinet', 'bed', 'wall', 'floor', 'ceiling', 'person', 'socket', 'book', 'remote', 'key'])
+parser.add_argument("--selected_classes", nargs="+", type=str, default=['chair', 'table', 'plant', 'flower', 'foliage', 'tv', 'painting', 'sofa', 'cabinet', 'bed', 'socket', 'book', 'remote', 'key'])
+parser.add_argument("--other_classes", nargs="+", type=str, default=['socket', 'book', 'remote', 'key'])
+# New arguments for semantic-guided clustering of other_classes
+parser.add_argument("--other_classes_similarity_threshold", type=float, default=0.7,
+                    help="Minimum cosine similarity to class semantic feature for point selection")
+parser.add_argument("--other_classes_min_cluster_size", type=int, default=5,
+                    help="Minimum cluster size for HDBSCAN on other_classes")
+parser.add_argument("--other_classes_sample_num", type=int, default=5000,
+                    help="Number of points to sample for clustering other_classes")
+parser.add_argument("--other_classes_feature_ratio", type=float, default=0.5,
+                    help="Weight of instance feature distance in hybrid distance (0-1)")
+parser.add_argument("--other_classes_spatial_ratio", type=float, default=0.3,
+                    help="Weight of spatial distance in hybrid distance (0-1)")
+parser.add_argument("--other_classes_semantic_ratio", type=float, default=0.2,
+                    help="Weight of semantic feature similarity in hybrid distance (0-1)")
 args = parser.parse_args(sys.argv[1:])
 bg_color = torch.tensor([1,1,1] if args.white_background else [0, 0, 0], dtype=torch.float32, device="cuda")
 torch.manual_seed(42)
@@ -86,6 +293,18 @@ point_opacities = feat_gs_model.get_opacity.detach().cpu().squeeze()
 is_transparent_gaissian = point_opacities<args.opcity_threshold
 gates = scale_gate(torch.tensor([args.scale]).cuda()).unsqueeze(0).detach().cpu()
 print(f'{point_features.shape=}, {point_xyz.shape=}')
+
+# Load label features for semantic-guided clustering of other_classes
+label_features_path = os.path.join(args.labels_path, 'label_features.pt')
+if os.path.exists(label_features_path):
+    label_features = torch.load(label_features_path)
+    # Create dictionary mapping class names to feature indices
+    class_to_idx = {cls_name: idx for idx, cls_name in enumerate(args.classes)}
+    print(f"Loaded label features: {label_features.shape}, num_classes: {len(args.classes)}")
+else:
+    label_features = None
+    class_to_idx = None
+    print("Warning: label_features.pt not found, semantic-guided clustering disabled")
 
 sampled_mask = uniform_sample(point_xyz, args.sample_num)
 # sampled_mask = torch.rand(point_features.shape[0]) > 0.99
@@ -142,6 +361,39 @@ print(f'{mask.sum()=}, {(~mask).sum()=}')
 point_labels[~mask] = -1
 print(f'{elapsed_time=}, {len(torch.unique(point_labels))=}') # 3
 print(f'HDBSCAN finish')
+
+# ========== SEMANTIC-GUIDED CLUSTERING (for other_classes) ==========
+if label_features is not None and class_to_idx is not None and len(args.other_classes) > 0:
+    print(f"\n{'='*60}")
+    print(f"Starting semantic-guided clustering for other_classes")
+    print(f"Classes: {args.other_classes}")
+    print(f"Feature ratio: {args.other_classes_feature_ratio}, Spatial ratio: {args.other_classes_spatial_ratio}, Semantic ratio: {args.other_classes_semantic_ratio}")
+    print(f"{'='*60}")
+
+    other_point_labels, other_instance_to_class = cluster_other_classes(
+        normed_point_features.clone(),  # Use normalized features
+        point_xyz.clone(),
+        label_features,
+        class_to_idx,
+        args.other_classes,
+        args,
+        device='cpu'
+    )
+
+    # ========== MERGE other_class instances into main labels (BEFORE filters) ==========
+    if len(other_instance_to_class) > 0:
+        # Convert negative IDs to positive, offset by max main instance ID
+        max_main_instance_id = point_labels.max().item() if point_labels.max() >= 0 else -1
+
+        for neg_instance_id in other_instance_to_class.keys():
+            new_instance_id = max_main_instance_id + (-neg_instance_id)  # Convert -1 -> max+1, -2 -> max+2, etc.
+            point_labels[other_point_labels == neg_instance_id] = new_instance_id
+
+        print(f"Merged {len(other_instance_to_class)} other_class instances into main labels")
+        print(f"Total instances before filters: {len(torch.unique(point_labels))}")
+
+    print(f"{'='*60}\n")
+
 def filter3d(pos, label, k):
     print('begin filter3d')
     assert pos.shape[0] == label.shape[0]
@@ -315,7 +567,7 @@ output['is_big_gaussian'] = is_big_gaussian.tolist()
 output['is_transparent_gaissian'] = is_transparent_gaissian.tolist()
 # output['instances'] = {instance: {'class': get_class(args.classes, ratio)} for instance, ratio in instance_ratio.items()}
 output['instances'] = combine_prop(bbox, clazz)
-output['instances'] = {k: v for k, v in output['instances'].items() if v.get('class') in ['chair', 'table', 'plant', 'flower', 'foliage', 'tv', 'painting', 'sofa', 'cabinet', 'bed']}
+output['instances'] = {k: v for k, v in output['instances'].items() if v.get('class') in args.selected_classes}
 with open(args.json_path,'w') as f:
     json.dump(output,f)
 if(args.clean):

@@ -1,4 +1,5 @@
 import os
+os.environ['HF_ENDPOINT']='https://hf-mirror.com'
 from PIL import Image
 import cv2
 import torch
@@ -113,6 +114,7 @@ if __name__ == '__main__':
     parser.add_argument("--images_path", '-s', type=str, required=True)
     parser.add_argument("--masks_path", type=str, required=True)
     parser.add_argument("--labels_path", type=str, required=True)
+    parser.add_argument("--label_features_path", type=str, required=True)
     parser.add_argument("--progress_path", type=str, required=True)
     parser.add_argument("--annotated_images_path", '-a', type=str, default=None)
     parser.add_argument('--images', type=str, default='images')

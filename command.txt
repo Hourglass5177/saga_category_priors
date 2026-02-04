@@ -76,6 +76,7 @@ point_cloud_path="${base_path}/output_models/point_cloud/iteration_30000/point_c
 
 masks_path="${base_path}/masks"
 labels_path="${base_path}/labels"
+label_features_path="${base_path}/labels/label_features.pt"
 
 mask_scales_path="${base_path}/mask_scales"
 
@@ -89,7 +90,7 @@ sam_checkpoint_path="weights/sam_vit_h_4b8939.pth"
 groundingdino_checkpoint_path="weights/groundingdino_swint_ogc.pth"
 groundingdino_config_path="weights/GroundingDINO_SwinT_OGC.py"
 
-python grounded_SAM_masks.py --progress_path $progress_path --images_path $images_path --masks_path $masks_path --labels_path $labels_path --sam_checkpoint_path $sam_checkpoint_path --groundingdino_checkpoint_path $groundingdino_checkpoint_path --groundingdino_config_path $groundingdino_config_path --downsample 1 && \
+python grounded_SAM_masks.py --progress_path $progress_path --images_path $images_path --masks_path $masks_path --labels_path $labels_path --label_features_path $label_features_path --sam_checkpoint_path $sam_checkpoint_path --groundingdino_checkpoint_path $groundingdino_checkpoint_path --groundingdino_config_path $groundingdino_config_path --downsample 1 && \
 
 python get_scale.py --progress_path $progress_path --sh_degree 0 --masks_path $masks_path --point_cloud_path $point_cloud_path --sparse_path $sparse_path --images_path $images_path --mask_scales_path $mask_scales_path && \
 

@@ -12,7 +12,7 @@
 import os
 import torch
 from random import randint
-from gaussian_renderer import render_contrastive_feature
+from gaussian_renderer import render_contrastive_feature, render_semantic_feature
 import sys
 from scene import Scene, GaussianModel, FeatureGaussianModel
 from utils.general_utils import safe_state
@@ -378,6 +378,35 @@ def training(dataset, opt, pipe, iteration, saving_iterations, checkpoint_iterat
         loss = (- per_pixel_weight[:, sampled_mask_positive] * gt_corrs[:, sampled_mask_positive] * corr[:, sampled_mask_positive]).mean().nan_to_num() \
                 + (per_pixel_weight[:, sampled_mask_negative] * (1 - gt_corrs[:, sampled_mask_negative]) * torch.relu(corr[:, sampled_mask_negative])).mean().nan_to_num() \
                 + opt.rfn * rendered_feature_norm_reg + opt.distance_weight * distance_loss
+        
+        semantic_pkg = render_semantic_feature(viewpoint_cam, feature_gaussians, pipe, background, norm_point_features=True)
+        semantic_map = semantic_pkg["render"]  # [C, H, W]
+
+        # Build semantic_map_gt from labels and label_features
+        # sam_masks: [N_masks, H, W] (already sorted by scale)
+        # labels: class indices for each mask
+        # label_features: [num_classes, C] feature vectors per class
+        C, H, W = semantic_map.shape
+        semantic_map_gt = torch.zeros(C, H, W, device="cuda")
+
+        # Sort labels to match the sorted sam_masks
+        if viewpoint_cam.labels is not None and viewpoint_cam.label_features is not None:
+            labels_sorted = viewpoint_cam.labels[sort_indices]  # [N_masks]
+            label_features = viewpoint_cam.label_features.cuda()  # [num_classes, C]
+
+            # Build semantic map GT by iterating masks from largest to smallest scale
+            # Later masks (smaller scale) override earlier ones for overlapping pixels
+            for mask_idx in range(len(sam_masks)):
+                mask = sam_masks[mask_idx]  # [H, W]
+                label_idx = labels_sorted[mask_idx]
+                if label_idx >= 0 and label_idx < len(label_features):
+                    semantic_map_gt[:, mask] = label_features[label_idx].unsqueeze(1)  # [C] -> [C, num_pixels]
+
+        # Compute semantic L2 loss
+        semantic_loss = torch.tensor(0.0, device="cuda")
+        if viewpoint_cam.labels is not None and viewpoint_cam.label_features is not None:
+            semantic_loss = ((semantic_map - semantic_map_gt) ** 2).mean()
+            loss = loss + opt.semantic_loss_weight * semantic_loss
 
         with torch.no_grad():
             cosine_pos = corr[gt_corrs == 1].mean().nan_to_num()
@@ -395,6 +424,7 @@ def training(dataset, opt, pipe, iteration, saving_iterations, checkpoint_iterat
                 "RFN": f"{rendered_feature_norm.item():.{3}f}",
                 "Pos cos": f"{cosine_pos.item():.{3}f}",
                 "Neg cos": f"{cosine_neg.item():.{3}f}",
+                "Sem Loss": f"{semantic_loss.item():.{4}f}",
                 "Loss": f"{loss.item():.{3}f}",
             })
             progress_bar.update(10)

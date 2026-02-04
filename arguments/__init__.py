@@ -125,6 +125,7 @@ class OptimizationParams(ParamGroup):
         self.rfn = 1.
         self.distance_weight = 100.
         self.distance_sample_num = 1000
+        self.semantic_loss_weight = 1.0
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser, target_cfg_file = None):
