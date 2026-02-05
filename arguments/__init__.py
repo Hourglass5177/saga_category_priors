@@ -48,6 +48,7 @@ class ModelParams(ParamGroup):
     def __init__(self, parser, sentinel=False):
         self.sh_degree = 3
         self.feature_dim = 32
+        self.semantic_feature_dim = 32
         self.init_from_3dgs_pcd = False
         self._source_path = ""
         self._model_path = ""

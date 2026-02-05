@@ -37,13 +37,13 @@ def uniform_sample(xyz, n_samples):
     mask[selected_indices] = True
     return mask
 
-def select_points_by_semantic_similarity(point_features, label_features, class_idx,
+def select_points_by_semantic_similarity(point_semantic_features, label_features, class_idx,
                                          threshold, device='cpu'):
     """
     Select points based on semantic feature similarity to a specific class.
 
     Args:
-        point_features: [N, feature_dim] - Normalized point features
+        point_semantic_features: [N, feature_dim] - Normalized point features
         label_features: [num_classes, feature_dim] - Normalized class features
         class_idx: int - Index of target class in label_features
         threshold: float - Minimum cosine similarity for selection
@@ -55,14 +55,14 @@ def select_points_by_semantic_similarity(point_features, label_features, class_i
     """
     # Compute cosine similarity between all points and target class feature
     class_feature = label_features[class_idx:class_idx+1]  # [1, feature_dim]
-    similarity = torch.einsum('nc,mc->nm', point_features, class_feature).squeeze(-1)  # [N]
+    similarity = torch.einsum('nc,mc->nm', point_semantic_features, class_feature).squeeze(-1)  # [N]
 
     # Select points above threshold
     selection_mask = similarity >= threshold
 
     return selection_mask, similarity
 
-def cluster_other_classes(point_features, point_xyz, label_features, class_to_idx,
+def cluster_other_classes(point_features, point_semantic_features, point_xyz, label_features, class_to_idx,
                           other_classes, args, device='cpu'):
     """
     Perform semantic-guided clustering for 'other_classes' (small objects).
@@ -75,7 +75,8 @@ def cluster_other_classes(point_features, point_xyz, label_features, class_to_id
        d. Assign class label directly (no voting needed)
 
     Args:
-        point_features: [N, feature_dim] - Normalized point features
+        point_features: [N, feature_dim] - Normalized point features (instance features)
+        point_semantic_features: [N, semantic_feature_dim] - Normalized semantic features
         point_xyz: [N, 3] - Spatial coordinates
         label_features: [num_classes, feature_dim] - Semantic embeddings
         class_to_idx: dict - Class name to index mapping
@@ -84,7 +85,7 @@ def cluster_other_classes(point_features, point_xyz, label_features, class_to_id
         device: torch device
 
     Returns:
-        other_point_labels: [N] tensor - Instance labels (-1 for unassigned)
+        other_point_labels: [N] tensor - Instance labels (-1 for unassigned, 0+ for assigned)
         other_instance_to_class: dict - Mapping instance_id -> class_name
     """
     N = point_features.shape[0]
@@ -105,9 +106,9 @@ def cluster_other_classes(point_features, point_xyz, label_features, class_to_id
         class_idx = class_to_idx[class_name]
         print(f"\nProcessing other class: {class_name} (idx={class_idx})")
 
-        # Step 1: Select points by semantic similarity
+        # Step 1: Select points by semantic similarity (using semantic features)
         selection_mask, similarity_scores = select_points_by_semantic_similarity(
-            point_features, label_features, class_idx,
+            point_semantic_features, label_features, class_idx,
             args.other_classes_similarity_threshold, device
         )
 
@@ -218,8 +219,8 @@ def cluster_other_classes(point_features, point_xyz, label_features, class_to_id
             # Get original point indices
             original_indices = selected_indices_original[points_in_cluster]
 
-            # Assign instance ID (negative to avoid collision with main clustering)
-            instance_id = -(current_instance_id + 1)  # Use negative IDs
+            # Assign instance ID (starts from 0)
+            instance_id = current_instance_id
             other_point_labels[original_indices] = instance_id
             other_instance_to_class[instance_id] = class_name
 
@@ -268,7 +269,7 @@ torch.manual_seed(42)
 
 gs_model = GaussianModel(args.sh_degree)
 gs_model.load_ply(args.point_cloud_path)
-feat_gs_model = FeatureGaussianModel(args.feature_dim)
+feat_gs_model = FeatureGaussianModel(args.feature_dim, args.semantic_feature_dim)
 feat_gs_model.load_ply(args.contrastive_feature_point_cloud_path)
 scale_gate = torch.nn.Sequential(
         torch.nn.Linear(1, args.feature_dim, bias=True),
@@ -286,6 +287,7 @@ except:
 camera_list = cameraList_from_camInfos(cameras, 1, args)
 
 point_features = feat_gs_model.get_point_features.detach().cpu()
+point_semantic_features = feat_gs_model.get_point_semantic_features.detach().cpu()
 point_xyz = feat_gs_model.get_xyz.detach().cpu()
 point_scales = feat_gs_model.get_scaling.detach().cpu()
 is_big_gaussian = point_scales.max(dim=-1).values>point_scales.max(dim=-1).values.median()*args.scale_threshold
@@ -295,7 +297,7 @@ gates = scale_gate(torch.tensor([args.scale]).cuda()).unsqueeze(0).detach().cpu(
 print(f'{point_features.shape=}, {point_xyz.shape=}')
 
 # Load label features for semantic-guided clustering of other_classes
-label_features_path = os.path.join(args.labels_path, 'label_features.pt')
+label_features_path = args.label_features_path
 if os.path.exists(label_features_path):
     label_features = torch.load(label_features_path)
     # Create dictionary mapping class names to feature indices
@@ -311,6 +313,8 @@ sampled_mask = uniform_sample(point_xyz, args.sample_num)
 
 scale_conditioned_point_features = F.normalize(point_features, dim = -1, p = 2) * gates
 normed_point_features = F.normalize(scale_conditioned_point_features, dim = -1, p = 2)
+# Normalize semantic features
+normed_point_semantic_features = F.normalize(point_semantic_features, dim = -1, p = 2)
 sampled_normed_point_features = normed_point_features[sampled_mask]
 
 min_val = torch.min(point_xyz, dim=0).values
@@ -371,7 +375,8 @@ if label_features is not None and class_to_idx is not None and len(args.other_cl
     print(f"{'='*60}")
 
     other_point_labels, other_instance_to_class = cluster_other_classes(
-        normed_point_features.clone(),  # Use normalized features
+        normed_point_features.clone(),  # Instance features for clustering
+        normed_point_semantic_features.clone(),  # Semantic features for class filtering
         point_xyz.clone(),
         label_features,
         class_to_idx,
@@ -382,12 +387,14 @@ if label_features is not None and class_to_idx is not None and len(args.other_cl
 
     # ========== MERGE other_class instances into main labels (BEFORE filters) ==========
     if len(other_instance_to_class) > 0:
-        # Convert negative IDs to positive, offset by max main instance ID
+        # Get max instance ID from main clustering (excluding -1 background)
         max_main_instance_id = point_labels.max().item() if point_labels.max() >= 0 else -1
 
-        for neg_instance_id in other_instance_to_class.keys():
-            new_instance_id = max_main_instance_id + (-neg_instance_id)  # Convert -1 -> max+1, -2 -> max+2, etc.
-            point_labels[other_point_labels == neg_instance_id] = new_instance_id
+        # Merge assigned instances (>= 0)
+        for other_instance_id in other_instance_to_class.keys():
+            new_instance_id = max_main_instance_id + 1 + other_instance_id
+            mask = (other_point_labels == other_instance_id)
+            point_labels[mask] = new_instance_id
 
         print(f"Merged {len(other_instance_to_class)} other_class instances into main labels")
         print(f"Total instances before filters: {len(torch.unique(point_labels))}")

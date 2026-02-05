@@ -125,7 +125,7 @@ def training(dataset, opt, pipe, iteration, saving_iterations, checkpoint_iterat
 
     gaussians = None #GaussianModel(dataset.sh_degree)
 
-    feature_gaussians = FeatureGaussianModel(dataset.feature_dim)
+    feature_gaussians = FeatureGaussianModel(dataset.feature_dim, dataset.semantic_feature_dim)
 
     sample_rate = 1.0
     scene = Scene(dataset, gaussians, feature_gaussians, load_iteration=iteration, shuffle=False, target='contrastive_feature', mode='train', sample_rate=sample_rate)
@@ -160,7 +160,7 @@ def training(dataset, opt, pipe, iteration, saving_iterations, checkpoint_iterat
     first_iter = 0
     viewpoint_stack = None
     if not opt.iterations:
-        opt.iterations = min(len(scene.getTrainCameras())*10, 10000)
+        opt.iterations = min(len(scene.getTrainCameras())*10, 200)
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
 
@@ -391,13 +391,15 @@ def training(dataset, opt, pipe, iteration, saving_iterations, checkpoint_iterat
 
         # Sort labels to match the sorted sam_masks
         if viewpoint_cam.labels is not None and viewpoint_cam.label_features is not None:
-            labels_sorted = viewpoint_cam.labels[sort_indices]  # [N_masks]
+            labels = viewpoint_cam.labels.cuda()
             label_features = viewpoint_cam.label_features.cuda()  # [num_classes, C]
+            masks = viewpoint_cam.original_masks.cuda()
+            labels_sorted = labels[sort_indices]  # [N_masks]
 
             # Build semantic map GT by iterating masks from largest to smallest scale
             # Later masks (smaller scale) override earlier ones for overlapping pixels
-            for mask_idx in range(len(sam_masks)):
-                mask = sam_masks[mask_idx]  # [H, W]
+            for mask_idx in range(len(masks)):
+                mask = masks[mask_idx]  # [H, W]
                 label_idx = labels_sorted[mask_idx]
                 if label_idx >= 0 and label_idx < len(label_features):
                     semantic_map_gt[:, mask] = label_features[label_idx].unsqueeze(1)  # [C] -> [C, num_pixels]
