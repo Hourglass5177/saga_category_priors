@@ -160,7 +160,7 @@ def training(dataset, opt, pipe, iteration, saving_iterations, checkpoint_iterat
     first_iter = 0
     viewpoint_stack = None
     if not opt.iterations:
-        opt.iterations = min(len(scene.getTrainCameras())*10, 200)
+        opt.iterations = min(len(scene.getTrainCameras())*10, 10000)
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
 
