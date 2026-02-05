@@ -497,9 +497,29 @@ def get_bbox(point_labels, xyz, is_big_gaussian):
         # --- 1. 投影到X-Z平面 (忽略Y) ---
         N, D = points_3d.shape
         points_2d = points_3d[:, [0, 2]]  # shape: (N, 2), X和Z坐标
-        
-        # --- 2. 使用trimesh计算2D定向包围盒 ---
+
+        # --- 2. 使用trimesh计算2D定向包围盒 (fallback到简单AABB) ---
         # 注意：oriented_bounds_2D 返回的是一个变换矩阵，将点变换后，其AABB中心在原点
+
+        # Fallback: 当点数不足时使用简单的轴对齐包围盒(AABB)
+        if N < 3:
+            # 直接用AABB: xmin, xmax, ymin, ymax, zmin, zmax
+            p_min = points_3d.min(axis=0)
+            p_max = points_3d.max(axis=0)
+            # 构建8个角点
+            bbox_corners_world = np.array([
+                [p_max[0], p_max[1], p_max[2]],
+                [p_max[0], p_max[1], p_min[2]],
+                [p_max[0], p_min[1], p_min[2]],
+                [p_max[0], p_min[1], p_max[2]],
+                [p_min[0], p_max[1], p_max[2]],
+                [p_min[0], p_max[1], p_min[2]],
+                [p_min[0], p_min[1], p_min[2]],
+                [p_min[0], p_min[1], p_max[2]]
+            ])
+            bbox[instance_id] = torch.from_numpy(bbox_corners_world).flatten().tolist()
+            continue
+
         transform_2d, rectangle_extents_2d = oriented_bounds_2D(
             points_2d,
         )
