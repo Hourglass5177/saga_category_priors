@@ -382,6 +382,13 @@ def training(dataset, opt, pipe, iteration, saving_iterations, checkpoint_iterat
         semantic_pkg = render_semantic_feature(viewpoint_cam, feature_gaussians, pipe, background, norm_point_features=True)
         semantic_map = semantic_pkg["render"]  # [C, H, W]
 
+        # Interpolate semantic_map to match original_masks resolution (same as rendered_features)
+        semantic_map = torch.nn.functional.interpolate(
+            semantic_map.unsqueeze(0),
+            viewpoint_cam.original_masks.shape[-2:],
+            mode='bilinear'
+        ).squeeze(0)
+
         # Build semantic_map_gt from labels and label_features
         # sam_masks: [N_masks, H, W] (already sorted by scale)
         # labels: class indices for each mask
