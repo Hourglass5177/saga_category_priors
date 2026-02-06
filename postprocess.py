@@ -501,6 +501,11 @@ def get_bbox(point_labels, xyz, is_big_gaussian):
         # --- 2. 使用trimesh计算2D定向包围盒 (fallback到简单AABB) ---
         # 注意：oriented_bounds_2D 返回的是一个变换矩阵，将点变换后，其AABB中心在原点
 
+        # Empty bbox when no valid points
+        if N == 0:
+            bbox[instance_id] = [0.0] * 24  # 8 corners * 3 coordinates = 24
+            continue
+
         # Fallback: 当点数不足时使用简单的轴对齐包围盒(AABB)
         if N < 3:
             # 直接用AABB: xmin, xmax, ymin, ymax, zmin, zmax
