@@ -38,6 +38,7 @@ except ImportError:
     TENSORBOARD_FOUND = False
 
 from sklearn.preprocessing import QuantileTransformer
+from utils.resource_exit import resource_error_handler
 
 import torch
 
@@ -467,36 +468,41 @@ def prepare_output_and_logger(args):
         print("Tensorboard not available: not logging progress")
     return tb_writer
 
+@resource_error_handler("语义识别特征训练阶段")
+def main():
+        # Set up command line argument parser
+        parser = ArgumentParser(description="Training script parameters")
+        lp = ModelParams(parser)
+        op = OptimizationParams(parser)
+        pp = PipelineParams(parser)
+        parser.add_argument("--progress_path", type=str, required=True)
+        parser.add_argument('--ip', type=str, default="127.0.0.1")
+        parser.add_argument('--port', type=int, default=np.random.randint(10000, 20000))
+        parser.add_argument('--debug_from', type=int, default=-1)
+        parser.add_argument('--detect_anomaly', action='store_true', default=False)
+        parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000, 30_000])
+        parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
+        parser.add_argument("--quiet", action="store_true")
+        parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
+        parser.add_argument("--start_checkpoint", type=str, default = None)
+        parser.add_argument('--target', default='contrastive_feature', const='contrastive_feature', nargs='?', choices=['scene', 'seg', 'feature', 'coarse_seg_everything', 'contrastive_feature'])
+        parser.add_argument("--iteration", default=-1, type=int)
+    
+        # args = get_combined_args(parser, target_cfg_file = 'cfg_args')
+        args = parser.parse_args(sys.argv[1:])
+        args.save_iterations.append(args.iterations)
+    
+        print("Optimizing " + args.model_path)
+
+        # Initialize system state (RNG)
+        safe_state(args.quiet)
+
+        torch.autograd.set_detect_anomaly(args.detect_anomaly)
+        training(lp.extract(args), op.extract(args), pp.extract(args), args.iteration, args.save_iterations, args.checkpoint_iterations, args.debug_from)
+
+        # All done
+        print("\nTraining complete.")
+
+
 if __name__ == "__main__":
-    # Set up command line argument parser
-    parser = ArgumentParser(description="Training script parameters")
-    lp = ModelParams(parser)
-    op = OptimizationParams(parser)
-    pp = PipelineParams(parser)
-    parser.add_argument("--progress_path", type=str, required=True)
-    parser.add_argument('--ip', type=str, default="127.0.0.1")
-    parser.add_argument('--port', type=int, default=np.random.randint(10000, 20000))
-    parser.add_argument('--debug_from', type=int, default=-1)
-    parser.add_argument('--detect_anomaly', action='store_true', default=False)
-    parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000, 30_000])
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
-    parser.add_argument("--quiet", action="store_true")
-    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
-    parser.add_argument("--start_checkpoint", type=str, default = None)
-    parser.add_argument('--target', default='contrastive_feature', const='contrastive_feature', nargs='?', choices=['scene', 'seg', 'feature', 'coarse_seg_everything', 'contrastive_feature'])
-    parser.add_argument("--iteration", default=-1, type=int)
-    
-    # args = get_combined_args(parser, target_cfg_file = 'cfg_args')
-    args = parser.parse_args(sys.argv[1:])
-    args.save_iterations.append(args.iterations)
-    
-    print("Optimizing " + args.model_path)
-
-    # Initialize system state (RNG)
-    safe_state(args.quiet)
-
-    torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.iteration, args.save_iterations, args.checkpoint_iterations, args.debug_from)
-
-    # All done
-    print("\nTraining complete.")
+    main()
