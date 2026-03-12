@@ -1,5 +1,5 @@
-ARG CUDA_DEVEL_IMAGE=docker.1ms.run/nvidia/cuda:11.8.0-cudnn8-devel-ubuntu22.04
-ARG CUDA_RUNTIME_IMAGE=docker.1ms.run/nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
+ARG CUDA_DEVEL_IMAGE=docker.1ms.run/nvidia/cuda:11.8.0-cudnn8-devel-ubuntu20.04
+ARG CUDA_RUNTIME_IMAGE=docker.1ms.run/nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu20.04
 
 FROM ${CUDA_DEVEL_IMAGE} AS builder
 
