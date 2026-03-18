@@ -114,7 +114,7 @@ def get_quantile_func(scales: torch.Tensor, distribution="normal"):
 
     return quantile_transformer_func
 
-def training(dataset, opt, pipe, iteration, saving_iterations, checkpoint_iterations, debug_from):
+def training(args, dataset, opt, pipe, iteration, saving_iterations, checkpoint_iterations, debug_from):
     print("RFN weight:", opt.rfn)
     print("Smooth K:", opt.smooth_K)
     print("Scale aware dim:", opt.scale_aware_dim)
@@ -371,7 +371,7 @@ def training(dataset, opt, pipe, iteration, saving_iterations, checkpoint_iterat
         sample_mask = uniform_sample(feature_gaussians.get_xyz, opt.distance_sample_num)
         sample_xyz = std_point_xyz[sample_mask]
         sample_features = feature_gaussians.get_point_features[sample_mask]
-        sample_scaled_features = torch.nn.functional.normalize(sample_features[None,...]*gates[:,None,...])
+        sample_scaled_features = torch.nn.functional.normalize(sample_features[None,...]*gates[:,None,...], dim=-1)
         ptp_xyz_distance = torch.norm(sample_xyz[:,None,:] - sample_xyz[None,:,:], dim=-1) # float[fps,fps]
         ptp_feature_sim = torch.einsum('sac, sbc -> sab', sample_scaled_features, sample_scaled_features) # float[scale,fps,fps]
         distance_loss = (ptp_xyz_distance*torch.clamp(ptp_feature_sim,0)).mean()
@@ -401,7 +401,7 @@ def training(dataset, opt, pipe, iteration, saving_iterations, checkpoint_iterat
         if viewpoint_cam.labels is not None and viewpoint_cam.label_features is not None:
             labels = viewpoint_cam.labels.cuda()
             label_features = viewpoint_cam.label_features.cuda()  # [num_classes, C]
-            masks = viewpoint_cam.original_masks.cuda()
+            masks = viewpoint_cam.original_masks.cuda()[sort_indices]
             labels_sorted = labels[sort_indices]  # [N_masks]
 
             # Build semantic map GT by iterating masks from largest to smallest scale
@@ -498,7 +498,7 @@ def main():
         safe_state(args.quiet)
 
         torch.autograd.set_detect_anomaly(args.detect_anomaly)
-        training(lp.extract(args), op.extract(args), pp.extract(args), args.iteration, args.save_iterations, args.checkpoint_iterations, args.debug_from)
+        training(args, lp.extract(args), op.extract(args), pp.extract(args), args.iteration, args.save_iterations, args.checkpoint_iterations, args.debug_from)
 
         # All done
         print("\nTraining complete.")
