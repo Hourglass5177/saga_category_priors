@@ -126,7 +126,7 @@ def main():
         parser.add_argument("--groundingdino_config_path", default='weights/GroundingDINO_SwinT_OGC.py', type=str)
         parser.add_argument("--downsample", default=1, type=int)
         parser.add_argument("--downsample_type", default='image', type=str, choices=['image', 'mask'], help="Downsample then segment, or segment then downsample.")
-        parser.add_argument('--classes', nargs='+', type=str, default=['chair', 'table', 'plant', 'flower', 'foliage', 'tv', 'painting', 'sofa', 'cabinet', 'bed', 'wall', 'floor', 'ceiling', 'person', 'socket', 'book', 'remote', 'key'])
+        parser.add_argument('--classes', nargs='+', type=str, default=['chair', 'table', 'plant', 'flower', 'foliage', 'tv', 'painting', 'sofa', 'cabinet', 'bed', 'wall', 'floor', 'ceiling', 'person', 'socket', 'book', 'remote', 'key', 'lamp', 'speaker', 'computer', 'fan', 'refrigerator', 'robot', 'cup', 'vase', 'phone', 'trash can'])
         parser.add_argument('--box_threshold', type=float, default=0.35)
         parser.add_argument('--text_threshold', type=float, default=0.35)
         parser.add_argument('--nms_threshold', type=float, default=0.8)
@@ -216,6 +216,16 @@ def main():
             detections.xyxy = detections.xyxy[nms_idx]
             detections.confidence = detections.confidence[nms_idx]
             detections.class_id = detections.class_id[nms_idx]
+
+            # 过滤掉class_id为None的检测结果
+            valid_idx = [i for i, c in enumerate(detections.class_id) if c is not None]
+            detections.xyxy = detections.xyxy[valid_idx]
+            detections.confidence = detections.confidence[valid_idx]
+            detections.class_id = detections.class_id[valid_idx]
+            
+            # 将class_id转换为np.int64类型
+            if len(detections.class_id) > 0:
+                detections.class_id = np.array(detections.class_id, dtype=np.int64)
 
             # convert detections to masks
             detections.mask = segment(
