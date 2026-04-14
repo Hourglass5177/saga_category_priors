@@ -114,6 +114,77 @@ def get_quantile_func(scales: torch.Tensor, distribution="normal"):
 
     return quantile_transformer_func
 
+
+def _camera_mask_count(camera):
+    masks = getattr(camera, "original_masks", None)
+    if masks is None:
+        return 0
+    if masks.ndim == 0:
+        return 0
+    return int(masks.shape[0])
+
+
+def _camera_scale_count(camera):
+    mask_scales = getattr(camera, "mask_scales", None)
+    if mask_scales is None:
+        return 0
+    if mask_scales.ndim == 0:
+        return 1
+    return int(mask_scales.numel())
+
+
+def _collect_valid_train_cameras(scene):
+    valid_cameras = []
+    invalid_reasons = {
+        "missing_masks": [],
+        "missing_mask_scales": [],
+        "too_few_masks": [],
+        "too_few_mask_scales": [],
+        "count_mismatch": [],
+    }
+
+    for cam in scene.getTrainCameras():
+        mask_count = _camera_mask_count(cam)
+        scale_count = _camera_scale_count(cam)
+
+        if getattr(cam, "original_masks", None) is None:
+            invalid_reasons["missing_masks"].append(cam.image_name)
+            continue
+        if getattr(cam, "mask_scales", None) is None:
+            invalid_reasons["missing_mask_scales"].append(cam.image_name)
+            continue
+        if mask_count < 2:
+            invalid_reasons["too_few_masks"].append(cam.image_name)
+            continue
+        if scale_count < 2:
+            invalid_reasons["too_few_mask_scales"].append(cam.image_name)
+            continue
+        if mask_count != scale_count:
+            invalid_reasons["count_mismatch"].append(cam.image_name)
+            continue
+
+        valid_cameras.append(cam)
+
+    return valid_cameras, invalid_reasons
+
+
+def _format_invalid_camera_summary(invalid_reasons):
+    parts = []
+    labels = {
+        "missing_masks": "missing masks",
+        "missing_mask_scales": "missing mask scales",
+        "too_few_masks": "fewer than 2 masks",
+        "too_few_mask_scales": "fewer than 2 mask scales",
+        "count_mismatch": "mask/scale count mismatch",
+    }
+    for key, names in invalid_reasons.items():
+        if names:
+            preview = ", ".join(names[:3])
+            if len(names) > 3:
+                preview += ", ..."
+            parts.append(f"{labels[key]}: {len(names)} ({preview})")
+    return "; ".join(parts)
+
 def training(args, dataset, opt, pipe, iteration, saving_iterations, checkpoint_iterations, debug_from):
     print("RFN weight:", opt.rfn)
     print("Smooth K:", opt.smooth_K)
@@ -160,18 +231,28 @@ def training(args, dataset, opt, pipe, iteration, saving_iterations, checkpoint_
     
     first_iter = 0
     viewpoint_stack = None
+    valid_train_cameras, invalid_camera_reasons = _collect_valid_train_cameras(scene)
+    invalid_camera_summary = _format_invalid_camera_summary(invalid_camera_reasons)
+    if invalid_camera_summary:
+        print(f"Skipping unusable training cameras: {invalid_camera_summary}")
+
+    if not valid_train_cameras:
+        raise RuntimeError(
+            "No usable training cameras were found for contrastive feature training. "
+            f"Checked {len(scene.getTrainCameras())} cameras under masks_path='{dataset.masks_path}' "
+            f"and mask_scales_path='{dataset.mask_scales_path}'. "
+            "Run `get_scale.py` for the same dataset paths and ensure each training image has matching "
+            "mask and mask-scale `.pt` files with at least two entries."
+        )
+
     if not opt.iterations:
-        opt.iterations = min(len(scene.getTrainCameras())*10, 10000)
+        opt.iterations = min(len(valid_train_cameras)*10, 10000)
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
 
     print("Preparing Quantile Transform...")
     # gather scales
-    all_scales = []
-    for cam in scene.getTrainCameras():
-        if cam.mask_scales!=None:
-            all_scales.append(cam.mask_scales)
-    all_scales = torch.cat(all_scales)
+    all_scales = torch.cat([cam.mask_scales.reshape(-1) for cam in valid_train_cameras])
 
     upper_bound_scale = all_scales.max().item()
     # upper_bound_scale = np.percentile(all_scales.detach().cpu().numpy(), 75)
@@ -198,20 +279,12 @@ def training(args, dataset, opt, pipe, iteration, saving_iterations, checkpoint_
 
         # Pick a random Camera
         if not viewpoint_stack:
-            viewpoint_stack = scene.getTrainCameras().copy()
+            viewpoint_stack = valid_train_cameras.copy()
         
         if iteration < -1:
             viewpoint_cam = viewpoint_stack[0]
         else:
             viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
-        while viewpoint_cam.original_masks==None or viewpoint_cam.original_masks.shape[0]<2:
-            if not viewpoint_stack:
-                viewpoint_stack = scene.getTrainCameras().copy()
-            
-            if iteration < -1:
-                viewpoint_cam = viewpoint_stack[0]
-            else:
-                viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
         with torch.no_grad():
             # N_mask, H, W
             sam_masks = viewpoint_cam.original_masks.cuda().float() # float[masks, h, w]
@@ -237,7 +310,8 @@ def training(args, dataset, opt, pipe, iteration, saving_iterations, checkpoint_
 
             sampled_scales = mask_scales[sampled_scale_index] # 10 scale pivot
 
-            second_big_scale = mask_scales[mask_scales < upper_bound_scale].max()
+            smaller_scales = mask_scales[mask_scales < upper_bound_scale]
+            second_big_scale = smaller_scales.max() if smaller_scales.numel() > 0 else upper_bound_scale
 
             non_mask_region = sam_masks.sum(dim = 0) == 0
             ray_sample_rate = opt.ray_sample_rate if opt.ray_sample_rate > 0 else torch.clamp(opt.num_sampled_rays / (~non_mask_region).sum(), 0, 1)
