@@ -102,7 +102,7 @@ class OrbitCamera:
         # --- first move camera to radius : in world coordinate--- #
         res = np.eye(4, dtype=np.float32)
         res[2, 3] -= self.radius
-        
+
         # --- rotate: Rc --- #
         rot = np.eye(4, dtype=np.float32)
         rot[:3, :3] = self.rot.as_matrix()
@@ -110,17 +110,17 @@ class OrbitCamera:
 
         # --- translate: tc --- #
         res[:3, 3] -= self.center
-        
+
         # --- Convention Transform --- #
         # now we have got matrix res=c2w=[Rc|tc], but gaussian-splatting requires convention as [Rc|-Rc.T@tc]
         res[:3, 3] = -rot[:3, :3].transpose() @ res[:3, 3]
-        
+
         return res
-    
+
     @property
     def pose_objcenter(self):
         res = np.eye(4, dtype=np.float32)
-        
+
         # --- rotate: Rw --- #
         rot = np.eye(4, dtype=np.float32)
         rot[:3, :3] = self.rot.as_matrix()
@@ -129,11 +129,11 @@ class OrbitCamera:
         # --- translate: tw --- #
         res[2, 3] += self.radius    # camera coordinate z-axis
         res[:3, 3] -= self.center   # camera coordinate x,y-axis
-        
+
         # --- Convention Transform --- #
         # now we have got matrix res=w2c=[Rw|tw], but gaussian-splatting requires convention as [Rc|-Rc.T@tc]=[Rw.T|tw]
         res[:3, :3] = rot[:3, :3].transpose()
-        
+
         return res
 
     @property
@@ -177,7 +177,7 @@ class OrbitCamera:
         self.radius -= 0.1 * delta      # linear version
 
     def pan(self, dx, dy, dz=0):
-        
+
         if self.rot_mode == 1:
             # pan in camera coordinate system: project from [Coord_c] to [Coord_w]
             self.center += 0.0005 * self.rot.as_matrix()[:3, :3] @ np.array([dx, -dy, dz])
@@ -251,7 +251,7 @@ class GaussianSplattingGUI:
         # --- for interactive segmentation --- #
         self.img_mode = 0
         self.clickmode_button = False
-        self.clickmode_multi_button = False     # choose multiple object 
+        self.clickmode_multi_button = False     # choose multiple object
         self.new_click = False
         self.prompt_num = 0
         self.new_click_xy = []
@@ -271,7 +271,6 @@ class GaussianSplattingGUI:
         self.render_mode_label = False
 
         self.save_flag = False
-        self.point_labels = None
     def __del__(self):
         dpg.destroy_context()
 
@@ -280,7 +279,7 @@ class GaussianSplattingGUI:
             return outputs["render"]
         else:
             return np.expand_dims(outputs["depth"], -1).repeat(3, -1)
-    
+
     def grayscale_to_colormap(self, gray):
         """Convert a grayscale value to Jet colormap RGB values."""
         # Ensure the grayscale values are in the range [0, 1]
@@ -310,7 +309,7 @@ class GaussianSplattingGUI:
         return np.stack((r, g, b), axis=-1)
 
     def register_dpg(self):
-        
+
         ### register texture
         with dpg.texture_registry(show=False):
             dpg.add_raw_texture(self.width, self.height, self.render_buffer, format=dpg.mvFormat_Float_rgb, tag="_texture")
@@ -323,7 +322,7 @@ class GaussianSplattingGUI:
 
         # def callback_depth(sender, app_data):
             # self.img_mode = (self.img_mode + 1) % 4
-            
+
         # --- interactive mode switch --- #
         def clickmode_callback(sender):
             self.clickmode_button = 1 - self.clickmode_button
@@ -383,13 +382,13 @@ class GaussianSplattingGUI:
             dpg.add_checkbox(label="SIMILARITY", callback=render_mode_similarity_callback, user_data="Some Data")
             dpg.add_checkbox(label="3D CLUSTER", callback=render_mode_cluster_callback, user_data="Some Data")
             dpg.add_checkbox(label="Label", callback=render_mode_label_callback, user_data="Some Data")
-            
+
 
             dpg.add_text("\nSegment option: ", tag="seg")
             dpg.add_checkbox(label="clickmode", callback=clickmode_callback, user_data="Some Data")
             dpg.add_checkbox(label="multi-clickmode", callback=clickmode_multi_callback, user_data="Some Data")
             dpg.add_checkbox(label="preview_segmentation_in_2d", callback=preview_callback, user_data="Some Data")
-            
+
             dpg.add_text("\n")
             dpg.add_button(label="segment3d", callback=callback_segment3d, user_data="Some Data")
             dpg.add_button(label="roll_back", callback=roll_back, user_data="Some Data")
@@ -420,7 +419,7 @@ class GaussianSplattingGUI:
             self.update_camera = True
             if self.debug:
                 dpg.set_value("_log_pose", str(self.camera.pose))
-        
+
 
         def toggle_moving_left():
             self.moving = not self.moving
@@ -444,7 +443,7 @@ class GaussianSplattingGUI:
                 if dx != 0.0 or dy != 0.0:
                     self.camera.pan(-dx*5, dy*5)
                     self.update_camera = True
-            
+
             self.mouse_pos = pos
 
 
@@ -461,15 +460,15 @@ class GaussianSplattingGUI:
 
         with dpg.handler_registry():
             dpg.add_mouse_wheel_handler(callback=callback_camera_wheel_scale)
-            
+
             dpg.add_mouse_click_handler(dpg.mvMouseButton_Left, callback=lambda:toggle_moving_left())
             dpg.add_mouse_release_handler(dpg.mvMouseButton_Left, callback=lambda:toggle_moving_left())
             dpg.add_mouse_click_handler(dpg.mvMouseButton_Middle, callback=lambda:toggle_moving_middle())
             dpg.add_mouse_release_handler(dpg.mvMouseButton_Middle, callback=lambda:toggle_moving_middle())
             dpg.add_mouse_move_handler(callback=lambda s, a, u:move_handler(s, a, u))
-            
+
             dpg.add_mouse_click_handler(callback=change_pos)
-            
+
         dpg.create_viewport(title="Gaussian-Splatting-Viewer", width=self.window_width+320, height=self.window_height, resizable=False)
 
         ### global theme
@@ -526,7 +525,7 @@ class GaussianSplattingGUI:
         )
         cam.feature_height, cam.feature_width = self.height, self.width
         return cam
-    
+
     def cluster_in_3D(self):
         import json
         with open(self.opt.json_path, 'r') as f:
@@ -540,7 +539,7 @@ class GaussianSplattingGUI:
         def mask_to_bbox(mask: torch.Tensor) -> torch.Tensor:
             """
             根据二值掩码生成边界框 (XYXY格式)。
-            
+
             :param mask: 输入二值掩码 (torch.Tensor)，形状为 (H, W)，值为0或1。
             :return: 边界框 (torch.Tensor)，格式为 [x_min, y_min, x_max, y_max]。
             """
@@ -561,21 +560,21 @@ class GaussianSplattingGUI:
             y_max = y_indices.max().item()
 
             return torch.tensor([x_min, y_min, x_max, y_max], dtype=torch.float32)
-        
+
         def get_entity_image(image: np.ndarray, mask: np.ndarray)->np.ndarray:
             def get_bbox(mask: np.ndarray):
                 # 查找掩码中的 True 元素的索引
                 rows = np.any(mask, axis=1)
                 cols = np.any(mask, axis=0)
-                
+
                 # 如果没有 True 元素，则返回全零的边界框
                 if not np.any(rows) or not np.any(cols):
                     return (0, 0, 0, 0)
-                
+
                 # 获取边界框的上下左右边界
                 x_min, x_max = np.where(rows)[0][[0, -1]] # h
                 y_min, y_max = np.where(cols)[0][[0, -1]] # w
-                
+
                 # 返回边界框
                 return (x_min, y_min, x_max + 1 - x_min, y_max + 1 - y_min) # x, y, h, w
             if mask.sum()==0:
@@ -600,15 +599,15 @@ class GaussianSplattingGUI:
         n = X.shape[0]
         mean = torch.mean(X, dim=0)
         X = X - mean
-        covariance_matrix = (1 / n) * torch.matmul(X.T, X).float()  # An old torch bug: matmul float32->float16, 
+        covariance_matrix = (1 / n) * torch.matmul(X.T, X).float()  # An old torch bug: matmul float32->float16,
         eigenvalues, eigenvectors = torch.linalg.eig(covariance_matrix)
         eigenvalues = torch.norm(eigenvalues, dim=1)
         idx = torch.argsort(-eigenvalues)
         eigenvectors = eigenvectors[:, idx]
         proj_mat = eigenvectors[:, 0:n_components]
-        
+
         return proj_mat
-    
+
 
     def do_pca(self):
         sems = self.engine['feature'].get_point_features.clone().squeeze()
@@ -624,7 +623,7 @@ class GaussianSplattingGUI:
 
     @torch.no_grad()
     def fetch_data(self, view_camera):
-        
+
         scene_outputs = render(view_camera, self.engine['scene'], self.opt, self.bg_color)
         feature_outputs = render_contrastive_feature(view_camera, self.engine['feature'], self.opt, self.bg_feature)
         if self.cluster_in_3D_flag:
@@ -651,7 +650,7 @@ class GaussianSplattingGUI:
         self.gates = self.engine['scale_gate'](torch.tensor([scale]).cuda())
         scale_gated_feat = sems * self.gates.unsqueeze(0).unsqueeze(0)
         scale_gated_feat = torch.nn.functional.normalize(scale_gated_feat, dim = -1, p = 2)
-        
+
         if self.clear_edit:
             self.new_click_xy = []
             self.clear_edit = False
@@ -671,7 +670,7 @@ class GaussianSplattingGUI:
             self.engine['feature'].roll_back()
             # except:
                 # pass
-        
+
         if self.reload_flag:
             self.reload_flag = False
             print("loading model file...")
@@ -685,7 +684,7 @@ class GaussianSplattingGUI:
         if len(self.new_click_xy) > 0:
 
             featmap = scale_gated_feat.reshape(H, W, -1)
-            
+
             if self.new_click:
                 xy = self.new_click_xy
                 new_feat = featmap[int(xy[1])%H, int(xy[0])%W, :].reshape(featmap.shape[-1], -1)
@@ -695,13 +694,13 @@ class GaussianSplattingGUI:
                     self.chosen_feature = torch.cat([self.chosen_feature, new_feat], dim=-1)    # extend to get more prompt features
                 self.prompt_num += 1
                 self.new_click = False
-            
+
             score_map = featmap @ self.chosen_feature
             # print(score_map.shape, score_map.min(), score_map.max(), "score_map_shape")
 
             score_map = (score_map + 1.0) / 2
             score_binary = score_map > dpg.get_value('_ScoreThres')
-            
+
             score_map[~score_binary] = 0.0
             score_map = torch.max(score_map, dim=-1).values
             score_norm = (score_map - dpg.get_value('_ScoreThres')) / (1 - dpg.get_value('_ScoreThres'))
@@ -757,7 +756,7 @@ class GaussianSplattingGUI:
         if self.render_mode_rgb or (not self.render_mode_pca and not self.render_mode_cluster and not self.render_mode_similarity):
             self.render_buffer = rgb_score.cpu().numpy().reshape(-1)
             render_num += 1
-        
+
         if self.render_mode_pca:
             self.render_buffer = sem_transed_rgb.cpu().numpy().reshape(-1) if self.render_buffer is None else self.render_buffer + sem_transed_rgb.cpu().numpy().reshape(-1)
             render_num += 1
@@ -772,11 +771,8 @@ class GaussianSplattingGUI:
                 # self.rendered_cluster = filter2d(self.rendered_cluster)
                 self.render_buffer = self.rendered_cluster.cpu().numpy().reshape(-1) if self.render_buffer is None else self.render_buffer + self.rendered_cluster.cpu().numpy().reshape(-1)
             render_num += 1
-        if self.render_mode_label and self.point_labels is not None:
+        if self.render_mode_label:
             self.render_buffer = render(view_camera, self.engine['scene'], self.opt, self.bg_color, filtered_mask=~((self.point_labels==self.label)))['render'].permute(1,2,0).cpu().numpy().reshape(-1)
-            render_num += 1
-        elif self.render_mode_label:
-            self.render_buffer = rgb_score.cpu().numpy().reshape(-1)
             render_num += 1
         if self.render_mode_similarity:
             if score_map is not None:

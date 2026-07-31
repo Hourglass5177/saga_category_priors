@@ -126,7 +126,12 @@ def main():
         parser.add_argument("--groundingdino_config_path", default='weights/GroundingDINO_SwinT_OGC.py', type=str)
         parser.add_argument("--downsample", default=1, type=int)
         parser.add_argument("--downsample_type", default='image', type=str, choices=['image', 'mask'], help="Downsample then segment, or segment then downsample.")
-        parser.add_argument('--classes', nargs='+', type=str, default=['chair', 'table', 'plant', 'flower', 'foliage', 'tv', 'painting', 'sofa', 'cabinet', 'bed', 'wall', 'floor', 'ceiling', 'person', 'socket', 'book', 'remote', 'key', 'lamp', 'speaker', 'computer', 'fan', 'refrigerator', 'robot', 'cup', 'vase', 'phone', 'trash can'])
+        parser.add_argument('--classes', nargs='+', type=str, default=[
+            'chair', 'table', 'plant', 'flower', 'foliage', 'tv', 'painting', 'sofa',
+            'cabinet', 'bed', 'wall', 'floor', 'ceiling', 'person', 'socket', 'remote',
+            'key', 'book', 'lighting', 'switch', 'door', 'window', 'lamp', 'speaker',
+            'computer', 'fan', 'refrigerator', 'robot', 'cup', 'vase', 'phone', 'trash can'
+        ])
         parser.add_argument('--box_threshold', type=float, default=0.35)
         parser.add_argument('--text_threshold', type=float, default=0.35)
         parser.add_argument('--nms_threshold', type=float, default=0.8)
@@ -187,7 +192,9 @@ def main():
             detections.xyxy = rotated_boxes
 
             return detections
-        torch.save(words_to_tensors(args.classes), os.path.join(labels_path, 'label_features.pt'))
+        label_features_parent = os.path.dirname(os.path.abspath(args.label_features_path))
+        os.makedirs(label_features_parent, exist_ok=True)
+        torch.save(words_to_tensors(args.classes), args.label_features_path)
         length = len(sorted([e for e in os.listdir(images_path) if e.endswith('.jpg')]))
         for i, image_name in tqdm(list(enumerate(sorted([e for e in os.listdir(images_path) if e.endswith('.jpg')])))):
             with open(args.progress_path, 'w') as f:

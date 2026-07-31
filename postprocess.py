@@ -246,9 +246,19 @@ def main():
     parser.add_argument("--scale_threshold", type=float, default=0.8)
     parser.add_argument("--opcity_threshold", type=float, default=0.005)
     parser.add_argument("--sample_num", type=int, default=10000)
-    parser.add_argument("--classes", nargs="+", type=str, default=['chair', 'table', 'plant', 'flower', 'foliage', 'tv', 'painting', 'sofa', 'cabinet', 'bed', 'wall', 'floor', 'ceiling', 'person', 'socket', 'book', 'remote', 'key', 'lamp', 'speaker', 'computer', 'fan', 'refrigerator', 'robot', 'cup', 'vase', 'phone', 'trash can'])
-    parser.add_argument("--selected_classes", nargs="+", type=str, default=['chair', 'table', 'plant', 'flower', 'foliage', 'tv', 'painting', 'sofa', 'cabinet', 'bed', 'socket', 'book', 'remote', 'key', 'lamp', 'speaker', 'computer', 'fan', 'refrigerator', 'robot', 'cup', 'vase', 'phone', 'trash can'])
-    parser.add_argument("--other_classes", nargs="+", type=str, default=['socket', 'book', 'remote', 'key', 'cup', 'vase', 'phone'])
+    parser.add_argument("--classes", nargs="+", type=str, default=[
+        'chair', 'table', 'plant', 'flower', 'foliage', 'tv', 'painting', 'sofa',
+        'cabinet', 'bed', 'wall', 'floor', 'ceiling', 'person', 'socket', 'remote',
+        'key', 'book', 'lighting', 'switch', 'door', 'window', 'lamp', 'speaker',
+        'computer', 'fan', 'refrigerator', 'robot', 'cup', 'vase', 'phone', 'trash can'
+    ])
+    parser.add_argument("--selected_classes", nargs="+", type=str, default=[
+        'chair', 'table', 'plant', 'flower', 'foliage', 'tv', 'painting', 'sofa',
+        'cabinet', 'bed', 'socket', 'remote', 'key', 'book', 'lighting', 'switch',
+        'door', 'window', 'lamp', 'speaker', 'computer', 'fan', 'refrigerator',
+        'robot', 'cup', 'vase', 'phone', 'trash can'
+    ])
+    parser.add_argument("--other_classes", nargs="+", type=str, default=['switch', 'socket', 'book', 'remote', 'key', 'cup', 'vase', 'phone'])
     # New arguments for semantic-guided clustering of other_classes
     parser.add_argument("--other_classes_similarity_threshold", type=float, default=0.7,
                         help="Minimum cosine similarity to class semantic feature for point selection")

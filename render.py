@@ -85,7 +85,7 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
         if target == 'scene' or target == 'seg' or target == 'coarse_seg_everything' or target == 'xyz':
             gaussians = GaussianModel(dataset.sh_degree)
         if target == 'feature' or target == 'coarse_seg_everything' or target == 'contrastive_feature':
-            feature_gaussians = FeatureGaussianModel(dataset.feature_dim)
+            feature_gaussians = FeatureGaussianModel(dataset.feature_dim, dataset.semantic_feature_dim)
 
         scene = Scene(dataset, gaussians, feature_gaussians, load_iteration=iteration, shuffle=False, mode='eval', target=target if target != 'xyz' and precomputed_mask is None else 'scene')
 

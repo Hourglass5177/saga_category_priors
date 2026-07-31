@@ -115,9 +115,30 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder, features_fo
 
         image_name_noext = os.path.splitext(extr.name)[0]
         
-        image = Image.open(os.path.join(images_folder, extr.name)) \
-            if images_folder and os.path.exists(os.path.join(images_folder, extr.name)) \
-                else None
+        # image = Image.open(os.path.join(images_folder, extr.name)) \
+        #     if images_folder and os.path.exists(os.path.join(images_folder, extr.name)) \
+        #         else None
+        # 支持文件名不匹配的情况（模糊匹配）
+        image_path_exact = os.path.join(images_folder, extr.name)
+        if images_folder and os.path.exists(image_path_exact):
+            image = Image.open(image_path_exact)
+        elif images_folder:
+            # 尝试模糊匹配：查找包含 image_name_noext 的文件
+            import glob
+            pattern = os.path.join(images_folder, f"*{image_name_noext}*")
+            matched_files = sorted(glob.glob(pattern))
+            if matched_files:
+                image = Image.open(matched_files[0])
+                if len(matched_files) > 1:
+                    print(f"\n   图像名模糊匹配到 {len(matched_files)} 个文件，使用: {os.path.basename(matched_files[0])}")
+                # print(f"\n    文件名不匹配，使用模糊匹配:")
+                # print(f"     COLMAP: {extr.name}")
+                # print(f"     实际文件: {os.path.basename(matched_files[0])}")
+            else:
+                image = None
+                print(f"\n   未找到图像文件: {extr.name}")
+        else:
+            image = None
 
         features = torch.load(os.path.join(features_folder, image_name_noext + ".pt")) \
             if features_folder and os.path.exists(os.path.join(features_folder, image_name_noext + ".pt")) \
