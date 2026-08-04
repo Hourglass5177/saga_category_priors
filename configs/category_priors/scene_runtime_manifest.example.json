@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0",
+  "kind": "scene_runtime_manifest",
+  "scenes": [
+    {
+      "scene_id": "scene0000_00",
+      "base_path": "/root/autodl-tmp/saga/data/experiments/scene0000_00",
+      "scene_scale_m_per_unit": 1.0
+    }
+  ]
+}

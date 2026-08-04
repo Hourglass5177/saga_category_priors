@@ -1,0 +1,22 @@
+{
+  "schema_version": "1.0",
+  "kind": "evaluation_manifest",
+  "split": "val-locked",
+  "condition": "P111-combined",
+  "minimum_mapped_fraction": 0.9,
+  "scenes": [
+    {
+      "scene_id": "scene0000_00",
+      "gt_npz": "gt/scene0000_00.npz",
+      "output_json": "runs/P111-combined/scene0000_00/output.json",
+      "metadata_json": "runs/P111-combined/scene0000_00/output.json.metadata.json",
+      "gaussian_ply": "runs/P111-combined/scene0000_00/point_cloud.ply",
+      "gaussian_to_gt_transform": [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0]
+      ]
+    }
+  ]
+}

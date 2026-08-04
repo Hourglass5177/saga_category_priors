@@ -23,6 +23,16 @@ json_path=""
 progress_path=""
 render_path=""
 
+prior_config=""
+prior_mapping_config=""
+prior_mode="off"
+prior_gate="on"
+prior_shrink="on"
+prior_metadata_path=""
+scene_scale_m_per_unit="0"
+seed=42
+disable_other_classes=0
+
 sam_checkpoint_path="${SCRIPT_DIR}/weights/sam_vit_h_4b8939.pth"
 groundingdino_checkpoint_path="${SCRIPT_DIR}/weights/groundingdino_swint_ogc.pth"
 groundingdino_config_path="${SCRIPT_DIR}/weights/GroundingDINO_SwinT_OGC.py"
@@ -63,6 +73,17 @@ Core options:
   --json-path PATH
   --progress-path PATH
   --render-path PATH
+
+Category-prior postprocess options:
+  --prior-config PATH
+  --prior-mapping-config PATH
+  --prior-mode MODE              off|global|size|smooth|small|size-smooth|size-small|smooth-small|combined
+  --prior-gate MODE              on|off (default: on)
+  --prior-shrink MODE            on|off (default: on)
+  --prior-metadata-path PATH     Default: BASE/saga/output.json.metadata.json
+  --scene-scale-m-per-unit FLOAT Required and positive when priors are enabled
+  --seed INT                     Default: 42
+  --disable-other-classes        Registered B0; default is B1-compatible enabled
 
 Model options:
   --sam-checkpoint-path PATH
@@ -137,6 +158,7 @@ resolve_defaults() {
     : "${json_path:=${base_path}/saga/output.json}"
     : "${progress_path:=${base_path}/saga/progress}"
     : "${render_path:=${base_path}/saga/render}"
+    : "${prior_metadata_path:=${json_path}.metadata.json}"
 }
 
 print_config() {
@@ -157,6 +179,15 @@ Resolved configuration:
   json_path: $json_path
   progress_path: $progress_path
   render_path: $render_path
+  prior_config: $prior_config
+  prior_mapping_config: $prior_mapping_config
+  prior_mode: $prior_mode
+  prior_gate: $prior_gate
+  prior_shrink: $prior_shrink
+  prior_metadata_path: $prior_metadata_path
+  scene_scale_m_per_unit: $scene_scale_m_per_unit
+  seed: $seed
+  disable_other_classes: $disable_other_classes
   sam_checkpoint_path: $sam_checkpoint_path
   groundingdino_checkpoint_path: $groundingdino_checkpoint_path
   groundingdino_config_path: $groundingdino_config_path
@@ -243,6 +274,14 @@ preflight_stage() {
             ensure_parent_dir "$label_features_path"
             ensure_parent_dir "$json_path"
             ensure_parent_dir "$progress_path"
+            ensure_parent_dir "$prior_metadata_path"
+            if [[ "$disable_other_classes" -eq 0 || "$prior_mode" != "off" ]]; then
+                require_file "$label_features_path" "Label features file"
+            fi
+            if [[ "$prior_mode" != "off" ]]; then
+                require_file "$prior_config" "Category priors"
+                require_file "$prior_mapping_config" "Prior mapping config"
+            fi
             ;;
         render)
             require_dir "$images_path" "Images directory"
@@ -309,6 +348,23 @@ run_train() {
 
 run_postprocess() {
     echo "Running stage: postprocess"
+    local prior_args=(
+        --prior_mode "$prior_mode"
+        --prior_gate "$prior_gate"
+        --prior_shrink "$prior_shrink"
+        --scene_scale_m_per_unit "$scene_scale_m_per_unit"
+        --seed "$seed"
+        --prior_metadata_path "$prior_metadata_path"
+    )
+    if [[ "$prior_mode" != "off" ]]; then
+        prior_args+=(
+            --prior_config "$prior_config"
+            --prior_mapping_config "$prior_mapping_config"
+        )
+    fi
+    if [[ "$disable_other_classes" -eq 1 ]]; then
+        prior_args+=(--disable_other_classes)
+    fi
     "$python_bin" "${SCRIPT_DIR}/postprocess.py" \
         --progress_path "$progress_path" \
         --sh_degree "$sh_degree" \
@@ -322,7 +378,8 @@ run_postprocess() {
         --point_cloud_path "$point_cloud_path" \
         --contrastive_feature_point_cloud_path "$contrastive_feature_point_cloud_path" \
         --scale_gate_path "$scale_gate_path" \
-        --json_path "$json_path"
+        --json_path "$json_path" \
+        "${prior_args[@]}"
 }
 
 run_render() {
@@ -409,6 +466,42 @@ while [[ $# -gt 0 ]]; do
         --render-path)
             render_path="$2"
             shift 2
+            ;;
+        --prior-config)
+            prior_config="$2"
+            shift 2
+            ;;
+        --prior-mapping-config)
+            prior_mapping_config="$2"
+            shift 2
+            ;;
+        --prior-mode)
+            prior_mode="$2"
+            shift 2
+            ;;
+        --prior-gate)
+            prior_gate="$2"
+            shift 2
+            ;;
+        --prior-shrink)
+            prior_shrink="$2"
+            shift 2
+            ;;
+        --prior-metadata-path)
+            prior_metadata_path="$2"
+            shift 2
+            ;;
+        --scene-scale-m-per-unit)
+            scene_scale_m_per_unit="$2"
+            shift 2
+            ;;
+        --seed)
+            seed="$2"
+            shift 2
+            ;;
+        --disable-other-classes)
+            disable_other_classes=1
+            shift
             ;;
         --sam-checkpoint-path)
             sam_checkpoint_path="$2"

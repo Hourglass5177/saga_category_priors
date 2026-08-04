@@ -1,0 +1,36 @@
+{
+  "schema_version": "1.0",
+  "kind": "analysis_manifest",
+  "split": "val-locked",
+  "minimum_mapped_fraction": 0.9,
+  "scenes": [
+    {
+      "scene_id": "scene0000_00",
+      "physical_scene_id": "scene0000",
+      "gt_npz": "gt/scene0000_00.npz"
+    }
+  ],
+  "conditions": {
+    "P000-B2": [],
+    "P001-small": [],
+    "P010-smooth": [],
+    "P011-smooth-small": [],
+    "P100-size": [],
+    "P101-size-small": [],
+    "P110-size-smooth": [],
+    "P111-combined": []
+  },
+  "paired_comparisons": [
+    {"reference": "P000-B2", "treatment": "P111-combined"}
+  ],
+  "factorial_bits": {
+    "P000-B2": [0, 0, 0],
+    "P001-small": [0, 0, 1],
+    "P010-smooth": [0, 1, 0],
+    "P011-smooth-small": [0, 1, 1],
+    "P100-size": [1, 0, 0],
+    "P101-size-small": [1, 0, 1],
+    "P110-size-smooth": [1, 1, 0],
+    "P111-combined": [1, 1, 1]
+  }
+}

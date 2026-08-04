@@ -242,6 +242,7 @@ def main():
     parser.add_argument("--k", type=int, default=256)
     parser.add_argument("--feature_ratio", type=float, default=0.5)
     parser.add_argument("--instance_threshold", type=float, default=0.3)
+    parser.add_argument("--min_cluster_size", type=int, default=10)
     parser.add_argument("--label_threshold", type=float, default=0.3)
     parser.add_argument("--scale_threshold", type=float, default=0.8)
     parser.add_argument("--opcity_threshold", type=float, default=0.005)
@@ -259,6 +260,8 @@ def main():
         'robot', 'cup', 'vase', 'phone', 'trash can'
     ])
     parser.add_argument("--other_classes", nargs="+", type=str, default=['switch', 'socket', 'book', 'remote', 'key', 'cup', 'vase', 'phone'])
+    parser.add_argument("--disable_other_classes", action='store_true',
+                        help="Disable the semantic-guided small-object branch (registered B0 legacy condition)")
     # New arguments for semantic-guided clustering of other_classes
     parser.add_argument("--other_classes_similarity_threshold", type=float, default=0.7,
                         help="Minimum cosine similarity to class semantic feature for point selection")
@@ -272,9 +275,41 @@ def main():
                         help="Weight of spatial distance in hybrid distance (0-1)")
     parser.add_argument("--other_classes_semantic_ratio", type=float, default=0.2,
                         help="Weight of semantic feature similarity in hybrid distance (0-1)")
+    parser.add_argument("--prior_config", type=str, default=None,
+                        help="Train-only category_priors.json (disabled unless --prior_mode is non-off)")
+    parser.add_argument("--prior_mapping_config", type=str, default=None,
+                        help="Validation-derived prior_mapping_config.json")
+    parser.add_argument("--prior_mode", choices=[
+        'off', 'global', 'size', 'smooth', 'small',
+        'size-smooth', 'size-small', 'smooth-small', 'combined'
+    ], default='off')
+    parser.add_argument("--prior_gate", choices=['on', 'off'], default='on')
+    parser.add_argument("--prior_shrink", choices=['on', 'off'], default='on')
+    parser.add_argument("--prior_metadata_path", type=str, default=None,
+                        help="Optional sidecar with AP scores, gates, resolved parameters and provenance")
+    parser.add_argument("--scene_scale_m_per_unit", type=float, default=0.0,
+                        help="Known metric conversion for Gaussian coordinates; required by category priors")
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args(sys.argv[1:])
+    prior_resolver = None
+    if args.prior_mode != 'off':
+        if not args.prior_config or not args.prior_mapping_config:
+            parser.error("non-off --prior_mode requires --prior_config and --prior_mapping_config")
+        if args.scene_scale_m_per_unit <= 0:
+            parser.error("non-off --prior_mode requires a positive --scene_scale_m_per_unit")
+        if not args.prior_metadata_path:
+            args.prior_metadata_path = f"{args.json_path}.metadata.json"
+        from category_priors.runtime import PriorResolver
+        prior_resolver = PriorResolver.from_paths(args.prior_config, args.prior_mapping_config)
+        tuned_baseline = prior_resolver.mapping['baseline']
+        args.feature_ratio = float(tuned_baseline['feature_ratio'])
+        args.instance_threshold = float(tuned_baseline['instance_threshold'])
+        args.min_cluster_size = int(tuned_baseline['min_cluster_size'])
+        args.k = int(tuned_baseline['knn_k'])
+        args.sample_num = int(tuned_baseline['sample_num'])
     bg_color = torch.tensor([1,1,1] if args.white_background else [0, 0, 0], dtype=torch.float32, device="cuda")
-    torch.manual_seed(42)
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
     # sam = sam_model_registry['vit_h']('./third_party/segment-anything/weights/sam_vit_h_4b8939.pth').to('cuda')
     # mask_predictor = SamPredictor(sam)
     # clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch16").to('cuda')
@@ -353,7 +388,7 @@ def main():
 
     #     return 0.2*feature_distance+0.8*xyz_distance
 
-    clusterer = HDBSCAN(min_cluster_size=10, cluster_selection_epsilon=0.01, allow_single_cluster = False, metric='precomputed') # HDBSCAN
+    clusterer = HDBSCAN(min_cluster_size=args.min_cluster_size, cluster_selection_epsilon=0.01, allow_single_cluster = False, metric='precomputed') # HDBSCAN
 
     start_time = datetime.now()
     cluster_labels = clusterer.fit_predict(hybird_distance.numpy().astype(np.float64))
@@ -372,15 +407,45 @@ def main():
     std_point_xyz_sim = torch.clamp(torch.exp(-torch.norm(std_point_xyz[:,None,:] - xyz_cluster_centers[None,:,:], dim=-1)), 0, 1)
     hybird_sim = args.feature_ratio*normed_point_features_sim + (1-args.feature_ratio)*std_point_xyz_sim
     confidence = torch.softmax(hybird_sim*10, dim=-1)
-    mask, point_labels = confidence.max(dim=-1)
-    mask = mask>args.instance_threshold
-    print(f'{mask.sum()=}, {(~mask).sum()=}')
-    point_labels[~mask] = -1
+    point_assignment_confidence, point_labels = confidence.max(dim=-1)
+    assigned_mask = point_assignment_confidence>args.instance_threshold
+    print(f'{assigned_mask.sum()=}, {(~assigned_mask).sum()=}')
+    point_labels[~assigned_mask] = -1
+    fallback_point_labels = point_labels.detach().cpu().clone()
+    fallback_assignment_confidence = point_assignment_confidence.detach().cpu().clone()
+    prior_overlay = None
+    if prior_resolver is not None:
+        if label_features is None:
+            raise FileNotFoundError("Category priors require label_features.pt")
+        from category_priors.runtime import apply_prior_overlay
+        prior_overlay = apply_prior_overlay(
+            normed_point_features,
+            normed_point_semantic_features,
+            point_xyz,
+            F.normalize(label_features.detach().cpu(), dim=-1, p=2),
+            args.classes,
+            fallback_point_labels,
+            fallback_assignment_confidence,
+            prior_resolver,
+            args.prior_mode,
+            args.scene_scale_m_per_unit,
+            args.seed,
+            args.prior_gate == 'on',
+            args.prior_shrink == 'on',
+        )
+        point_labels = prior_overlay.labels
+        point_assignment_confidence = prior_overlay.assignment_confidence
     print(f'{elapsed_time=}, {len(torch.unique(point_labels))=}') # 3
     print(f'HDBSCAN finish')
 
     # ========== SEMANTIC-GUIDED CLUSTERING (for other_classes) ==========
-    if label_features is not None and class_to_idx is not None and len(args.other_classes) > 0:
+    if (
+        prior_resolver is None
+        and not args.disable_other_classes
+        and label_features is not None
+        and class_to_idx is not None
+        and len(args.other_classes) > 0
+    ):
         print(f"\n{'='*60}")
         print(f"Starting semantic-guided clustering for other_classes")
         print(f"Classes: {args.other_classes}")
@@ -452,10 +517,89 @@ def main():
                 new_label[point_labels==instance] = -1
         print('finish filter_num')
         return torch.tensor(new_label)
+    def compute_instance_ratios(labels_for_vote, update_progress=True):
+        instance_ids = [int(value) for value in torch.unique(labels_for_vote).tolist() if int(value) >= 0]
+        vote = {instance: [0 for _ in range(len(args.classes)+1)] for instance in instance_ids}
+        for i, camera in tqdm(list(enumerate(camera_list))):
+            if update_progress:
+                with open(args.progress_path, 'w') as f:
+                    f.write(str(0+(i+1)*100//len(camera_list)))
+            if not os.path.exists(os.path.join(args.masks_path, f'{camera.image_name}.pt')):
+                continue
+            masks = torch.load(os.path.join(args.masks_path, f'{camera.image_name}.pt')).float()
+            masks = torch.nn.functional.interpolate(masks.unsqueeze(1), mode='bilinear', size=(camera.image_height, camera.image_width), align_corners=False).squeeze(1)
+            masks[masks>0.5] = 1
+            masks[masks!=1] = 0
+            masks = masks.bool()
+            labels_2d = torch.load(os.path.join(args.labels_path, f'{camera.image_name}.pt'))
+            render_pkg = render_with_max_contributor(camera, gs_model, args, bg_color)
+            max_contributor = render_pkg['max_contributor'].to(labels_for_vote.device)
+            max_instance_contributor = labels_for_vote[max_contributor]
+            background_label = len(args.classes)
+            background = torch.ones(
+                (camera.image_height, camera.image_width),
+                dtype=torch.bool,
+                device=masks.device,
+            )
+            for label_2d, mask_2d in zip(labels_2d, masks):
+                background &= ~mask_2d
+                vote_for_label = max_instance_contributor[mask_2d]
+                label_index = int(label_2d)
+                if label_index < 0 or label_index >= len(args.classes):
+                    continue
+                for instance in instance_ids:
+                    vote[instance][label_index]+=(vote_for_label==instance).sum().item()
+            vote_for_background_label = max_instance_contributor[background]
+            for instance in instance_ids:
+                vote[instance][background_label]+=(vote_for_background_label==instance).sum().item()
+
+        ratios = {}
+        for instance, votes in vote.items():
+            votes = np.asarray(votes, dtype=np.float64)
+            denominator = votes.sum()
+            ratios[instance] = votes[:-1] / denominator if denominator > 0 else np.zeros(len(args.classes), dtype=np.float64)
+        return ratios
+
     start_time = datetime.now()
-    if args.k>0:
-        point_labels = filter3d(point_xyz, point_labels, args.k)
-    point_labels = filter_num(point_labels, min_num=10)
+    if prior_overlay is not None:
+        from category_priors.runtime import filter_small_clusters, smooth_labels, validate_overlay
+        preliminary_ratio = compute_instance_ratios(point_labels, update_progress=False)
+        point_labels, point_assignment_confidence, rejected_prior_instances = validate_overlay(
+            prior_overlay,
+            preliminary_ratio,
+            args.classes,
+            args.label_threshold,
+        )
+        print(f'prior vote validation rejected {len(rejected_prior_instances)} instances')
+        semantic_similarity_by_instance = {}
+        normalized_label_features = F.normalize(label_features.detach().cpu(), dim=-1, p=2)
+        for instance_id, ratio in preliminary_ratio.items():
+            if instance_id < 0 or not bool((point_labels == instance_id).any()) or (ratio.max() if ratio.size else 0.0) <= 0:
+                continue
+            class_idx = int(np.argmax(ratio))
+            instance_semantic = normed_point_semantic_features[point_labels == instance_id]
+            if len(instance_semantic) == 0:
+                continue
+            mean_semantic = F.normalize(instance_semantic.mean(dim=0), dim=-1, p=2)
+            semantic_similarity_by_instance[int(instance_id)] = float(torch.dot(mean_semantic, normalized_label_features[class_idx]))
+        point_labels = smooth_labels(
+            point_xyz,
+            point_labels,
+            preliminary_ratio,
+            args.classes,
+            prior_resolver,
+            args.prior_mode,
+            args.scene_scale_m_per_unit,
+            float(prior_overlay.diagnostics['surface_density_points_per_m2']),
+            args.prior_gate == 'on',
+            args.prior_shrink == 'on',
+            semantic_similarity_by_instance,
+        )
+        point_labels = filter_small_clusters(point_labels, prior_overlay.branch_instances, default_min=args.min_cluster_size)
+    else:
+        if args.k>0:
+            point_labels = filter3d(point_xyz, point_labels, args.k)
+        point_labels = filter_num(point_labels, min_num=10)
     end_time = datetime.now()
     elapsed_time = end_time - start_time
     print(f'{elapsed_time=}, {len(torch.unique(point_labels))=}') # 89, pytorch3d.ops.knn_points=49
@@ -463,38 +607,7 @@ def main():
     # torch.save(point_labels, os.path.join(args.model_path, 'point_labels.pth'))
     # point_labels = torch.load(os.path.join(args.model_path, 'point_labels.pth'))
 
-    vote = {instance: [0 for _ in range(len(args.classes)+1)] for instance in torch.unique(point_labels).tolist()} 
-    for i, camera in tqdm(list(enumerate(camera_list))):
-        with open(args.progress_path, 'w') as f:
-            f.write(str(0+(i+1)*100//len(camera_list)))
-        if not os.path.exists(os.path.join(args.masks_path, f'{camera.image_name}.pt')):
-            continue
-        masks = torch.load(os.path.join(args.masks_path, f'{camera.image_name}.pt')).float()
-        masks = torch.nn.functional.interpolate(masks.unsqueeze(1), mode = 'bilinear', size = (camera.image_height, camera.image_width), align_corners = False).squeeze(1)
-        masks[masks>0.5] = 1
-        masks[masks!=1] = 0
-        masks = masks.bool()
-        labels = torch.load(os.path.join(args.labels_path, f'{camera.image_name}.pt'))
-        render_pkg = render_with_max_contributor(camera, gs_model, args, bg_color)
-        max_contributor = render_pkg['max_contributor'].to(point_labels.device)
-        max_contribute = render_pkg['max_contribute'].to(point_labels.device)
-        max_instance_contributor = point_labels[max_contributor]
-        background_label = len(args.classes)
-        background = torch.ones_like(masks[0])
-        for label, mask in zip(labels, masks):
-            background &= ~mask
-            vote_for_label = max_instance_contributor[mask]
-            for instance in torch.unique(point_labels).tolist():
-                vote[instance][label]+=(vote_for_label==instance).sum().item()
-        vote_for_background_label = max_instance_contributor[background]
-        for instance in torch.unique(point_labels).tolist():
-            vote[instance][background_label]+=(vote_for_background_label==instance).sum().item()
-
-    instance_ratio = {}
-    for instance, votes in vote.items():
-        votes = np.array(votes)
-        votes = votes[:-1]/votes.sum()
-        instance_ratio[instance] = votes
+    instance_ratio = compute_instance_ratios(point_labels, update_progress=True)
 
     def get_class(classes, ratio:np.ndarray):
         if ratio.max()<args.label_threshold:
@@ -505,6 +618,8 @@ def main():
         dir1 = torch.tensor([0.,1.,0.])
         bbox = {}
         for instance_id in torch.unique(point_labels).tolist():
+            if instance_id < 0:
+                continue
             instance_xyz = xyz[(point_labels==instance_id)&~is_big_gaussian]
             points_3d = instance_xyz.numpy()
             # --- 1. 投影到X-Z平面 (忽略Y) ---
@@ -615,6 +730,34 @@ def main():
     output['instances'] = {k: v for k, v in output['instances'].items() if v.get('class') in args.selected_classes}
     with open(args.json_path,'w') as f:
         json.dump(output,f)
+    if args.prior_metadata_path:
+        from category_priors.io import sha256_file
+        from category_priors.runtime import build_instance_metadata, write_instance_metadata
+
+        run_info = {
+            "seed": args.seed,
+            "prior_mode": args.prior_mode,
+            "prior_gate": args.prior_gate,
+            "prior_shrink": args.prior_shrink,
+            "scene_scale_m_per_unit": args.scene_scale_m_per_unit,
+            "output_json": os.path.abspath(args.json_path),
+            "output_json_sha256": sha256_file(args.json_path),
+        }
+        if args.prior_config:
+            run_info["category_priors"] = os.path.abspath(args.prior_config)
+            run_info["category_priors_sha256"] = sha256_file(args.prior_config)
+        if args.prior_mapping_config:
+            run_info["prior_mapping_config"] = os.path.abspath(args.prior_mapping_config)
+            run_info["prior_mapping_config_sha256"] = sha256_file(args.prior_mapping_config)
+        metadata = build_instance_metadata(
+            point_labels,
+            instance_ratio,
+            point_assignment_confidence,
+            args.classes,
+            prior_overlay,
+            run_info,
+        )
+        write_instance_metadata(args.prior_metadata_path, metadata)
     if(args.clean):
         if os.path.isdir(args.masks_path):
             shutil.rmtree(args.masks_path)
