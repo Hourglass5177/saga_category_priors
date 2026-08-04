@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 
 from .analysis import analyze_manifest
+from .download import MINIMAL_FILE_TYPES, download_scannet_subset
 from .evaluator import evaluate_manifest
 from .io import hash_json, load_json, read_rows, sha256_file, write_json, write_rows
 from .mapping import (
@@ -31,6 +32,24 @@ from .scannet import (
 )
 from .selection import select_scenes
 from .taxonomy import load_taxonomy
+
+
+def command_download_scannet(args: argparse.Namespace) -> None:
+    download_scannet_subset(
+        official_downloader=args.official_downloader,
+        scene_list=args.scene_list,
+        out_dir=args.out_dir,
+        manifest_path=args.manifest,
+        accept_tos=args.accept_tos,
+        file_types=tuple(args.file_types or MINIMAL_FILE_TYPES),
+        include_label_map=not args.no_label_map,
+        workers=args.workers,
+        retries=args.retries,
+        timeout_s=args.timeout_s,
+        min_free_gb=args.min_free_gb,
+        limit=args.limit,
+        dry_run=args.dry_run,
+    )
 
 
 def _extract_one(
@@ -309,6 +328,31 @@ def build_parser() -> argparse.ArgumentParser:
         description="Category-prior research utilities for SAGA"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    download = subparsers.add_parser(
+        "download-scannet",
+        help="Download a licensed ScanNet split's registered minimal statistics files",
+    )
+    download.add_argument("--official-downloader", required=True)
+    download.add_argument("--scene-list", required=True)
+    download.add_argument("--out-dir", required=True)
+    download.add_argument("--manifest", required=True)
+    download.add_argument(
+        "--type",
+        dest="file_types",
+        action="append",
+        choices=MINIMAL_FILE_TYPES,
+        help="repeat to override the registered four-file minimal set",
+    )
+    download.add_argument("--no-label-map", action="store_true")
+    download.add_argument("--workers", type=int, default=2)
+    download.add_argument("--retries", type=int, default=3)
+    download.add_argument("--timeout-s", type=float, default=120.0)
+    download.add_argument("--min-free-gb", type=float, default=80.0)
+    download.add_argument("--limit", type=int)
+    download.add_argument("--dry-run", action="store_true")
+    download.add_argument("--accept-tos", action="store_true")
+    download.set_defaults(func=command_download_scannet)
 
     extract = subparsers.add_parser(
         "extract", help="Extract ScanNet per-instance statistics"

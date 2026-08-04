@@ -27,6 +27,18 @@ The SAGA CUDA environment additionally needs the repository's existing
 dependencies and `hdbscan`. Do not pass `--clean`; masks, labels, features, JSON,
 metadata, logs, and render artifacts are experimental evidence.
 
+The licensed official ScanNet downloader can be wrapped without exposing its
+restricted URL in logs. The command below accepts only the registered four-file
+statistics subset, uses atomic resumable downloads, records hashes, and stops if
+free space falls below 80GB:
+
+```bash
+python -m category_priors download-scannet \
+  --official-downloader /secure/tools/download_scannetv2.py \
+  --scene-list splits/scannetv2_train.txt --out-dir /data/scannet \
+  --manifest artifacts/scannet_train_download.json --workers 4 --accept-tos
+```
+
 ### 350GB cloud-disk policy
 
 The current cloud data disk is 350GB (about 327GB free after the existing SAGA
