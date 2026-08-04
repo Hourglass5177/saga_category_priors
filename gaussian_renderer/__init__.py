@@ -189,7 +189,11 @@ def render_mask(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Ten
             "visibility_filter" : radii > 0,
             "radii": radii}
 
-from diff_gaussian_rasterization_depth import GaussianRasterizationSettings as GaussianRasterizationSettingsDepth, GaussianRasterizer as GaussianRasterizerDepth
+try:
+    from diff_gaussian_rasterization_depth import GaussianRasterizationSettings as GaussianRasterizationSettingsDepth, GaussianRasterizer as GaussianRasterizerDepth
+except ImportError:
+    GaussianRasterizationSettingsDepth = None
+    GaussianRasterizerDepth = None
 
 def render_with_depth(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None, override_mask = None, filtered_mask = None):
     """
@@ -197,6 +201,8 @@ def render_with_depth(viewpoint_camera, pc : GaussianModel, pipe, bg_color : tor
     
     Background tensor (bg_color) must be on GPU!
     """
+    if GaussianRasterizerDepth is None:
+        raise ImportError("diff_gaussian_rasterization_depth is required for depth rendering")
     # start_time  = time.time()
     # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
     screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
@@ -293,7 +299,11 @@ def render_with_depth(viewpoint_camera, pc : GaussianModel, pipe, bg_color : tor
             "visibility_filter" : radii > 0,
             "radii": radii}
 
-from diff_gaussian_rasterization_max_contributor import GaussianRasterizationSettings as GaussianRasterizationSettingsMaxContributor, GaussianRasterizer as GaussianRasterizerMaxContributor
+try:
+    from diff_gaussian_rasterization_max_contributor import GaussianRasterizationSettings as GaussianRasterizationSettingsMaxContributor, GaussianRasterizer as GaussianRasterizerMaxContributor
+except ImportError:
+    GaussianRasterizationSettingsMaxContributor = None
+    GaussianRasterizerMaxContributor = None
 
 def render_with_max_contributor(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None, filtered_mask = None):
     """
@@ -302,6 +312,8 @@ def render_with_max_contributor(viewpoint_camera, pc : GaussianModel, pipe, bg_c
     Background tensor (bg_color) must be on GPU!
     """
  
+    if GaussianRasterizerMaxContributor is None:
+        raise ImportError("diff_gaussian_rasterization_max_contributor is required for contributor rendering")
     # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
     screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
     try:

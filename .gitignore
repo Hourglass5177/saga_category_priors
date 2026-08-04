@@ -1,4 +1,6 @@
 *.pyc
+.DS_Store
+**/.DS_Store
 .agents/
 .vscode
 output

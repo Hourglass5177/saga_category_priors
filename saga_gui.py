@@ -30,12 +30,6 @@ from utils.clip_utils import get_relevancy
 from scipy.spatial.transform import Rotation as R
 from scipy.spatial import KDTree
 
-# from cuml.cluster.hdbscan import HDBSCAN
-from hdbscan import HDBSCAN
-from segment_anything import (SamAutomaticMaskGenerator, SamPredictor,
-                              sam_model_registry)
-from transformers import CLIPProcessor, CLIPModel
-
 def depth2img(depth):
     depth = (depth-depth.min())/(depth.max()-depth.min() + 1e-7)
     depth_img = cv2.applyColorMap((depth*255).astype(np.uint8),
@@ -43,7 +37,7 @@ def depth2img(depth):
     return depth_img
 
 class CONFIG:
-    r = 2   # scale ratio
+    r = int(os.environ.get("SAGA_GUI_SCALE", "2"))   # scale ratio
     window_width = int(2160/r)
     window_height = int(1200/r)
 
@@ -347,7 +341,7 @@ class GaussianSplattingGUI:
             self.cluster_in_3D_flag =True
         def callback_label_change(sender, app_data, user_data):
             self.label = int(list(self.json['instances'].keys())[(list(self.json['instances'].keys()).index(str(self.label))+user_data)%len(list(self.json['instances'].keys()))])
-            dpg.set_value('label', f'{self.label}:{self.json['instances'][str(self.label)]}')
+            dpg.set_value('label', f"{self.label}:{self.json['instances'][str(self.label)]}")
             self.engine['scene'].get_xyz[self.point_labels==self.label]
         def callback_reshuffle_color():
             self.label_to_color = np.random.rand(1000, 3)

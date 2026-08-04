@@ -10,7 +10,10 @@
 #
 
 import torch
-import pytorch3d.ops
+try:
+    import pytorch3d.ops
+except ImportError:
+    pytorch3d = None
 import numpy as np
 from utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotation
 from torch import nn
@@ -18,7 +21,10 @@ import os
 from utils.system_utils import mkdir_p
 from plyfile import PlyData, PlyElement
 from utils.sh_utils import RGB2SH
-from simple_knn._C import distCUDA2
+try:
+    from simple_knn._C import distCUDA2
+except ImportError:
+    distCUDA2 = None
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
 
@@ -332,6 +338,8 @@ class FeatureGaussianModel:
     
     @torch.no_grad()
     def smooth_point_features(self, K = 16, smoothed_dim = 24):
+        if pytorch3d is None:
+            raise ImportError("pytorch3d is required for point-feature smoothing")
         if self.feature_smooth_map is None or self.feature_smooth_map["K"] != K:
             xyz = self.get_xyz
             nearest_k_idx = pytorch3d.ops.knn_points(
@@ -347,6 +355,8 @@ class FeatureGaussianModel:
         self._point_features.data = cur_features
     
     def get_smoothed_point_features(self, K = 16, dropout = 0.5):
+        if pytorch3d is None:
+            raise ImportError("pytorch3d is required for point-feature smoothing")
         if K <= 1:
             return self._point_features
 
@@ -375,6 +385,8 @@ class FeatureGaussianModel:
         return ret
 
     def get_multi_resolution_smoothed_point_features(self, sample_rates = (0.1, 0.5, 1.5), Ks = (4,4,16), smooth_weights = None):
+        if pytorch3d is None:
+            raise ImportError("pytorch3d is required for point-feature smoothing")
         assert len(sample_rates) == len(Ks) and (smooth_weights is None or smooth_weights.shape[1] == len(Ks))
         
 
@@ -499,6 +511,8 @@ class FeatureGaussianModel:
             self.active_sh_degree += 1
 
     def create_from_pcd(self, pcd : BasicPointCloud, spatial_lr_scale : float):
+        if distCUDA2 is None:
+            raise ImportError("simple_knn is required to initialize a FeatureGaussianModel from a point cloud")
         self.spatial_lr_scale = spatial_lr_scale
 
         np_pcd_points = np.asarray(pcd.points)
