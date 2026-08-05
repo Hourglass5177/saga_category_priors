@@ -14,6 +14,8 @@ proxy="http://127.0.0.1:17890"
 concurrent_downloads=4
 connections_per_download=4
 min_free_gb=80
+max_tries=0
+transfer_timeout=120
 
 usage() {
     cat <<'EOF'
@@ -35,6 +37,8 @@ Options:
   --concurrent-downloads INT       Default: 4
   --connections-per-download INT   Default: 4
   --min-free-gb INT                Default: 80
+  --max-tries INT                  Default: 0 (retry indefinitely)
+  --transfer-timeout INT           Default: 120
 
 Downloads ScanNet v1 .sens streams into resumable .part files with aria2, then
 atomically renames successful files and uses the audited Python downloader to
@@ -61,6 +65,8 @@ while [[ $# -gt 0 ]]; do
         --concurrent-downloads) concurrent_downloads="$2"; shift 2 ;;
         --connections-per-download) connections_per_download="$2"; shift 2 ;;
         --min-free-gb) min_free_gb="$2"; shift 2 ;;
+        --max-tries) max_tries="$2"; shift 2 ;;
+        --transfer-timeout) transfer_timeout="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) err "unknown argument: $1" ;;
     esac
@@ -72,6 +78,9 @@ done
 for value in limit concurrent_downloads connections_per_download min_free_gb; do
     [[ "${!value}" =~ ^[1-9][0-9]*$ ]] || err "--${value//_/-} must be positive"
 done
+[[ "$max_tries" =~ ^[0-9]+$ ]] || err "--max-tries must be nonnegative"
+[[ "$transfer_timeout" =~ ^[1-9][0-9]*$ ]] \
+    || err "--transfer-timeout must be positive"
 [[ -n "$status_path" ]] || status_path="${manifest}.status"
 [[ -s "$scene_list" ]] || err "scene list is missing or empty: $scene_list"
 [[ -s "$official_downloader" ]] \
@@ -131,11 +140,11 @@ if [[ -s "$input_path" ]]; then
         --file-allocation=none \
         --allow-overwrite=true \
         --auto-file-renaming=false \
-        --max-tries=8 \
+        --max-tries="$max_tries" \
         --retry-wait=5 \
         --connect-timeout=60 \
-        --timeout=60 \
-        --lowest-speed-limit=1K \
+        --timeout="$transfer_timeout" \
+        --lowest-speed-limit=0 \
         --summary-interval=10 \
         --console-log-level=notice \
         --download-result=full \
