@@ -41,6 +41,7 @@ sh_degree=0
 feature_dim=32
 downsample=1
 num_sampled_rays=1000
+feature_iterations=0
 
 usage() {
     cat <<EOF
@@ -96,6 +97,7 @@ Tunables:
   --feature-dim INT        Default: 32
   --downsample INT         Default: 1
   --num-sampled-rays INT   Default: 1000
+  --feature-iterations INT Default: 0 (adaptive: min(10 * cameras, 10000))
   -h, --help               Show this help message
 
 Examples:
@@ -202,6 +204,7 @@ Resolved configuration:
   feature_dim: $feature_dim
   downsample: $downsample
   num_sampled_rays: $num_sampled_rays
+  feature_iterations: $feature_iterations
 EOF
 }
 
@@ -350,7 +353,8 @@ run_train() {
         --label_features_path "$label_features_path" \
         --contrastive_feature_point_cloud_path "$contrastive_feature_point_cloud_path" \
         --scale_gate_path "$scale_gate_path" \
-        --num_sampled_rays "$num_sampled_rays"
+        --num_sampled_rays "$num_sampled_rays" \
+        --iterations "$feature_iterations"
 }
 
 run_postprocess() {
@@ -542,6 +546,10 @@ while [[ $# -gt 0 ]]; do
             num_sampled_rays="$2"
             shift 2
             ;;
+        --feature-iterations)
+            feature_iterations="$2"
+            shift 2
+            ;;
         -h|--help)
             usage
             exit 0
@@ -553,6 +561,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 resolve_defaults
+[[ "$feature_iterations" =~ ^[0-9]+$ ]] || err "--feature-iterations must be nonnegative"
 if [[ -z "$python_bin" ]]; then
     find_python
 else

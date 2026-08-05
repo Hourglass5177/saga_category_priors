@@ -302,6 +302,9 @@ python train_contrastive_feature.py \
 - `--sh_degree`
 - 以及脚本内部已有的训练参数，如 `--iterations`
 
+特征训练未显式指定 `--iterations` 时，会使用
+`min(10 * 训练相机数, 10000)` 的自适应预算；场景 3DGS 训练仍默认使用 30,000 轮。
+
 说明：
 - 当前仓库工作流里，`feature_dim=32` 是最常见设置
 - `label_features_path` 会在训练与后处理阶段重复使用

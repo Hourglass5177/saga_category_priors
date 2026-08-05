@@ -474,6 +474,9 @@ def main():
         parser = ArgumentParser(description="Training script parameters")
         lp = ModelParams(parser)
         op = OptimizationParams(parser)
+        # Feature training historically used an adaptive camera-count budget.
+        # Keep it independent from the 30k default required by scene training.
+        parser.set_defaults(iterations=0)
         pp = PipelineParams(parser)
         parser.add_argument("--progress_path", type=str, required=True)
         parser.add_argument('--ip', type=str, default="127.0.0.1")
