@@ -145,7 +145,13 @@ resolve_defaults() {
 
     : "${images_path:=${base_path}/fastRecon/dense/sparse/0/images/}"
     : "${sparse_path:=${base_path}/fastRecon/dense/sparse/0/}"
-    : "${point_cloud_path:=${base_path}/output_models/point_cloud/iteration_30000/point_cloud.ply}"
+    if [[ -z "$point_cloud_path" ]]; then
+        point_cloud_path="${base_path}/output_models/point_cloud/iteration_30000/point_cloud.ply"
+        local scene_point_cloud_path="${base_path}/output_models/point_cloud/iteration_30000/scene_point_cloud.ply"
+        if [[ ! -f "$point_cloud_path" && -f "$scene_point_cloud_path" ]]; then
+            point_cloud_path="$scene_point_cloud_path"
+        fi
+    fi
 
     : "${masks_path:=${base_path}/saga/masks}"
     : "${labels_path:=${base_path}/saga/labels}"
