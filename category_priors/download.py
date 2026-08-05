@@ -81,11 +81,20 @@ def build_download_tasks(
             raise ValueError(f"Invalid ScanNet scene id: {scene_id}")
         for suffix in file_types:
             filename = f"{scene_id}{suffix}"
+            task_release = release
+            if suffix == ".sens":
+                releases = getattr(module, "RELEASES", None)
+                v1_index = int(getattr(module, "V1_IDX", 1))
+                if not releases or not 0 <= v1_index < len(releases):
+                    raise RuntimeError(
+                        "Official ScanNet downloader does not expose the v1 .sens release"
+                    )
+                task_release = str(releases[v1_index]).strip("/")
             tasks.append(
                 DownloadTask(
                     scene_id=scene_id,
                     suffix=suffix,
-                    url=f"{base_url}{release}/{scene_id}/{filename}",
+                    url=f"{base_url}{task_release}/{scene_id}/{filename}",
                     target=root / "scans" / scene_id / filename,
                 )
             )

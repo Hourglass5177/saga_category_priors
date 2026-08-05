@@ -18,6 +18,8 @@ def _official_module() -> SimpleNamespace:
     return SimpleNamespace(
         BASE_URL="https://restricted.invalid/",
         RELEASE="v2/scans",
+        RELEASES=("v2/scans", "v1/scans"),
+        V1_IDX=1,
         RELEASE_TASKS="v2/tasks",
         LABEL_MAP_FILE="scannetv2-labels.combined.tsv",
     )
@@ -53,6 +55,7 @@ def test_selected_scene_saga_tasks_allow_only_sens(tmp_path: Path) -> None:
     )
     assert len(tasks) == 1
     assert tasks[0].suffix == ".sens"
+    assert "/v1/scans/" in tasks[0].url
     assert tasks[0].target == (
         tmp_path / "scans" / "scene0000_00" / "scene0000_00.sens"
     )
