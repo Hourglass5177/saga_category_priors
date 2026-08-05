@@ -2,7 +2,29 @@ from __future__ import annotations
 
 import math
 
-from category_priors.runtime import PriorResolver, allocate_class_quotas
+import numpy as np
+
+from category_priors.io import canonical_json_bytes
+from category_priors.runtime import (
+    OverlayResult,
+    PriorResolver,
+    allocate_class_quotas,
+    build_instance_metadata,
+)
+
+
+class FakeTensor:
+    def __init__(self, value) -> None:
+        self.value = np.asarray(value)
+
+    def detach(self):
+        return self
+
+    def cpu(self):
+        return self
+
+    def numpy(self):
+        return self.value
 
 
 def test_quota_allocator_respects_budget_and_caps() -> None:
@@ -77,3 +99,32 @@ def test_all_factorial_modes_expose_registered_bits(
     for mode, bits in expected.items():
         params = resolver.class_parameters("chair", mode, 1.0, 1000.0, 1.0)
         assert params["factors"] == bits
+
+
+def test_metadata_serializes_unrestricted_radius_as_null() -> None:
+    labels = FakeTensor([0, 0])
+    confidence = FakeTensor([0.8, 0.9])
+    overlay = OverlayResult(
+        labels=labels,
+        assignment_confidence=confidence,
+        fallback_labels=labels,
+        fallback_assignment_confidence=confidence,
+        branch_instances={
+            0: {"parameters": {"knn_radius_m": math.inf}, "point_count": 2}
+        },
+        diagnostics={"classes": {"chair": {"knn_radius_m": math.inf}}},
+    )
+
+    payload = build_instance_metadata(
+        labels,
+        {0: np.array([1.0, 0.0])},
+        confidence,
+        ["chair", "table"],
+        overlay,
+        {"runtime_seconds": float("nan")},
+    )
+
+    assert payload["instances"]["0"]["prior"]["parameters"]["knn_radius_m"] is None
+    assert payload["overlay_diagnostics"]["classes"]["chair"]["knn_radius_m"] is None
+    assert payload["run"]["runtime_seconds"] is None
+    canonical_json_bytes(payload)

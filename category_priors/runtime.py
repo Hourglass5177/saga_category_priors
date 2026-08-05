@@ -690,6 +690,22 @@ def filter_small_clusters(
     return torch.from_numpy(array)
 
 
+def _json_safe_metadata(value: Any) -> Any:
+    """Convert runtime diagnostics to strict-JSON-compatible values."""
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe_metadata(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_metadata(item) for item in value]
+    if isinstance(value, (float, np.floating)):
+        number = float(value)
+        return number if math.isfinite(number) else None
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.bool_):
+        return bool(value)
+    return value
+
+
 def build_instance_metadata(
     labels: Any,
     instance_ratios: Mapping[int, np.ndarray],
@@ -726,13 +742,13 @@ def build_instance_metadata(
             "point_count": int(mask.sum()),
             "prior": branch,
         }
-    payload = {
+    payload = _json_safe_metadata({
         "schema_version": "1.0",
         "kind": "saga_instance_metadata",
         "run": dict(run_info),
         "instances": instances,
         "overlay_diagnostics": overlay.diagnostics if overlay else {},
-    }
+    })
     payload["content_sha256"] = hash_json(payload)
     return payload
 
