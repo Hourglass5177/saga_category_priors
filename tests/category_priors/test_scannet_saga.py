@@ -4,8 +4,10 @@ import struct
 from pathlib import Path
 
 import numpy as np
+import pytest
 from plyfile import PlyData, PlyElement
 
+from category_priors.alignment import audit_saga_alignment
 from category_priors.io import hash_json
 from category_priors.scannet_saga import prepare_saga_scene, read_sens_header
 
@@ -114,3 +116,53 @@ def test_read_sens_header_and_prepare_axis_aligned_scene(tmp_path: Path) -> None
     assert np.min(point_vertex["x"]) >= 2.0
     unsigned = dict(manifest)
     assert unsigned.pop("content_sha256") == hash_json(unsigned)
+
+
+def test_alignment_audit_passes_and_writes_failure_diagnostics(tmp_path: Path) -> None:
+    scene_id = "scene0000_00"
+    dataset_root = tmp_path / "scans"
+    _write_scene_files(dataset_root, scene_id)
+    sens_path = dataset_root / scene_id / f"{scene_id}.sens"
+    _write_sens(sens_path, [np.eye(4) for _ in range(4)])
+    manifest = prepare_saga_scene(
+        dataset_root,
+        scene_id,
+        sens_path,
+        tmp_path / "prepared",
+        frame_stride=1,
+        max_frames=4,
+        max_initial_points=4,
+    )
+    base = Path(manifest["base_path"])
+    initial_path = base / manifest["initial_point_cloud"]["path"]
+    vertices = PlyData.read(str(initial_path))["vertex"]
+    coords = np.column_stack((vertices["x"], vertices["y"], vertices["z"]))
+    gt_path = tmp_path / "gt.npz"
+    np.savez_compressed(
+        gt_path,
+        coords=coords,
+        semantic=np.zeros(len(coords), dtype=np.int64),
+        instance=np.zeros(len(coords), dtype=np.int64),
+    )
+
+    audit_path = tmp_path / "alignment.json"
+    audit = audit_saga_alignment(
+        base / "scene_preparation_manifest.json", gt_path, audit_path
+    )
+    assert audit["passed"] is True
+    assert audit["gt_to_cloud"]["mapped_fraction"] == 1.0
+    assert audit["cameras"]["inside_padded_gt_fraction"] == 1.0
+
+    bad_vertices = np.array(vertices.data, copy=True)
+    bad_vertices["x"] += 100.0
+    bad_path = tmp_path / "bad.ply"
+    PlyData([PlyElement.describe(bad_vertices, "vertex")]).write(str(bad_path))
+    failed_path = tmp_path / "failed-alignment.json"
+    with pytest.raises(RuntimeError, match="coverage_below_threshold"):
+        audit_saga_alignment(
+            base / "scene_preparation_manifest.json",
+            gt_path,
+            failed_path,
+            gaussian_ply_path=bad_path,
+        )
+    assert failed_path.is_file()

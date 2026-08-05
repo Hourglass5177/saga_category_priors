@@ -188,16 +188,28 @@ python -m category_priors prepare-saga-scene \
   --dataset-root /data/scannet/scans --scene-id scene0231_00 \
   --sens /data/scannet/scans/scene0231_00/scene0231_00.sens \
   --output-root /data/saga_scannet --frame-stride 20 --max-frames 200
+python -m category_priors audit-saga-alignment \
+  --preparation-manifest /data/saga_scannet/scene0231_00/scene_preparation_manifest.json \
+  --gt-npz artifacts/gt/scene0231_00.npz \
+  --output artifacts/scene0231_00-initial-alignment.json
 bash run_scannet_scene_pipeline.sh \
   --base-path /data/saga_scannet/scene0231_00 \
   --python /path/to/saga-env/bin/python --stage all
+python -m category_priors audit-saga-alignment \
+  --preparation-manifest /data/saga_scannet/scene0231_00/scene_preparation_manifest.json \
+  --gt-npz artifacts/gt/scene0231_00.npz \
+  --gaussian-ply /data/saga_scannet/scene0231_00/output_models/point_cloud/iteration_30000/scene_point_cloud.ply \
+  --output artifacts/scene0231_00-trained-alignment.json
 ```
 
 The `.sens` downloader uses a `.part` file, HTTP range resumption, a nonempty
 final-file check, a sanitized failure manifest, and the same 80GB free-space
 gate. The exporter records `scene_scale_m_per_unit=1.0` and an identity
 Gaussian-to-GT transform; these are accepted only after the one-scene mapping
-audit passes.
+audit passes. The audit writes diagnostics even when it fails and gates the
+registered 5 cm GT coverage, identity transform, metric scale, and padded camera
+trajectory. Run it once on the prepared initial points and again on the trained
+Gaussian point cloud before postprocessing.
 
 `run_scannet_scene_pipeline.sh` resumes at four nonempty-output gates: metric
 3DGS, masks/labels, mask scales, and contrastive features/scale gate. It archives

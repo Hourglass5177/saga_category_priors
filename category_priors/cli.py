@@ -9,6 +9,7 @@ from typing import Any
 
 import numpy as np
 
+from .alignment import audit_saga_alignment
 from .analysis import analyze_manifest
 from .download import (
     MINIMAL_FILE_TYPES,
@@ -231,6 +232,32 @@ def command_prepare_saga_scene(args: argparse.Namespace) -> None:
                     "selected_valid_frames"
                 ],
                 "initial_points": payload["initial_point_cloud"]["vertices"],
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
+def command_audit_saga_alignment(args: argparse.Namespace) -> None:
+    payload = audit_saga_alignment(
+        preparation_manifest_path=args.preparation_manifest,
+        gt_npz_path=args.gt_npz,
+        output_path=args.output,
+        gaussian_ply_path=args.gaussian_ply,
+        radius_m=args.radius_m,
+        minimum_mapped_fraction=args.minimum_mapped_fraction,
+        camera_padding_m=args.camera_padding_m,
+    )
+    print(
+        json.dumps(
+            {
+                "status": "ok",
+                "scene_id": payload["scene_id"],
+                "point_cloud_role": payload["point_cloud_role"],
+                "mapped_fraction": payload["gt_to_cloud"]["mapped_fraction"],
+                "camera_inside_fraction": payload["cameras"][
+                    "inside_padded_gt_fraction"
+                ],
             },
             ensure_ascii=False,
         )
@@ -509,6 +536,21 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_saga.add_argument("--max-frames", type=int, default=200)
     prepare_saga.add_argument("--max-initial-points", type=int, default=200_000)
     prepare_saga.set_defaults(func=command_prepare_saga_scene)
+
+    audit_alignment = subparsers.add_parser(
+        "audit-saga-alignment",
+        help="Gate a prepared or trained SAGA point cloud against canonical GT",
+    )
+    audit_alignment.add_argument("--preparation-manifest", required=True)
+    audit_alignment.add_argument("--gt-npz", required=True)
+    audit_alignment.add_argument("--gaussian-ply")
+    audit_alignment.add_argument("--output", required=True)
+    audit_alignment.add_argument("--radius-m", type=float, default=0.05)
+    audit_alignment.add_argument(
+        "--minimum-mapped-fraction", type=float, default=0.90
+    )
+    audit_alignment.add_argument("--camera-padding-m", type=float, default=2.0)
+    audit_alignment.set_defaults(func=command_audit_saga_alignment)
 
     fit = subparsers.add_parser("fit", help="Fit train-only hierarchical priors")
     fit.add_argument("--stats", required=True)
