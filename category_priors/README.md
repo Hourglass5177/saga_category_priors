@@ -188,6 +188,9 @@ python -m category_priors prepare-saga-scene \
   --dataset-root /data/scannet/scans --scene-id scene0231_00 \
   --sens /data/scannet/scans/scene0231_00/scene0231_00.sens \
   --output-root /data/saga_scannet --frame-stride 20 --max-frames 200
+bash run_scannet_scene_pipeline.sh \
+  --base-path /data/saga_scannet/scene0231_00 \
+  --python /path/to/saga-env/bin/python --stage all
 ```
 
 The `.sens` downloader uses a `.part` file, HTTP range resumption, a nonempty
@@ -195,6 +198,11 @@ final-file check, a sanitized failure manifest, and the same 80GB free-space
 gate. The exporter records `scene_scale_m_per_unit=1.0` and an identity
 Gaussian-to-GT transform; these are accepted only after the one-scene mapping
 audit passes.
+
+`run_scannet_scene_pipeline.sh` resumes at four nonempty-output gates: metric
+3DGS, masks/labels, mask scales, and contrastive features/scale gate. It archives
+an earlier stage log before retrying, records elapsed time/status per stage, and
+never invokes `--clean`.
 
 4. Run SAGA postprocessing. `scene_scale_m_per_unit` must be established by a
 coordinate-alignment audit; it must not be tuned for AP.
