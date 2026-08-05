@@ -219,6 +219,14 @@ never invokes `--clean`. When `--hf-home` is supplied, the GroundingDINO BERT
 dependency is resolved from that cache with Hugging Face and Transformers
 offline modes enabled by default.
 
+After the one-scene gate passes, `run_scannet_tune_wave.sh` expands tune assets
+in bounded waves. It waits for a hashed `.sens` manifest, validates every target
+file, then sequentially prepares, audits, trains, and re-audits each scene while
+retaining completed stage outputs. Use `--limit 8` for the registered first wave.
+When Python `urllib` cannot obtain ScanNet response headers through the cloud
+proxy, `download_scannet_sens_aria2.sh` provides bounded concurrent, atomic
+`.part` resume and finishes by generating the same hashed download manifest.
+
 4. Run SAGA postprocessing. `scene_scale_m_per_unit` must be established by a
 coordinate-alignment audit; it must not be tuned for AP.
 
