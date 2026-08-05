@@ -60,6 +60,7 @@ Required:
   --base-path PATH
 
 Core options:
+  --python PATH
   --stage STAGE
   --images-path PATH
   --sparse-path PATH
@@ -421,6 +422,10 @@ while [[ $# -gt 0 ]]; do
             base_path="$2"
             shift 2
             ;;
+        --python)
+            python_bin="$2"
+            shift 2
+            ;;
         --stage)
             stage="$2"
             shift 2
@@ -548,7 +553,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 resolve_defaults
-find_python
+if [[ -z "$python_bin" ]]; then
+    find_python
+else
+    require_file "$python_bin" "Python executable"
+fi
 check_python_scripts
 print_config
 

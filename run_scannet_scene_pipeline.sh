@@ -161,6 +161,7 @@ run_saga_stage() {
     local pipeline_stage="$2"
     shift 2
     run_logged "$log_name" bash "${repo_path}/run_pipeline.sh" \
+        --python "$python_bin" \
         --base-path "$base_path" \
         --stage "$pipeline_stage" \
         --sh-degree "$sh_degree" \

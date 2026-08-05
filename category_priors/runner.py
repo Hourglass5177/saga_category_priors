@@ -53,6 +53,11 @@ def load_scene_runtime_manifest(path: str | Path) -> dict[str, dict[str, Any]]:
             "base_path": str(base_path),
             "scene_scale_m_per_unit": scale,
         }
+        if item.get("python_bin"):
+            python_bin = Path(str(item["python_bin"]))
+            if not python_bin.is_absolute():
+                python_bin = (base / python_bin).resolve()
+            scenes[scene_id]["python_bin"] = str(python_bin)
     return scenes
 
 
@@ -97,6 +102,8 @@ def build_postprocess_command(
         str(int(run["run_seed"])),
         *CONDITION_OPTIONS[condition],
     ]
+    if scene.get("python_bin"):
+        command[2:2] = ["--python", str(scene["python_bin"])]
     if condition.startswith("P"):
         if priors_path is None or mapping_path is None:
             raise ValueError(f"{condition} requires priors and mapping paths")

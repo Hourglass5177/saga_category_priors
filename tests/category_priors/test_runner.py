@@ -9,7 +9,11 @@ def run(condition: str) -> dict[str, object]:
 
 
 def scene(tmp_path) -> dict[str, object]:
-    return {"base_path": str(tmp_path / "scene"), "scene_scale_m_per_unit": 1.0}
+    return {
+        "base_path": str(tmp_path / "scene"),
+        "scene_scale_m_per_unit": 1.0,
+        "python_bin": str(tmp_path / "env" / "python"),
+    }
 
 
 def test_baseline_conditions_are_distinct(tmp_path) -> None:
@@ -31,6 +35,7 @@ def test_baseline_conditions_are_distinct(tmp_path) -> None:
     )
     assert "--disable-other-classes" in b0
     assert "--disable-other-classes" not in b1
+    assert b0[b0.index("--python") + 1] == str(tmp_path / "env" / "python")
 
 
 def test_factorial_and_gate_arguments_are_exact(tmp_path) -> None:

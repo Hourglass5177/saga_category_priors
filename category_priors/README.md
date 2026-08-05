@@ -222,6 +222,10 @@ offline modes enabled by default.
 4. Run SAGA postprocessing. `scene_scale_m_per_unit` must be established by a
 coordinate-alignment audit; it must not be tuned for AP.
 
+Each runtime-manifest scene should also record the absolute `python_bin` for the
+validated SAGA environment. The experiment runner passes it explicitly to
+`run_pipeline.sh`, avoiding dependence on the supervisor shell's `PATH`.
+
 ```bash
 bash run_pipeline.sh --stage postprocess --base-path /data/scene \
   --prior-config artifacts/category_priors.json \
