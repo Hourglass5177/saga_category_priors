@@ -103,8 +103,52 @@ python -m category_priors search-design --kind global --samples 32 \
   --output artifacts/global_search_design.json
 python -m category_priors search-design --kind prior --samples 32 \
   --output artifacts/prior_search_design.json
+
+# Turn every global LHS row into a hashed executable mapping, then randomize the
+# 32 configurations inside each scene/seed block (one tuning seed by default).
+python -m category_priors materialize-search \
+  --design artifacts/global_search_design.json \
+  --priors artifacts/category_priors.json \
+  --taxonomy category_priors/default_taxonomy.json \
+  --scene-selection artifacts/scene_selection.json \
+  --output-dir artifacts/global_mappings \
+  --output artifacts/global_mapping_manifest.json
+python -m category_priors search-schedule \
+  --scene-selection artifacts/scene_selection.json \
+  --mapping-manifest artifacts/global_mapping_manifest.json \
+  --output artifacts/global_tune_schedule.json
+python -m category_priors run-experiment \
+  --schedule artifacts/global_tune_schedule.json \
+  --scene-manifest artifacts/scene_runtime_manifest.json \
+  --output-root runs/global-search --output runs/global-search/execution.json \
+  --priors artifacts/category_priors.json
+python -m category_priors evaluate-search \
+  --schedule artifacts/global_tune_schedule.json \
+  --execution runs/global-search/execution.json \
+  --scene-manifest artifacts/scene_runtime_manifest.json \
+  --gt-manifest artifacts/gt_val_tune/manifest.json \
+  --output-dir artifacts/global_evaluation \
+  --output artifacts/global_tune_metrics.parquet
 python -m category_priors select-config --design artifacts/global_search_design.json \
   --metrics artifacts/global_tune_metrics.parquet --output artifacts/global_best.json
+
+# Freeze the selected global values while retaining registered default prior
+# coefficients, then repeat the same materialize/schedule/run/evaluate flow for
+# the prior design with --base-mapping artifacts/global_mapping_config.json.
+python -m category_priors build-mapping \
+  --global-best artifacts/global_best.json \
+  --priors artifacts/category_priors.json \
+  --taxonomy category_priors/default_taxonomy.json \
+  --scene-selection artifacts/scene_selection.json \
+  --output artifacts/global_mapping_config.json
+python -m category_priors materialize-search \
+  --design artifacts/prior_search_design.json \
+  --base-mapping artifacts/global_mapping_config.json \
+  --priors artifacts/category_priors.json \
+  --taxonomy category_priors/default_taxonomy.json \
+  --scene-selection artifacts/scene_selection.json \
+  --output-dir artifacts/prior_mappings \
+  --output artifacts/prior_mapping_manifest.json
 python -m category_priors select-config --design artifacts/prior_search_design.json \
   --metrics artifacts/prior_tune_metrics.parquet --output artifacts/prior_best.json
 python -m category_priors build-mapping \
@@ -124,6 +168,33 @@ python -m category_priors run-experiment \
   --priors artifacts/category_priors.json \
   --mapping artifacts/prior_mapping_config.json --dry-run
 ```
+
+`select-config` requires every registered configuration and equal replicate
+counts. Its default runtime tie-break tolerance is `0.002` on the `[0,1]` AP
+scale, i.e. 0.2 AP points. Missing or non-finite metrics are rejected rather than
+silently selecting from a partial search.
+
+Before either search can run, prepare each already-selected ScanNet scene. The
+registered exporter streams the `.sens` file, keeps only subsampled compressed
+color frames, applies `axisAlignment` to both poses and mesh vertices, and emits
+a metric COLMAP text model plus a hashed preparation manifest:
+
+```bash
+python -m category_priors download-scannet-saga \
+  --official-downloader /secure/tools/download_scannetv2.py \
+  --scene-list artifacts/tune_scenes.txt --out-dir /data/scannet \
+  --manifest artifacts/tune_sens_download.json --workers 1 --accept-tos
+python -m category_priors prepare-saga-scene \
+  --dataset-root /data/scannet/scans --scene-id scene0231_00 \
+  --sens /data/scannet/scans/scene0231_00/scene0231_00.sens \
+  --output-root /data/saga_scannet --frame-stride 20 --max-frames 200
+```
+
+The `.sens` downloader uses a `.part` file, HTTP range resumption, a nonempty
+final-file check, a sanitized failure manifest, and the same 80GB free-space
+gate. The exporter records `scene_scale_m_per_unit=1.0` and an identity
+Gaussian-to-GT transform; these are accepted only after the one-scene mapping
+audit passes.
 
 4. Run SAGA postprocessing. `scene_scale_m_per_unit` must be established by a
 coordinate-alignment audit; it must not be tuned for AP.

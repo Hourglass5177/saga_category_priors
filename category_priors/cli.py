@@ -10,10 +10,15 @@ from typing import Any
 import numpy as np
 
 from .analysis import analyze_manifest
-from .download import MINIMAL_FILE_TYPES, download_scannet_subset
+from .download import (
+    MINIMAL_FILE_TYPES,
+    download_scannet_saga_scenes,
+    download_scannet_subset,
+)
 from .evaluator import evaluate_manifest
 from .io import hash_json, load_json, read_rows, sha256_file, write_json, write_rows
 from .mapping import (
+    DEFAULT_MAPPING_CONFIG,
     build_lock_manifest,
     build_mapping_config,
     build_run_schedule,
@@ -30,6 +35,12 @@ from .scannet import (
     read_scene_ids,
     validate_scene_ids,
 )
+from .scannet_saga import prepare_saga_scene
+from .search import (
+    build_search_schedule,
+    evaluate_search_execution,
+    materialize_search_mappings,
+)
 from .selection import select_scenes
 from .taxonomy import load_taxonomy
 
@@ -43,6 +54,22 @@ def command_download_scannet(args: argparse.Namespace) -> None:
         accept_tos=args.accept_tos,
         file_types=tuple(args.file_types or MINIMAL_FILE_TYPES),
         include_label_map=not args.no_label_map,
+        workers=args.workers,
+        retries=args.retries,
+        timeout_s=args.timeout_s,
+        min_free_gb=args.min_free_gb,
+        limit=args.limit,
+        dry_run=args.dry_run,
+    )
+
+
+def command_download_scannet_saga(args: argparse.Namespace) -> None:
+    download_scannet_saga_scenes(
+        official_downloader=args.official_downloader,
+        scene_list=args.scene_list,
+        out_dir=args.out_dir,
+        manifest_path=args.manifest,
+        accept_tos=args.accept_tos,
         workers=args.workers,
         retries=args.retries,
         timeout_s=args.timeout_s,
@@ -184,6 +211,32 @@ def command_prepare_gt(args: argparse.Namespace) -> None:
     write_json(output_dir / "manifest.json", manifest)
 
 
+def command_prepare_saga_scene(args: argparse.Namespace) -> None:
+    payload = prepare_saga_scene(
+        dataset_root=args.dataset_root,
+        scene_id=args.scene_id,
+        sens_path=args.sens,
+        output_root=args.output_root,
+        frame_stride=args.frame_stride,
+        max_frames=args.max_frames,
+        max_initial_points=args.max_initial_points,
+    )
+    print(
+        json.dumps(
+            {
+                "status": "ok",
+                "scene_id": payload["scene_id"],
+                "base_path": payload["base_path"],
+                "selected_valid_frames": payload["frame_selection"][
+                    "selected_valid_frames"
+                ],
+                "initial_points": payload["initial_point_cloud"]["vertices"],
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
 def command_fit(args: argparse.Namespace) -> None:
     rows = read_rows(args.stats)
     taxonomy = load_taxonomy(args.taxonomy)
@@ -218,6 +271,30 @@ def command_search_design(args: argparse.Namespace) -> None:
     write_json(args.output, latin_hypercube_design(args.kind, args.samples, args.seed))
 
 
+def command_materialize_search(args: argparse.Namespace) -> None:
+    materialize_search_mappings(
+        design_path=args.design,
+        output_dir=args.output_dir,
+        manifest_path=args.output,
+        priors_path=args.priors,
+        taxonomy_path=args.taxonomy,
+        scene_selection_path=args.scene_selection,
+        base_mapping_path=args.base_mapping,
+    )
+
+
+def command_search_schedule(args: argparse.Namespace) -> None:
+    write_json(
+        args.output,
+        build_search_schedule(
+            args.scene_selection,
+            args.mapping_manifest,
+            args.run_seed or (42,),
+            args.seed,
+        ),
+    )
+
+
 def command_select_config(args: argparse.Namespace) -> None:
     rows = read_rows(args.metrics)
     design = load_json(args.design)
@@ -233,14 +310,21 @@ def command_select_config(args: argparse.Namespace) -> None:
 
 def command_build_mapping(args: argparse.Namespace) -> None:
     global_best = load_json(args.global_best)
-    prior_best = load_json(args.prior_best)
+    prior_best = load_json(args.prior_best) if args.prior_best else None
     payload = build_mapping_config(
         global_best["parameters"],
-        prior_best["parameters"],
+        prior_best["parameters"]
+        if prior_best
+        else DEFAULT_MAPPING_CONFIG["coefficients"],
         args.priors,
         args.taxonomy,
         args.scene_selection,
     )
+    payload["provenance"]["mapping_stage"] = (
+        "global+prior" if prior_best else "global-only"
+    )
+    payload.pop("content_sha256", None)
+    payload["content_sha256"] = hash_json(payload)
     write_json(args.output, payload)
 
 
@@ -292,6 +376,21 @@ def command_evaluate(args: argparse.Namespace) -> None:
     taxonomy = load_taxonomy(args.taxonomy)
     evaluate_manifest(
         args.manifest, taxonomy, args.output, args.radius_m, args.min_region_size
+    )
+
+
+def command_evaluate_search(args: argparse.Namespace) -> None:
+    taxonomy = load_taxonomy(args.taxonomy)
+    evaluate_search_execution(
+        schedule_path=args.schedule,
+        execution_path=args.execution,
+        scene_manifest_path=args.scene_manifest,
+        gt_manifest_path=args.gt_manifest,
+        taxonomy=taxonomy,
+        output_dir=args.output_dir,
+        metrics_path=args.output,
+        radius_m=args.radius_m,
+        min_region_size=args.min_region_size,
     )
 
 
@@ -354,6 +453,23 @@ def build_parser() -> argparse.ArgumentParser:
     download.add_argument("--accept-tos", action="store_true")
     download.set_defaults(func=command_download_scannet)
 
+    download_saga = subparsers.add_parser(
+        "download-scannet-saga",
+        help="Download resumable .sens streams for already selected SAGA scenes",
+    )
+    download_saga.add_argument("--official-downloader", required=True)
+    download_saga.add_argument("--scene-list", required=True)
+    download_saga.add_argument("--out-dir", required=True)
+    download_saga.add_argument("--manifest", required=True)
+    download_saga.add_argument("--workers", type=int, default=1)
+    download_saga.add_argument("--retries", type=int, default=8)
+    download_saga.add_argument("--timeout-s", type=float, default=300.0)
+    download_saga.add_argument("--min-free-gb", type=float, default=80.0)
+    download_saga.add_argument("--limit", type=int)
+    download_saga.add_argument("--dry-run", action="store_true")
+    download_saga.add_argument("--accept-tos", action="store_true")
+    download_saga.set_defaults(func=command_download_scannet_saga)
+
     extract = subparsers.add_parser(
         "extract", help="Extract ScanNet per-instance statistics"
     )
@@ -380,6 +496,19 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_gt.add_argument("--taxonomy")
     prepare_gt.add_argument("--output-dir", required=True)
     prepare_gt.set_defaults(func=command_prepare_gt)
+
+    prepare_saga = subparsers.add_parser(
+        "prepare-saga-scene",
+        help="Export a metric, axis-aligned ScanNet .sens scene for SAGA/3DGS",
+    )
+    prepare_saga.add_argument("--dataset-root", required=True)
+    prepare_saga.add_argument("--scene-id", required=True)
+    prepare_saga.add_argument("--sens", required=True)
+    prepare_saga.add_argument("--output-root", required=True)
+    prepare_saga.add_argument("--frame-stride", type=int, default=20)
+    prepare_saga.add_argument("--max-frames", type=int, default=200)
+    prepare_saga.add_argument("--max-initial-points", type=int, default=200_000)
+    prepare_saga.set_defaults(func=command_prepare_saga_scene)
 
     fit = subparsers.add_parser("fit", help="Fit train-only hierarchical priors")
     fit.add_argument("--stats", required=True)
@@ -413,12 +542,41 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--output", required=True)
     search.set_defaults(func=command_search_design)
 
+    materialize = subparsers.add_parser(
+        "materialize-search",
+        help="Materialize every LHS row as a hashed executable mapping",
+    )
+    materialize.add_argument("--design", required=True)
+    materialize.add_argument("--priors", required=True)
+    materialize.add_argument("--taxonomy", required=True)
+    materialize.add_argument("--scene-selection", required=True)
+    materialize.add_argument("--base-mapping")
+    materialize.add_argument("--output-dir", required=True)
+    materialize.add_argument("--output", required=True)
+    materialize.set_defaults(func=command_materialize_search)
+
+    search_schedule = subparsers.add_parser(
+        "search-schedule",
+        help="Randomize executable search configurations within scene/seed blocks",
+    )
+    search_schedule.add_argument("--scene-selection", required=True)
+    search_schedule.add_argument("--mapping-manifest", required=True)
+    search_schedule.add_argument("--run-seed", action="append", type=int)
+    search_schedule.add_argument("--seed", type=int, default=20260804)
+    search_schedule.add_argument("--output", required=True)
+    search_schedule.set_defaults(func=command_search_schedule)
+
     choose = subparsers.add_parser(
         "select-config", help="Select the registered best tuning config"
     )
     choose.add_argument("--metrics", required=True)
     choose.add_argument("--design", required=True)
-    choose.add_argument("--tie-ap", type=float, default=0.2)
+    choose.add_argument(
+        "--tie-ap",
+        type=float,
+        default=0.002,
+        help="AP fraction used for the runtime tie-break (0.002 = 0.2 AP points)",
+    )
     choose.add_argument("--output", required=True)
     choose.set_defaults(func=command_select_config)
 
@@ -426,7 +584,10 @@ def build_parser() -> argparse.ArgumentParser:
         "build-mapping", help="Build validation-derived mapping config"
     )
     mapping.add_argument("--global-best", required=True)
-    mapping.add_argument("--prior-best", required=True)
+    mapping.add_argument(
+        "--prior-best",
+        help="omit after global search; defaults are retained for the prior search base",
+    )
     mapping.add_argument("--priors", required=True)
     mapping.add_argument("--taxonomy", required=True)
     mapping.add_argument("--scene-selection", required=True)
@@ -479,6 +640,21 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--radius-m", type=float, default=0.05)
     evaluate.add_argument("--min-region-size", type=int, default=100)
     evaluate.set_defaults(func=command_evaluate)
+
+    evaluate_search = subparsers.add_parser(
+        "evaluate-search",
+        help="Evaluate all complete val-tune configurations and write metrics",
+    )
+    evaluate_search.add_argument("--schedule", required=True)
+    evaluate_search.add_argument("--execution", required=True)
+    evaluate_search.add_argument("--scene-manifest", required=True)
+    evaluate_search.add_argument("--gt-manifest", required=True)
+    evaluate_search.add_argument("--taxonomy")
+    evaluate_search.add_argument("--output-dir", required=True)
+    evaluate_search.add_argument("--output", required=True)
+    evaluate_search.add_argument("--radius-m", type=float, default=0.05)
+    evaluate_search.add_argument("--min-region-size", type=int, default=100)
+    evaluate_search.set_defaults(func=command_evaluate_search)
 
     analyze = subparsers.add_parser(
         "analyze", help="Run locked paired and 2^3 scene-group bootstrap analyses"

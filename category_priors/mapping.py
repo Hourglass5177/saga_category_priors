@@ -129,8 +129,10 @@ def latin_hypercube_design(
 def choose_best_config(
     metric_rows: Sequence[Mapping[str, Any]],
     design: Mapping[str, Any],
-    tie_ap: float = 0.2,
+    tie_ap: float = 0.002,
 ) -> dict[str, Any]:
+    if tie_ap < 0:
+        raise ValueError("tie_ap must be non-negative")
     observed_splits = {str(row.get("split", "")).strip().lower() for row in metric_rows}
     if observed_splits != {"val-tune"}:
         raise ValueError(
@@ -143,18 +145,32 @@ def choose_best_config(
     params_by_id = {
         item["config_id"]: item["parameters"] for item in design["configurations"]
     }
+    missing = sorted(set(params_by_id) - set(by_config))
+    if missing:
+        raise ValueError(
+            f"Tuning metrics are incomplete; missing {len(missing)} configurations"
+        )
+    replicate_counts = {len(rows) for rows in by_config.values()}
+    if len(replicate_counts) != 1:
+        raise ValueError("Tuning configurations have unequal replicate counts")
     for config_id, rows in by_config.items():
         if config_id not in params_by_id:
             raise ValueError(f"Metric references unknown config_id: {config_id}")
         map_values = [float(row["map_50_95"]) for row in rows]
         runtimes = [float(row.get("runtime_seconds", math.inf)) for row in rows]
+        if not all(math.isfinite(value) for value in map_values + runtimes):
+            raise ValueError(f"Non-finite tuning metric for {config_id}")
+        scene_counts = {int(row.get("scene_count", 0)) for row in rows}
+        if len(scene_counts) != 1:
+            raise ValueError(f"Inconsistent scene_count for {config_id}")
         candidates.append(
             {
                 "config_id": config_id,
                 "map_50_95": float(np.mean(map_values)),
                 "runtime_seconds": float(np.mean(runtimes)),
                 "parameters": params_by_id[config_id],
-                "scene_count": len(rows),
+                "scene_count": scene_counts.pop(),
+                "replicate_count": len(rows),
             }
         )
     if not candidates:

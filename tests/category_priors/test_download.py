@@ -7,6 +7,7 @@ import pytest
 
 from category_priors.download import (
     MINIMAL_FILE_TYPES,
+    SAGA_FILE_TYPES,
     _safe_error,
     build_download_tasks,
     download_scannet_subset,
@@ -39,6 +40,22 @@ def test_build_tasks_rejects_unregistered_type(tmp_path: Path) -> None:
             tmp_path,
             file_types=(".sens",),
         )
+
+
+def test_selected_scene_saga_tasks_allow_only_sens(tmp_path: Path) -> None:
+    tasks = build_download_tasks(
+        _official_module(),
+        ["scene0000_00"],
+        tmp_path,
+        file_types=SAGA_FILE_TYPES,
+        include_label_map=False,
+        allowed_file_types=SAGA_FILE_TYPES,
+    )
+    assert len(tasks) == 1
+    assert tasks[0].suffix == ".sens"
+    assert tasks[0].target == (
+        tmp_path / "scans" / "scene0000_00" / "scene0000_00.sens"
+    )
 
 
 def test_download_requires_explicit_tos_acceptance(tmp_path: Path) -> None:

@@ -23,6 +23,7 @@ MINIMAL_FILE_TYPES = (
     "_vh_clean_2.ply",
     "_vh_clean_2.0.010000.segs.json",
 )
+SAGA_FILE_TYPES = (".sens",)
 _SCENE_ID = re.compile(r"^scene\d{4}_\d{2}$")
 
 
@@ -58,11 +59,17 @@ def build_download_tasks(
     out_dir: str | Path,
     file_types: tuple[str, ...] = MINIMAL_FILE_TYPES,
     include_label_map: bool = True,
+    allowed_file_types: tuple[str, ...] = MINIMAL_FILE_TYPES,
 ) -> list[DownloadTask]:
-    invalid_types = sorted(set(file_types) - set(MINIMAL_FILE_TYPES))
+    invalid_types = sorted(set(file_types) - set(allowed_file_types))
     if invalid_types:
+        label = (
+            "statistics"
+            if allowed_file_types == MINIMAL_FILE_TYPES
+            else "selected-scene SAGA"
+        )
         raise ValueError(
-            "Only the registered statistics file types are allowed: "
+            f"Only the registered {label} file types are allowed: "
             + ", ".join(invalid_types)
         )
     root = Path(out_dir).resolve()
@@ -200,6 +207,8 @@ def download_scannet_subset(
     min_free_gb: float = 80.0,
     limit: int | None = None,
     dry_run: bool = False,
+    allowed_file_types: tuple[str, ...] = MINIMAL_FILE_TYPES,
+    manifest_kind: str = "scannet_minimal_download",
 ) -> dict[str, Any]:
     if not accept_tos:
         raise ValueError("ScanNet Terms of Use must be accepted explicitly")
@@ -222,6 +231,7 @@ def download_scannet_subset(
         root,
         file_types=file_types,
         include_label_map=include_label_map,
+        allowed_file_types=allowed_file_types,
     )
     _check_free_space(root, int(min_free_gb * 1024**3))
 
@@ -261,7 +271,7 @@ def download_scannet_subset(
 
     payload: dict[str, Any] = {
         "schema_version": "1.0",
-        "kind": "scannet_minimal_download",
+        "kind": manifest_kind,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "tos_accepted": True,
         "official_downloader": Path(official_downloader).name,
@@ -282,3 +292,36 @@ def download_scannet_subset(
             f"ScanNet download failed for {len(failures)} files; see {manifest_path}"
         )
     return payload
+
+
+def download_scannet_saga_scenes(
+    *,
+    official_downloader: str | Path,
+    scene_list: str | Path,
+    out_dir: str | Path,
+    manifest_path: str | Path,
+    accept_tos: bool,
+    workers: int = 1,
+    retries: int = 8,
+    timeout_s: float = 300.0,
+    min_free_gb: float = 80.0,
+    limit: int | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    return download_scannet_subset(
+        official_downloader=official_downloader,
+        scene_list=scene_list,
+        out_dir=out_dir,
+        manifest_path=manifest_path,
+        accept_tos=accept_tos,
+        file_types=SAGA_FILE_TYPES,
+        include_label_map=False,
+        workers=workers,
+        retries=retries,
+        timeout_s=timeout_s,
+        min_free_gb=min_free_gb,
+        limit=limit,
+        dry_run=dry_run,
+        allowed_file_types=SAGA_FILE_TYPES,
+        manifest_kind="scannet_saga_download",
+    )

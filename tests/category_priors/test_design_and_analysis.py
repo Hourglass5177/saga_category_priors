@@ -27,6 +27,43 @@ def test_config_selection_rejects_locked_or_test_metrics() -> None:
         choose_best_config(metrics, design)
 
 
+def test_config_selection_requires_complete_balanced_design() -> None:
+    design = latin_hypercube_design("global", samples=2, seed=7)
+    one = [
+        {
+            "config_id": design["configurations"][0]["config_id"],
+            "split": "val-tune",
+            "map_50_95": 0.5,
+            "runtime_seconds": 1.0,
+            "scene_count": 24,
+        }
+    ]
+    with pytest.raises(ValueError, match="incomplete"):
+        choose_best_config(one, design)
+
+
+def test_runtime_tie_break_uses_fractional_ap_units() -> None:
+    design = latin_hypercube_design("global", samples=2, seed=7)
+    rows = [
+        {
+            "config_id": design["configurations"][0]["config_id"],
+            "split": "val-tune",
+            "map_50_95": 0.500,
+            "runtime_seconds": 100.0,
+            "scene_count": 24,
+        },
+        {
+            "config_id": design["configurations"][1]["config_id"],
+            "split": "val-tune",
+            "map_50_95": 0.499,
+            "runtime_seconds": 1.0,
+            "scene_count": 24,
+        },
+    ]
+    selected = choose_best_config(rows, design)
+    assert selected["config_id"] == design["configurations"][1]["config_id"]
+
+
 def test_factorial_requires_all_eight_combinations() -> None:
     gt = GroundTruthScene(
         "scene", np.zeros(1, dtype=np.int64), np.zeros(1, dtype=np.int64)

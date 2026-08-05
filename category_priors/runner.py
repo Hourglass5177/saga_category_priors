@@ -67,12 +67,10 @@ def build_postprocess_command(
     condition = str(run["condition"])
     if condition not in CONDITION_OPTIONS:
         raise ValueError(f"Unregistered condition: {condition}")
-    run_dir = (
-        Path(output_root)
-        / condition
-        / str(run["scene_id"])
-        / f"seed-{int(run['run_seed'])}"
-    )
+    run_dir = Path(output_root) / condition
+    if run.get("config_id"):
+        run_dir = run_dir / str(run["config_id"])
+    run_dir = run_dir / str(run["scene_id"]) / f"seed-{int(run['run_seed'])}"
     paths = {
         "run_dir": run_dir,
         "output_json": run_dir / "output.json",
@@ -139,6 +137,16 @@ def execute_schedule(
     output_root = Path(output_root).resolve()
     output_root.mkdir(parents=True, exist_ok=True)
 
+    previous_by_sequence: dict[int, Mapping[str, Any]] = {}
+    result_path = Path(result_path).resolve()
+    if resume and result_path.is_file():
+        previous = load_json(result_path)
+        if previous.get("schedule_sha256") != sha256_file(schedule_path):
+            raise ValueError("Existing execution manifest belongs to another schedule")
+        previous_by_sequence = {
+            int(item["sequence"]): item for item in previous.get("runs", [])
+        }
+
     result: dict[str, Any] = {
         "schema_version": "1.0",
         "kind": "run_execution",
@@ -157,13 +165,21 @@ def execute_schedule(
             raise ValueError(
                 f"Schedule scene is missing from runtime manifest: {scene_id}"
             )
+        run_mapping_path = run.get("mapping_path", mapping_path)
+        if run.get("mapping_sha256"):
+            if run_mapping_path is None or sha256_file(run_mapping_path) != run.get(
+                "mapping_sha256"
+            ):
+                raise ValueError(
+                    f"{run.get('config_id', scene_id)}: mapping hash mismatch"
+                )
         command, paths = build_postprocess_command(
             pipeline_path,
             run,
             scenes[scene_id],
             output_root,
             priors_path,
-            mapping_path,
+            run_mapping_path,
         )
         paths["run_dir"].mkdir(parents=True, exist_ok=True)
         record: dict[str, Any] = {
@@ -176,12 +192,19 @@ def execute_schedule(
             "metadata_json": str(paths["metadata_json"]),
             "log": str(paths["log"]),
         }
+        if run.get("config_id"):
+            record["config_id"] = str(run["config_id"])
+            record["mapping_path"] = str(Path(run_mapping_path).resolve())
+            record["mapping_sha256"] = sha256_file(run_mapping_path)
         if (
             resume
             and paths["output_json"].is_file()
             and paths["metadata_json"].is_file()
         ):
             record["status"] = "skipped_complete"
+            previous_record = previous_by_sequence.get(int(run["sequence"]), {})
+            if "runtime_seconds" in previous_record:
+                record["runtime_seconds"] = float(previous_record["runtime_seconds"])
         elif dry_run:
             record["status"] = "planned"
         else:
