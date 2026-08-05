@@ -12,6 +12,7 @@ sh_degree=0
 feature_dim=32
 downsample=1
 num_sampled_rays=1000
+hf_home="${HF_HOME:-}"
 
 usage() {
     cat <<'EOF'
@@ -32,6 +33,7 @@ Options:
   --feature-dim INT         Default: 32
   --downsample INT          Default: 1
   --num-sampled-rays INT    Default: 1000
+  --hf-home PATH            Use an existing Hugging Face cache in offline mode.
 
 The script never passes --clean and never deletes prior artifacts. Completed
 stages are skipped only after their registered nonempty-output gate passes.
@@ -89,6 +91,7 @@ while [[ $# -gt 0 ]]; do
         --feature-dim) feature_dim="$2"; shift 2 ;;
         --downsample) downsample="$2"; shift 2 ;;
         --num-sampled-rays) num_sampled_rays="$2"; shift 2 ;;
+        --hf-home) hf_home="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) err "unknown argument: $1" ;;
     esac
@@ -114,6 +117,13 @@ require_dir "$images_path" "RGB images"
 require_file "${sparse_path}/cameras.txt" "COLMAP cameras"
 require_file "${sparse_path}/images.txt" "COLMAP images"
 require_file "${sparse_path}/points3D.ply" "Initial point cloud"
+
+if [[ -n "$hf_home" ]]; then
+    require_dir "$hf_home" "Hugging Face cache"
+    export HF_HOME="$hf_home"
+    export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+    export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
+fi
 
 export PATH="$(dirname "$python_bin"):${PATH}"
 

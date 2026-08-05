@@ -194,7 +194,8 @@ python -m category_priors audit-saga-alignment \
   --output artifacts/scene0231_00-initial-alignment.json
 bash run_scannet_scene_pipeline.sh \
   --base-path /data/saga_scannet/scene0231_00 \
-  --python /path/to/saga-env/bin/python --stage all
+  --python /path/to/saga-env/bin/python \
+  --hf-home /data/cache/huggingface --stage all
 python -m category_priors audit-saga-alignment \
   --preparation-manifest /data/saga_scannet/scene0231_00/scene_preparation_manifest.json \
   --gt-npz artifacts/gt/scene0231_00.npz \
@@ -214,7 +215,9 @@ Gaussian point cloud before postprocessing.
 `run_scannet_scene_pipeline.sh` resumes at four nonempty-output gates: metric
 3DGS, masks/labels, mask scales, and contrastive features/scale gate. It archives
 an earlier stage log before retrying, records elapsed time/status per stage, and
-never invokes `--clean`.
+never invokes `--clean`. When `--hf-home` is supplied, the GroundingDINO BERT
+dependency is resolved from that cache with Hugging Face and Transformers
+offline modes enabled by default.
 
 4. Run SAGA postprocessing. `scene_scale_m_per_unit` must be established by a
 coordinate-alignment audit; it must not be tuned for AP.
