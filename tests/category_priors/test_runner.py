@@ -51,6 +51,10 @@ def test_factorial_and_gate_arguments_are_exact(tmp_path) -> None:
     assert command[command.index("--prior-gate") + 1] == "off"
     assert "--clean" not in command
     assert paths["metadata_json"].name == "output.json.metadata.json"
+    cache_path = command[command.index("--max-contributor-cache-path") + 1]
+    assert cache_path == str(
+        tmp_path / "runs" / ".cache" / "max_contributors" / "scene0000_00"
+    )
 
 
 def test_search_config_gets_isolated_output_directory(tmp_path) -> None:

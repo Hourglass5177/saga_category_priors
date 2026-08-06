@@ -96,6 +96,8 @@ def build_postprocess_command(
         str(paths["metadata_json"]),
         "--progress-path",
         str(paths["progress"]),
+        "--max-contributor-cache-path",
+        str(output_root / ".cache" / "max_contributors" / str(run["scene_id"])),
         "--scene-scale-m-per-unit",
         str(float(scene["scene_scale_m_per_unit"])),
         "--seed",

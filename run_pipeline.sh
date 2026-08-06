@@ -29,6 +29,7 @@ prior_mode="off"
 prior_gate="on"
 prior_shrink="on"
 prior_metadata_path=""
+max_contributor_cache_path=""
 scene_scale_m_per_unit="0"
 seed=42
 disable_other_classes=0
@@ -83,6 +84,7 @@ Category-prior postprocess options:
   --prior-gate MODE              on|off (default: on)
   --prior-shrink MODE            on|off (default: on)
   --prior-metadata-path PATH     Default: BASE/saga/output.json.metadata.json
+  --max-contributor-cache-path PATH  Shared cache for config-invariant renders
   --scene-scale-m-per-unit FLOAT Required and positive when priors are enabled
   --seed INT                     Default: 42
   --disable-other-classes        Registered B0; default is B1-compatible enabled
@@ -194,6 +196,7 @@ Resolved configuration:
   prior_gate: $prior_gate
   prior_shrink: $prior_shrink
   prior_metadata_path: $prior_metadata_path
+  max_contributor_cache_path: $max_contributor_cache_path
   scene_scale_m_per_unit: $scene_scale_m_per_unit
   seed: $seed
   disable_other_classes: $disable_other_classes
@@ -376,6 +379,9 @@ run_postprocess() {
     if [[ "$disable_other_classes" -eq 1 ]]; then
         prior_args+=(--disable_other_classes)
     fi
+    if [[ -n "$max_contributor_cache_path" ]]; then
+        prior_args+=(--max_contributor_cache_path "$max_contributor_cache_path")
+    fi
     "$python_bin" "${SCRIPT_DIR}/postprocess.py" \
         --progress_path "$progress_path" \
         --sh_degree "$sh_degree" \
@@ -504,6 +510,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --prior-metadata-path)
             prior_metadata_path="$2"
+            shift 2
+            ;;
+        --max-contributor-cache-path)
+            max_contributor_cache_path="$2"
             shift 2
             ;;
         --scene-scale-m-per-unit)

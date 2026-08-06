@@ -3,6 +3,7 @@ import torch
 from scene import Scene
 import os
 import json
+import hashlib
 import sys
 from datetime import datetime
 from tqdm import tqdm
@@ -287,6 +288,8 @@ def main():
     parser.add_argument("--prior_shrink", choices=['on', 'off'], default='on')
     parser.add_argument("--prior_metadata_path", type=str, default=None,
                         help="Optional sidecar with AP scores, gates, resolved parameters and provenance")
+    parser.add_argument("--max_contributor_cache_path", type=str, default=None,
+                        help="Optional shared cache for config-invariant max-contributor renders")
     parser.add_argument("--scene_scale_m_per_unit", type=float, default=0.0,
                         help="Known metric conversion for Gaussian coordinates; required by category priors")
     parser.add_argument("--seed", type=int, default=42)
@@ -333,6 +336,75 @@ def main():
                                     read_intrinsics_text(os.path.join(args.sparse_path, 'cameras.txt')), 
                                     args.images_path)
     camera_list = cameraList_from_camInfos(cameras, 1, args)
+
+    max_contributor_cache_dir = None
+    max_contributor_memory = {}
+    max_contributor_cache_hits = 0
+    max_contributor_cache_misses = 0
+    if args.max_contributor_cache_path:
+        point_cloud_stat = os.stat(args.point_cloud_path)
+        cache_identity = {
+            "format": "saga-max-contributor-v1",
+            "point_cloud": {
+                "path": os.path.abspath(args.point_cloud_path),
+                "size": point_cloud_stat.st_size,
+                "mtime_ns": point_cloud_stat.st_mtime_ns,
+                "gaussians": int(gs_model.get_xyz.shape[0]),
+            },
+            "cameras": [
+                {
+                    "image_name": camera.image_name,
+                    "width": int(camera.image_width),
+                    "height": int(camera.image_height),
+                    "world_view_transform": camera.world_view_transform.detach().cpu().tolist(),
+                    "full_proj_transform": camera.full_proj_transform.detach().cpu().tolist(),
+                }
+                for camera in camera_list
+            ],
+        }
+        cache_key = hashlib.sha256(
+            json.dumps(cache_identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        max_contributor_cache_dir = os.path.join(args.max_contributor_cache_path, cache_key)
+        os.makedirs(max_contributor_cache_dir, exist_ok=True)
+        manifest_path = os.path.join(max_contributor_cache_dir, "manifest.json")
+        if not os.path.isfile(manifest_path):
+            temporary_manifest = f"{manifest_path}.tmp-{os.getpid()}"
+            with open(temporary_manifest, "w", encoding="utf-8") as handle:
+                json.dump(cache_identity, handle, sort_keys=True)
+            os.replace(temporary_manifest, manifest_path)
+        print(f"max-contributor cache: {max_contributor_cache_dir}")
+
+    def get_max_contributor(camera, device):
+        nonlocal max_contributor_cache_hits, max_contributor_cache_misses
+        camera_key = hashlib.sha256(camera.image_name.encode("utf-8")).hexdigest()
+        if camera_key in max_contributor_memory:
+            max_contributor_cache_hits += 1
+            return max_contributor_memory[camera_key].to(device)
+        cache_file = None
+        max_contributor = None
+        if max_contributor_cache_dir is not None:
+            cache_file = os.path.join(max_contributor_cache_dir, f"{camera_key}.pt")
+            if os.path.isfile(cache_file):
+                candidate = torch.load(cache_file, map_location="cpu")
+                if (
+                    candidate.shape == (camera.image_height, camera.image_width)
+                    and candidate.numel() > 0
+                    and int(candidate.min()) >= 0
+                    and int(candidate.max()) < int(gs_model.get_xyz.shape[0])
+                ):
+                    max_contributor = candidate.long().contiguous()
+                    max_contributor_cache_hits += 1
+        if max_contributor is None:
+            render_pkg = render_with_max_contributor(camera, gs_model, args, bg_color)
+            max_contributor = render_pkg['max_contributor'].detach().cpu().long().contiguous()
+            max_contributor_cache_misses += 1
+            if cache_file is not None:
+                temporary_cache = f"{cache_file}.tmp-{os.getpid()}"
+                torch.save(max_contributor, temporary_cache)
+                os.replace(temporary_cache, cache_file)
+        max_contributor_memory[camera_key] = max_contributor
+        return max_contributor.to(device)
 
     point_features = feat_gs_model.get_point_features.detach().cpu()
     point_semantic_features = feat_gs_model.get_point_semantic_features.detach().cpu()
@@ -532,8 +604,7 @@ def main():
             masks[masks!=1] = 0
             masks = masks.bool()
             labels_2d = torch.load(os.path.join(args.labels_path, f'{camera.image_name}.pt'))
-            render_pkg = render_with_max_contributor(camera, gs_model, args, bg_color)
-            max_contributor = render_pkg['max_contributor'].to(labels_for_vote.device)
+            max_contributor = get_max_contributor(camera, labels_for_vote.device)
             max_instance_contributor = labels_for_vote[max_contributor]
             background_label = len(args.classes)
             background = torch.ones(
@@ -608,6 +679,10 @@ def main():
     # point_labels = torch.load(os.path.join(args.model_path, 'point_labels.pth'))
 
     instance_ratio = compute_instance_ratios(point_labels, update_progress=True)
+    print(
+        f"max-contributor cache summary: hits={max_contributor_cache_hits}, "
+        f"misses={max_contributor_cache_misses}"
+    )
 
     def get_class(classes, ratio:np.ndarray):
         if ratio.max()<args.label_threshold:
