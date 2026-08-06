@@ -386,15 +386,21 @@ def main():
         if max_contributor_cache_dir is not None:
             cache_file = os.path.join(max_contributor_cache_dir, f"{camera_key}.pt")
             if os.path.isfile(cache_file):
-                candidate = torch.load(cache_file, map_location="cpu")
-                if (
-                    candidate.shape == (camera.image_height, camera.image_width)
-                    and candidate.numel() > 0
-                    and int(candidate.min()) >= 0
-                    and int(candidate.max()) < int(gs_model.get_xyz.shape[0])
-                ):
-                    max_contributor = candidate.long().contiguous()
-                    max_contributor_cache_hits += 1
+                try:
+                    candidate = torch.load(
+                        cache_file, map_location="cpu", weights_only=True
+                    )
+                    if (
+                        isinstance(candidate, torch.Tensor)
+                        and candidate.shape == (camera.image_height, camera.image_width)
+                        and candidate.numel() > 0
+                        and int(candidate.min()) >= 0
+                        and int(candidate.max()) < int(gs_model.get_xyz.shape[0])
+                    ):
+                        max_contributor = candidate.long().contiguous()
+                        max_contributor_cache_hits += 1
+                except (OSError, RuntimeError, ValueError):
+                    max_contributor = None
         if max_contributor is None:
             render_pkg = render_with_max_contributor(camera, gs_model, args, bg_color)
             max_contributor = render_pkg['max_contributor'].detach().cpu().long().contiguous()
@@ -591,18 +597,27 @@ def main():
         return torch.tensor(new_label)
     def compute_instance_ratios(labels_for_vote, update_progress=True):
         instance_ids = [int(value) for value in torch.unique(labels_for_vote).tolist() if int(value) >= 0]
-        vote = {instance: [0 for _ in range(len(args.classes)+1)] for instance in instance_ids}
+        if not instance_ids:
+            return {}
+        maximum_instance_id = max(instance_ids)
+        vote = np.zeros(
+            (maximum_instance_id + 1, len(args.classes) + 1), dtype=np.int64
+        )
         for i, camera in tqdm(list(enumerate(camera_list))):
             if update_progress:
                 with open(args.progress_path, 'w') as f:
                     f.write(str(0+(i+1)*100//len(camera_list)))
             if not os.path.exists(os.path.join(args.masks_path, f'{camera.image_name}.pt')):
                 continue
-            masks = torch.load(os.path.join(args.masks_path, f'{camera.image_name}.pt')).float()
-            masks = torch.nn.functional.interpolate(masks.unsqueeze(1), mode='bilinear', size=(camera.image_height, camera.image_width), align_corners=False).squeeze(1)
-            masks[masks>0.5] = 1
-            masks[masks!=1] = 0
-            masks = masks.bool()
+            masks = torch.load(os.path.join(args.masks_path, f'{camera.image_name}.pt'))
+            if masks.shape[-2:] != (camera.image_height, camera.image_width):
+                masks = torch.nn.functional.interpolate(
+                    masks.float().unsqueeze(1), mode='bilinear',
+                    size=(camera.image_height, camera.image_width),
+                    align_corners=False,
+                ).squeeze(1) > 0.5
+            else:
+                masks = masks.bool()
             labels_2d = torch.load(os.path.join(args.labels_path, f'{camera.image_name}.pt'))
             max_contributor = get_max_contributor(camera, labels_for_vote.device)
             max_instance_contributor = labels_for_vote[max_contributor]
@@ -618,15 +633,26 @@ def main():
                 label_index = int(label_2d)
                 if label_index < 0 or label_index >= len(args.classes):
                     continue
-                for instance in instance_ids:
-                    vote[instance][label_index]+=(vote_for_label==instance).sum().item()
+                valid_instances = vote_for_label[
+                    (vote_for_label >= 0) & (vote_for_label <= maximum_instance_id)
+                ].long()
+                if valid_instances.numel():
+                    vote[:, label_index] += torch.bincount(
+                        valid_instances, minlength=maximum_instance_id + 1
+                    ).cpu().numpy()
             vote_for_background_label = max_instance_contributor[background]
-            for instance in instance_ids:
-                vote[instance][background_label]+=(vote_for_background_label==instance).sum().item()
+            valid_background = vote_for_background_label[
+                (vote_for_background_label >= 0)
+                & (vote_for_background_label <= maximum_instance_id)
+            ].long()
+            if valid_background.numel():
+                vote[:, background_label] += torch.bincount(
+                    valid_background, minlength=maximum_instance_id + 1
+                ).cpu().numpy()
 
         ratios = {}
-        for instance, votes in vote.items():
-            votes = np.asarray(votes, dtype=np.float64)
+        for instance in instance_ids:
+            votes = vote[instance].astype(np.float64, copy=False)
             denominator = votes.sum()
             ratios[instance] = votes[:-1] / denominator if denominator > 0 else np.zeros(len(args.classes), dtype=np.float64)
         return ratios

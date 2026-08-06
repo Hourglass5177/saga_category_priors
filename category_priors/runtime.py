@@ -645,27 +645,75 @@ def smooth_labels(
         if max_k == 1:
             distances = distances[:, None]
             indices = indices[:, None]
-        for row, point_index in enumerate(range(start, stop)):
-            current = int(labels[point_index])
+        current_labels = labels[start:stop]
+        k_by_row = np.full(
+            len(current_labels),
+            int(resolver.mapping["baseline"]["knn_k"]),
+            dtype=np.int64,
+        )
+        radius_by_row = np.full(len(current_labels), math.inf, dtype=np.float64)
+        for current in np.unique(current_labels):
             params = per_instance.get(current)
-            k = (
-                int(params["knn_k"])
-                if params
-                else int(resolver.mapping["baseline"]["knn_k"])
-            )
-            radius = float(params["knn_radius_m"]) if params else math.inf
-            k = min(k, max_k)
-            valid = (
-                np.isfinite(distances[row, :k])
-                & (indices[row, :k] < len(labels))
-                & (distances[row, :k] <= radius)
-            )
-            neighbor_labels = labels[indices[row, :k][valid]]
-            if len(neighbor_labels) == 0:
-                continue
-            values, counts = np.unique(neighbor_labels, return_counts=True)
-            smoothed[point_index] = int(values[np.argmax(counts)])
+            if params:
+                rows = current_labels == current
+                k_by_row[rows] = min(int(params["knn_k"]), max_k)
+                radius_by_row[rows] = float(params["knn_radius_m"])
+        smoothed[start:stop] = _majority_neighbor_labels(
+            labels,
+            current_labels,
+            distances,
+            indices,
+            np.minimum(k_by_row, max_k),
+            radius_by_row,
+        )
     return torch.from_numpy(smoothed)
+
+
+def _majority_neighbor_labels(
+    all_labels: np.ndarray,
+    current_labels: np.ndarray,
+    distances: np.ndarray,
+    indices: np.ndarray,
+    k_by_row: np.ndarray,
+    radius_by_row: np.ndarray,
+) -> np.ndarray:
+    """Vectorized equivalent of per-point ``np.unique(..., return_counts=True)``.
+
+    Encoded ``(row, label)`` pairs let NumPy count all neighbor votes in one
+    operation. Sorting of the encoded values preserves the legacy tie break:
+    when counts match, the numerically smallest label wins.
+    """
+    result = current_labels.copy()
+    if not len(result):
+        return result
+    columns = np.arange(indices.shape[1], dtype=np.int64)[None, :]
+    valid = (
+        (columns < k_by_row[:, None])
+        & np.isfinite(distances)
+        & (indices < len(all_labels))
+        & (distances <= radius_by_row[:, None])
+    )
+    rows, columns = np.nonzero(valid)
+    if not len(rows):
+        return result
+    neighbor_labels = all_labels[indices[rows, columns]]
+    minimum_label = int(all_labels.min())
+    maximum_label = int(all_labels.max())
+    label_span = maximum_label - minimum_label + 1
+    encoded = rows.astype(np.int64) * label_span + neighbor_labels - minimum_label
+    unique_encoded, counts = np.unique(encoded, return_counts=True)
+    counted_rows = unique_encoded // label_span
+    counted_labels = unique_encoded % label_span + minimum_label
+    starts = np.r_[0, np.flatnonzero(np.diff(counted_rows)) + 1]
+    stops = np.r_[starts[1:], len(counted_rows)]
+    maximum_counts = np.maximum.reduceat(counts, starts)
+    maximum_per_pair = np.repeat(maximum_counts, stops - starts)
+    winning_labels = np.minimum.reduceat(
+        np.where(counts == maximum_per_pair, counted_labels, maximum_label + 1),
+        starts,
+    )
+    result[counted_rows[starts]] = winning_labels
+    return result
 
 
 def filter_small_clusters(
