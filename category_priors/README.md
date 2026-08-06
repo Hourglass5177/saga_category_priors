@@ -226,6 +226,11 @@ retaining completed stage outputs. Use `--limit 8` for the registered first wave
 When Python `urllib` cannot obtain ScanNet response headers through the cloud
 proxy, `download_scannet_sens_aria2.sh` provides bounded concurrent, atomic
 `.part` resume and finishes by generating the same hashed download manifest.
+`--verified-url-map` may route explicitly listed scenes through a transport
+mirror. The TSV must pin scene ID, URL, byte length, and SHA-256; both size and
+hash are checked before atomic rename, while scenes absent from the map retain
+the official ScanNet URL. Resized, recompressed, or resampled frame archives are
+not valid substitutes for raw `.sens` input.
 
 4. Run SAGA postprocessing. `scene_scale_m_per_unit` must be established by a
 coordinate-alignment audit; it must not be tuned for AP.
