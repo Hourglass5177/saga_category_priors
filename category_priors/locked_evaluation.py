@@ -527,7 +527,13 @@ def evaluate_tune_seed_execution(
             ):
                 raise ValueError(f"{condition}/{scene_id}: alignment failed")
             predictions.extend(scene_predictions)
-            runtimes.append(float(record["runtime_seconds"]))
+            # A resumed run may be recorded as ``skipped_complete`` without a
+            # wall-clock duration in the new execution file.  Its predictions
+            # are still valid; runtime is a secondary diagnostic, so summarize
+            # the durations that were actually observed instead of rejecting
+            # the entire seed audit.
+            if record.get("runtime_seconds") is not None:
+                runtimes.append(float(record["runtime_seconds"]))
         evaluated = evaluate_instances(
             ground_truth,
             predictions,
@@ -544,7 +550,8 @@ def evaluate_tune_seed_execution(
                 "map_50_95": evaluated["aggregate"]["map_50_95"],
                 "map_0.50": evaluated["aggregate"]["map_0.50"],
                 "map_0.25": evaluated["aggregate"]["map_0.25"],
-                "runtime_seconds": float(np.mean(runtimes)),
+                "runtime_seconds": float(np.mean(runtimes)) if runtimes else None,
+                "runtime_observed_runs": len(runtimes),
                 "failure_rate": 0.0,
             }
         )
