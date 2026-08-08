@@ -17,6 +17,7 @@ min_free_gb=80
 max_tries=0
 transfer_timeout=120
 verified_url_map=""
+header_only_audit=false
 
 usage() {
     cat <<'EOF'
@@ -41,6 +42,8 @@ Options:
   --max-tries INT                  Default: 0 (retry indefinitely)
   --transfer-timeout INT           Default: 120
   --verified-url-map PATH          Optional TSV: scene_id, URL, bytes, SHA-256
+  --header-only-audit              For official URLs, record readable headers
+                                   and sizes without hashing full .sens files
 
 Downloads ScanNet v1 .sens streams into resumable .part files with aria2, then
 atomically renames successful files and uses the audited Python downloader to
@@ -70,6 +73,7 @@ while [[ $# -gt 0 ]]; do
         --max-tries) max_tries="$2"; shift 2 ;;
         --transfer-timeout) transfer_timeout="$2"; shift 2 ;;
         --verified-url-map) verified_url_map="$2"; shift 2 ;;
+        --header-only-audit) header_only_audit=true; shift ;;
         -h|--help) usage; exit 0 ;;
         *) err "unknown argument: $1" ;;
     esac
@@ -214,17 +218,59 @@ stage="manifest_audit"
 printf 'running stage=%s started_at=%s\n' "$stage" "$(date -Is)" \
     > "$status_path"
 cd "$workspace"
-PYTHONPATH=. "$python_bin" -m category_priors download-scannet-saga \
-    --official-downloader "$official_downloader" \
-    --scene-list "$scene_list" \
-    --out-dir "$out_dir" \
-    --manifest "$manifest" \
-    --workers 1 \
-    --retries 1 \
-    --timeout-s 60 \
-    --min-free-gb "$min_free_gb" \
-    --limit "$limit" \
-    --accept-tos
+if [[ "$header_only_audit" == true ]]; then
+    PYTHONPATH=. "$python_bin" - "$scene_list" "$out_dir" "$manifest" "$limit" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+from category_priors.scannet_saga import read_sens_header
+
+scene_list, out_dir, manifest, limit = sys.argv[1:]
+scenes = [line.strip() for line in Path(scene_list).read_text().splitlines() if line.strip()]
+records = []
+for scene_id in scenes[: int(limit)]:
+    path = Path(out_dir) / "scans" / scene_id / f"{scene_id}.sens"
+    if not path.is_file() or path.stat().st_size == 0:
+        raise FileNotFoundError(f"missing nonempty official .sens: {path}")
+    with path.open("rb") as handle:
+        header = read_sens_header(handle)
+    if header.num_frames <= 0:
+        raise ValueError(f"official .sens has no readable frames: {path}")
+    records.append(
+        {
+            "scene_id": scene_id,
+            "path": str(path),
+            "bytes": path.stat().st_size,
+            "version": header.version,
+            "num_frames": header.num_frames,
+        }
+    )
+payload = {
+    "kind": "official_sens_header_audit",
+    "scene_count": len(records),
+    "scenes": records,
+}
+target = Path(manifest)
+target.parent.mkdir(parents=True, exist_ok=True)
+temporary = target.with_suffix(target.suffix + ".tmp")
+temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+os.replace(temporary, target)
+PY
+else
+    PYTHONPATH=. "$python_bin" -m category_priors download-scannet-saga \
+        --official-downloader "$official_downloader" \
+        --scene-list "$scene_list" \
+        --out-dir "$out_dir" \
+        --manifest "$manifest" \
+        --workers 1 \
+        --retries 1 \
+        --timeout-s 60 \
+        --min-free-gb "$min_free_gb" \
+        --limit "$limit" \
+        --accept-tos
+fi
 
 stage="complete"
 printf 'complete stage=%s scenes=%s completed_at=%s\n' \
