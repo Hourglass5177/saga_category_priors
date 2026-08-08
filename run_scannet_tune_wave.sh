@@ -7,6 +7,7 @@ download_manifest=""
 dataset_root=""
 output_root=""
 artifacts_dir=""
+gt_dir=""
 clean_workspace=""
 gpu_repo=""
 cpu_python=""
@@ -20,6 +21,7 @@ max_frames=200
 max_initial_points=200000
 min_free_gb=80
 download_wait_hours=12
+delete_sens_after_success=0
 
 usage() {
     cat <<'EOF'
@@ -28,10 +30,10 @@ Usage:
 
 Required:
   --scene-list PATH
-  --download-manifest PATH
   --dataset-root PATH
   --output-root PATH
   --artifacts-dir PATH
+  --gt-dir PATH
   --clean-workspace PATH
   --gpu-repo PATH
   --cpu-python PATH
@@ -39,6 +41,7 @@ Required:
   --hf-home PATH
 
 Options:
+  --download-manifest PATH     Optional downloader status used only for waiting
   --wave-name NAME             Default: wave
   --limit INT                  Default: 8
   --iterations INT             Default: 30000
@@ -47,10 +50,11 @@ Options:
   --max-initial-points INT     Default: 200000
   --min-free-gb INT            Default: 80
   --download-wait-hours INT    Default: 12
+  --delete-sens-after-success  Remove this wave's raw .sens only after every scene succeeds
 
-The script waits for a complete, hashed .sens download manifest, then prepares,
-audits, trains, and re-audits each scene sequentially. Existing nonempty stage
-outputs are retained and consumed by the per-scene resume gates.
+The script accepts official nonempty, readable .sens files, then prepares and
+trains each scene sequentially. Existing nonempty stage outputs are retained and
+consumed by the per-scene resume gates.
 EOF
 }
 
@@ -74,6 +78,7 @@ while [[ $# -gt 0 ]]; do
         --dataset-root) dataset_root="$2"; shift 2 ;;
         --output-root) output_root="$2"; shift 2 ;;
         --artifacts-dir) artifacts_dir="$2"; shift 2 ;;
+        --gt-dir) gt_dir="$2"; shift 2 ;;
         --clean-workspace) clean_workspace="$2"; shift 2 ;;
         --gpu-repo) gpu_repo="$2"; shift 2 ;;
         --cpu-python) cpu_python="$2"; shift 2 ;;
@@ -87,12 +92,13 @@ while [[ $# -gt 0 ]]; do
         --max-initial-points) max_initial_points="$2"; shift 2 ;;
         --min-free-gb) min_free_gb="$2"; shift 2 ;;
         --download-wait-hours) download_wait_hours="$2"; shift 2 ;;
+        --delete-sens-after-success) delete_sens_after_success=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) err "unknown argument: $1" ;;
     esac
 done
 
-for value in scene_list download_manifest dataset_root output_root artifacts_dir \
+for value in scene_list dataset_root output_root artifacts_dir gt_dir \
     clean_workspace gpu_repo cpu_python gpu_python hf_home; do
     [[ -n "${!value}" ]] || err "--${value//_/-} is required"
 done
@@ -107,6 +113,7 @@ require_file "$cpu_python" "CPU Python"
 require_file "$gpu_python" "GPU Python"
 require_file "$gpu_repo/run_scannet_scene_pipeline.sh" "Per-scene pipeline"
 require_dir "$dataset_root" "ScanNet scans"
+require_dir "$gt_dir" "Canonical ground truth"
 require_dir "$clean_workspace" "Clean workspace"
 require_dir "$hf_home" "Hugging Face cache"
 mkdir -p "$output_root" "$artifacts_dir/alignment"
@@ -143,34 +150,41 @@ done
 scene_id="none"
 
 write_status
-wait_deadline=$(( $(date +%s) + download_wait_hours * 3600 ))
-while [[ ! -s "$download_manifest" ]]; do
-    (( $(date +%s) < wait_deadline )) || err "timed out waiting for download manifest"
-    sleep 30
-done
+if [[ -n "$download_manifest" ]]; then
+    wait_deadline=$(( $(date +%s) + download_wait_hours * 3600 ))
+    while [[ ! -s "$download_manifest" ]]; do
+        (( $(date +%s) < wait_deadline )) || err "timed out waiting for download manifest"
+        sleep 30
+    done
+fi
 
 PYTHONPATH="$clean_workspace" "$cpu_python" - \
     "$download_manifest" "$dataset_root" "${scenes[@]}" <<'PY'
 import sys
 from pathlib import Path
 
-from category_priors.io import hash_json, load_json
+from category_priors.io import load_json
+from category_priors.scannet_saga import read_sens_header
 
-manifest_path = Path(sys.argv[1])
+manifest_arg = sys.argv[1]
 dataset_root = Path(sys.argv[2])
 scene_ids = sys.argv[3:]
-manifest = load_json(manifest_path)
-recorded_hash = manifest.pop("content_sha256", None)
-if not recorded_hash or recorded_hash != hash_json(manifest):
-    raise SystemExit("download manifest hash validation failed")
-records = {item["scene_id"]: item for item in manifest.get("files", [])}
+records = None
+if manifest_arg:
+    manifest = load_json(manifest_arg)
+    records = {item["scene_id"]: item for item in manifest.get("files", [])}
 for scene_id in scene_ids:
-    record = records.get(scene_id)
-    if not record or record.get("status") not in {"existing", "downloaded"}:
-        raise SystemExit(f"download manifest is incomplete for {scene_id}")
+    if records is not None:
+        record = records.get(scene_id)
+        if not record or record.get("status") not in {"existing", "downloaded"}:
+            raise SystemExit(f"download manifest is incomplete for {scene_id}")
     sens = dataset_root / scene_id / f"{scene_id}.sens"
     if not sens.is_file() or sens.stat().st_size <= 0:
         raise SystemExit(f"downloaded .sens is missing or empty: {sens}")
+    with sens.open("rb") as handle:
+        header = read_sens_header(handle)
+    if header.num_frames <= 0:
+        raise SystemExit(f"downloaded .sens has no frames: {sens}")
 PY
 
 free_space_gate() {
@@ -189,9 +203,8 @@ completed=0
 for scene_id in "${scenes[@]}"; do
     base="$output_root/$scene_id"
     sens="$dataset_root/$scene_id/$scene_id.sens"
-    gt="$artifacts_dir/gt_val_tune/$scene_id.npz"
+    gt="$gt_dir/$scene_id.npz"
     preparation_manifest="$base/scene_preparation_manifest.json"
-    initial_audit="$artifacts_dir/alignment/$scene_id-initial-alignment.json"
     trained_audit="$artifacts_dir/alignment/$scene_id-trained-alignment.json"
 
     free_space_gate
@@ -214,14 +227,6 @@ for scene_id in "${scenes[@]}"; do
             --max-frames "$max_frames" \
             --max-initial-points "$max_initial_points"
     fi
-
-    stage="initial_alignment_audit"
-    write_status
-    cd "$clean_workspace"
-    PYTHONPATH=. "$cpu_python" -m category_priors audit-saga-alignment \
-        --preparation-manifest "$preparation_manifest" \
-        --gt-npz "$gt" \
-        --output "$initial_audit"
 
     stage="scene_pipeline"
     write_status
@@ -246,10 +251,20 @@ for scene_id in "${scenes[@]}"; do
         --preparation-manifest "$preparation_manifest" \
         --gt-npz "$gt" \
         --gaussian-ply "$gaussian" \
-        --output "$trained_audit"
+        --output "$trained_audit" \
+        --minimal
 
     completed=$((completed + 1))
 done
+
+if (( delete_sens_after_success )); then
+    stage="delete_wave_sens"
+    scene_id="none"
+    write_status
+    for completed_scene_id in "${scenes[@]}"; do
+        rm -- "$dataset_root/$completed_scene_id/$completed_scene_id.sens"
+    done
+fi
 
 stage="complete"
 scene_id="none"

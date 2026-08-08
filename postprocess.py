@@ -288,6 +288,8 @@ def main():
     parser.add_argument("--prior_shrink", choices=['on', 'off'], default='on')
     parser.add_argument("--prior_metadata_path", type=str, default=None,
                         help="Optional sidecar with AP scores, gates, resolved parameters and provenance")
+    parser.add_argument("--minimal_metadata", action='store_true',
+                        help="Omit per-artifact SHA-256 fields in locked runs")
     parser.add_argument("--max_contributor_cache_path", type=str, default=None,
                         help="Optional shared cache for config-invariant max-contributor renders")
     parser.add_argument("--scene_scale_m_per_unit", type=float, default=0.0,
@@ -832,7 +834,6 @@ def main():
     with open(args.json_path,'w') as f:
         json.dump(output,f)
     if args.prior_metadata_path:
-        from category_priors.io import sha256_file
         from category_priors.runtime import build_instance_metadata, write_instance_metadata
 
         run_info = {
@@ -842,14 +843,18 @@ def main():
             "prior_shrink": args.prior_shrink,
             "scene_scale_m_per_unit": args.scene_scale_m_per_unit,
             "output_json": os.path.abspath(args.json_path),
-            "output_json_sha256": sha256_file(args.json_path),
         }
+        if not args.minimal_metadata:
+            from category_priors.io import sha256_file
+            run_info["output_json_sha256"] = sha256_file(args.json_path)
         if args.prior_config:
             run_info["category_priors"] = os.path.abspath(args.prior_config)
-            run_info["category_priors_sha256"] = sha256_file(args.prior_config)
+            if not args.minimal_metadata:
+                run_info["category_priors_sha256"] = sha256_file(args.prior_config)
         if args.prior_mapping_config:
             run_info["prior_mapping_config"] = os.path.abspath(args.prior_mapping_config)
-            run_info["prior_mapping_config_sha256"] = sha256_file(args.prior_mapping_config)
+            if not args.minimal_metadata:
+                run_info["prior_mapping_config_sha256"] = sha256_file(args.prior_mapping_config)
         metadata = build_instance_metadata(
             point_labels,
             instance_ratio,
@@ -857,6 +862,7 @@ def main():
             args.classes,
             prior_overlay,
             run_info,
+            include_content_hash=not args.minimal_metadata,
         )
         write_instance_metadata(args.prior_metadata_path, metadata)
     if(args.clean):

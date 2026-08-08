@@ -33,6 +33,7 @@ max_contributor_cache_path=""
 scene_scale_m_per_unit="0"
 seed=42
 disable_other_classes=0
+minimal_metadata=0
 
 sam_checkpoint_path="${SCRIPT_DIR}/weights/sam_vit_h_4b8939.pth"
 groundingdino_checkpoint_path="${SCRIPT_DIR}/weights/groundingdino_swint_ogc.pth"
@@ -88,6 +89,7 @@ Category-prior postprocess options:
   --scene-scale-m-per-unit FLOAT Required and positive when priors are enabled
   --seed INT                     Default: 42
   --disable-other-classes        Registered B0; default is B1-compatible enabled
+  --minimal-metadata             Omit per-artifact hashes in locked-run metadata
 
 Model options:
   --sam-checkpoint-path PATH
@@ -382,6 +384,9 @@ run_postprocess() {
     if [[ -n "$max_contributor_cache_path" ]]; then
         prior_args+=(--max_contributor_cache_path "$max_contributor_cache_path")
     fi
+    if [[ "$minimal_metadata" -eq 1 ]]; then
+        prior_args+=(--minimal_metadata)
+    fi
     "$python_bin" "${SCRIPT_DIR}/postprocess.py" \
         --progress_path "$progress_path" \
         --sh_degree "$sh_degree" \
@@ -526,6 +531,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --disable-other-classes)
             disable_other_classes=1
+            shift
+            ;;
+        --minimal-metadata)
+            minimal_metadata=1
             shift
             ;;
         --sam-checkpoint-path)

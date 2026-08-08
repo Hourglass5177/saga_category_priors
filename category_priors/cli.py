@@ -18,6 +18,8 @@ from .download import (
 )
 from .evaluator import evaluate_manifest
 from .io import hash_json, load_json, read_rows, sha256_file, write_json, write_rows
+from .locked import assess_seed_sensitivity, build_locked_plan
+from .locked_evaluation import evaluate_locked_plan, evaluate_tune_seed_execution
 from .mapping import (
     DEFAULT_MAPPING_CONFIG,
     build_lock_manifest,
@@ -28,7 +30,7 @@ from .mapping import (
     validate_mapping_config,
 )
 from .priors import fit_priors, validate_priors, write_priors
-from .runner import execute_schedule
+from .runner import execute_locked_plan, execute_schedule
 from .scannet import (
     discover_scene_files,
     extract_scene_stats,
@@ -42,7 +44,7 @@ from .search import (
     evaluate_search_execution,
     materialize_search_mappings,
 )
-from .selection import select_scenes
+from .selection import select_locked_evaluation_scenes, select_scenes
 from .taxonomy import load_taxonomy
 
 
@@ -247,6 +249,7 @@ def command_audit_saga_alignment(args: argparse.Namespace) -> None:
         radius_m=args.radius_m,
         minimum_mapped_fraction=args.minimum_mapped_fraction,
         camera_padding_m=args.camera_padding_m,
+        minimal=args.minimal,
     )
     print(
         json.dumps(
@@ -291,6 +294,56 @@ def command_select_scenes(args: argparse.Namespace) -> None:
         args.locked_target,
         args.seed,
     )
+    write_json(args.output, payload)
+
+
+def command_select_locked_scenes(args: argparse.Namespace) -> None:
+    rows = read_rows(args.stats)
+    taxonomy = load_taxonomy(args.taxonomy)
+    previous_selection = load_json(args.scene_selection)
+    payload = select_locked_evaluation_scenes(
+        rows,
+        taxonomy,
+        previous_selection,
+        locked_budget=args.locked_budget,
+        target_per_class=args.locked_target,
+    )
+    write_json(args.output, payload)
+
+
+def command_assess_seeds(args: argparse.Namespace) -> None:
+    rows = []
+    for path in args.metrics:
+        rows.extend(read_rows(path))
+    decision = assess_seed_sensitivity(
+        rows, maximum_range=args.maximum_range
+    )
+    write_json(args.output, decision)
+
+
+def command_build_locked_plan(args: argparse.Namespace) -> None:
+    decision = load_json(args.seed_decision)
+    if decision.get("kind") != "seed_sensitivity_decision":
+        raise ValueError("Expected a seed_sensitivity_decision")
+    commit = args.code_commit
+    if not commit:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True
+        ).strip()
+    payload = build_locked_plan(
+        args.locked_scenes,
+        args.priors,
+        args.mapping,
+        args.taxonomy,
+        commit,
+        decision["selected_locked_seeds"],
+        randomization_seed=args.seed,
+    )
+    payload["seed_sensitivity"] = {
+        "decision": decision["decision"],
+        "ranges": decision["ranges"],
+        "treatment_minus_reference": decision["treatment_minus_reference"],
+    }
     write_json(args.output, payload)
 
 
@@ -396,6 +449,48 @@ def command_run_experiment(args: argparse.Namespace) -> None:
         not args.no_resume,
         args.continue_on_error,
         args.max_runs,
+    )
+
+
+def command_run_locked(args: argparse.Namespace) -> None:
+    execute_locked_plan(
+        args.plan,
+        args.scene_manifest,
+        args.output_root,
+        args.progress,
+        args.pipeline,
+        None,
+        None,
+        args.dry_run,
+        args.max_runs,
+    )
+
+
+def command_evaluate_seed_audit(args: argparse.Namespace) -> None:
+    taxonomy = load_taxonomy(args.taxonomy)
+    evaluate_tune_seed_execution(
+        args.schedule,
+        args.execution,
+        args.scene_manifest,
+        args.gt_dir,
+        taxonomy,
+        args.output,
+        config_id=args.config_id,
+        radius_m=args.radius_m,
+        min_region_size=args.min_region_size,
+    )
+
+
+def command_evaluate_locked(args: argparse.Namespace) -> None:
+    taxonomy = load_taxonomy(args.taxonomy)
+    evaluate_locked_plan(
+        args.plan,
+        args.scene_manifest,
+        args.gt_dir,
+        args.output_root,
+        taxonomy,
+        args.metrics_output,
+        args.analysis_output,
     )
 
 
@@ -550,6 +645,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--minimum-mapped-fraction", type=float, default=0.90
     )
     audit_alignment.add_argument("--camera-padding-m", type=float, default=2.0)
+    audit_alignment.add_argument(
+        "--minimal",
+        action="store_true",
+        help="Run all alignment checks without validating or writing file hashes",
+    )
     audit_alignment.set_defaults(func=command_audit_saga_alignment)
 
     fit = subparsers.add_parser("fit", help="Fit train-only hierarchical priors")
@@ -574,6 +674,39 @@ def build_parser() -> argparse.ArgumentParser:
     select.add_argument("--locked-target", type=int, default=20)
     select.add_argument("--seed", type=int, default=20260804)
     select.set_defaults(func=command_select_scenes)
+
+    select_locked = subparsers.add_parser(
+        "select-locked-scenes",
+        help="Choose 48 physically independent scans from the frozen locked pool",
+    )
+    select_locked.add_argument("--stats", required=True)
+    select_locked.add_argument("--scene-selection", required=True)
+    select_locked.add_argument("--taxonomy")
+    select_locked.add_argument("--output", required=True)
+    select_locked.add_argument("--locked-budget", type=int, default=48)
+    select_locked.add_argument("--locked-target", type=int, default=20)
+    select_locked.set_defaults(func=command_select_locked_scenes)
+
+    assess_seeds = subparsers.add_parser(
+        "assess-seeds", help="Apply the preregistered tune seed-sensitivity rule"
+    )
+    assess_seeds.add_argument("--metrics", action="append", required=True)
+    assess_seeds.add_argument("--maximum-range", type=float, default=0.002)
+    assess_seeds.add_argument("--output", required=True)
+    assess_seeds.set_defaults(func=command_assess_seeds)
+
+    locked_plan = subparsers.add_parser(
+        "build-locked-plan", help="Freeze the lightweight confirmatory protocol"
+    )
+    locked_plan.add_argument("--locked-scenes", required=True)
+    locked_plan.add_argument("--seed-decision", required=True)
+    locked_plan.add_argument("--priors", required=True)
+    locked_plan.add_argument("--mapping", required=True)
+    locked_plan.add_argument("--taxonomy")
+    locked_plan.add_argument("--code-commit")
+    locked_plan.add_argument("--seed", type=int, default=20260804)
+    locked_plan.add_argument("--output", required=True)
+    locked_plan.set_defaults(func=command_build_locked_plan)
 
     search = subparsers.add_parser(
         "search-design", help="Generate a registered LHS search design"
@@ -672,6 +805,46 @@ def build_parser() -> argparse.ArgumentParser:
     run_experiment.add_argument("--continue-on-error", action="store_true")
     run_experiment.add_argument("--max-runs", type=int)
     run_experiment.set_defaults(func=command_run_experiment)
+
+    run_locked = subparsers.add_parser(
+        "run-locked", help="Execute a frozen locked plan with lightweight resume"
+    )
+    run_locked.add_argument("--plan", required=True)
+    run_locked.add_argument("--scene-manifest", required=True)
+    run_locked.add_argument("--output-root", required=True)
+    run_locked.add_argument("--progress", required=True)
+    run_locked.add_argument("--pipeline", default="run_pipeline.sh")
+    run_locked.add_argument("--dry-run", action="store_true")
+    run_locked.add_argument("--max-runs", type=int)
+    run_locked.set_defaults(func=command_run_locked)
+
+    evaluate_seed_audit = subparsers.add_parser(
+        "evaluate-seed-audit",
+        help="Evaluate the two-condition val-tune seed sensitivity run",
+    )
+    evaluate_seed_audit.add_argument("--schedule", required=True)
+    evaluate_seed_audit.add_argument("--execution", required=True)
+    evaluate_seed_audit.add_argument("--scene-manifest", required=True)
+    evaluate_seed_audit.add_argument("--gt-dir", required=True)
+    evaluate_seed_audit.add_argument("--taxonomy")
+    evaluate_seed_audit.add_argument("--config-id")
+    evaluate_seed_audit.add_argument("--output", required=True)
+    evaluate_seed_audit.add_argument("--radius-m", type=float, default=0.05)
+    evaluate_seed_audit.add_argument("--min-region-size", type=int, default=100)
+    evaluate_seed_audit.set_defaults(func=command_evaluate_seed_audit)
+
+    evaluate_locked = subparsers.add_parser(
+        "evaluate-locked",
+        help="Run the frozen confirmatory metrics and statistical analysis",
+    )
+    evaluate_locked.add_argument("--plan", required=True)
+    evaluate_locked.add_argument("--scene-manifest", required=True)
+    evaluate_locked.add_argument("--gt-dir", required=True)
+    evaluate_locked.add_argument("--output-root", required=True)
+    evaluate_locked.add_argument("--taxonomy")
+    evaluate_locked.add_argument("--metrics-output", required=True)
+    evaluate_locked.add_argument("--analysis-output", required=True)
+    evaluate_locked.set_defaults(func=command_evaluate_locked)
 
     evaluate = subparsers.add_parser(
         "evaluate", help="Evaluate SAGA outputs on canonical vertex GT"

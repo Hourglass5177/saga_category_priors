@@ -7,7 +7,9 @@ import numpy as np
 import pytest
 from plyfile import PlyData, PlyElement
 
+import category_priors.alignment as alignment_module
 from category_priors.alignment import audit_saga_alignment
+from category_priors.cli import build_parser
 from category_priors.io import hash_json
 from category_priors.scannet_saga import prepare_saga_scene, read_sens_header
 
@@ -152,6 +154,12 @@ def test_alignment_audit_passes_and_writes_failure_diagnostics(tmp_path: Path) -
     assert audit["passed"] is True
     assert audit["gt_to_cloud"]["mapped_fraction"] == 1.0
     assert audit["cameras"]["inside_padded_gt_fraction"] == 1.0
+    assert "content_sha256" in audit
+    assert {
+        "preparation_manifest_sha256",
+        "gt_npz_sha256",
+        "point_cloud_sha256",
+    } <= set(audit["provenance"])
 
     bad_vertices = np.array(vertices.data, copy=True)
     bad_vertices["x"] += 100.0
@@ -166,3 +174,78 @@ def test_alignment_audit_passes_and_writes_failure_diagnostics(tmp_path: Path) -
             gaussian_ply_path=bad_path,
         )
     assert failed_path.is_file()
+
+
+def test_minimal_alignment_audit_keeps_checks_without_hashing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scene_id = "scene0000_00"
+    dataset_root = tmp_path / "scans"
+    _write_scene_files(dataset_root, scene_id)
+    sens_path = dataset_root / scene_id / f"{scene_id}.sens"
+    _write_sens(sens_path, [np.eye(4) for _ in range(4)])
+    manifest = prepare_saga_scene(
+        dataset_root,
+        scene_id,
+        sens_path,
+        tmp_path / "prepared",
+        frame_stride=1,
+        max_frames=4,
+        max_initial_points=4,
+    )
+    base = Path(manifest["base_path"])
+    initial_path = base / manifest["initial_point_cloud"]["path"]
+    vertices = PlyData.read(str(initial_path))["vertex"]
+    coords = np.column_stack((vertices["x"], vertices["y"], vertices["z"]))
+    gt_path = tmp_path / "gt.npz"
+    np.savez_compressed(
+        gt_path,
+        coords=coords,
+        semantic=np.zeros(len(coords), dtype=np.int64),
+        instance=np.zeros(len(coords), dtype=np.int64),
+    )
+
+    monkeypatch.setattr(
+        alignment_module,
+        "sha256_file",
+        lambda _: (_ for _ in ()).throw(AssertionError("unexpected file hash")),
+    )
+    audit = audit_saga_alignment(
+        base / "scene_preparation_manifest.json",
+        gt_path,
+        tmp_path / "minimal-alignment.json",
+        minimal=True,
+    )
+
+    assert audit["passed"] is True
+    assert "content_sha256" not in audit
+    assert all("sha256" not in key for key in audit["provenance"])
+
+    bad_vertices = np.array(vertices.data, copy=True)
+    bad_vertices["x"] += 100.0
+    bad_path = tmp_path / "minimal-bad.ply"
+    PlyData([PlyElement.describe(bad_vertices, "vertex")]).write(str(bad_path))
+    with pytest.raises(RuntimeError, match="coverage_below_threshold"):
+        audit_saga_alignment(
+            base / "scene_preparation_manifest.json",
+            gt_path,
+            tmp_path / "minimal-failed-alignment.json",
+            gaussian_ply_path=bad_path,
+            minimal=True,
+        )
+
+
+def test_audit_alignment_cli_accepts_minimal() -> None:
+    args = build_parser().parse_args(
+        [
+            "audit-saga-alignment",
+            "--preparation-manifest",
+            "manifest.json",
+            "--gt-npz",
+            "gt.npz",
+            "--output",
+            "audit.json",
+            "--minimal",
+        ]
+    )
+    assert args.minimal is True

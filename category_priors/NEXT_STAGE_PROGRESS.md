@@ -1,82 +1,65 @@
-# First-stage next-phase checkpoint
+# First-stage locked-evaluation checkpoint
 
-Checkpoint time: 2026-08-06 00:40 (Asia/Hong_Kong)
+Checkpoint time: 2026-08-09 (Asia/Hong_Kong)
 
-## Completed before this checkpoint
+## Completed evidence
 
-- The cloud ScanNet minimal subset is complete: train `1201/1201`, validation
-  `312/312`, four required nonempty files per scene, zero failed manifest rows,
-  and zero `.part` files.
-- Train/validation statistics, the train-only `category_priors.json`, the 24/48
-  leakage-safe scene selection, and both 32-point search designs passed their
-  content/hash audits under
-  `/root/autodl-tmp/saga/artifacts/category-priors-20260804`.
-- Canonical, axis-aligned SAGA20 ground truth was generated for all 24 val-tune
-  scenes under `gt_val_tune`; its manifest records 24 scenes and occupies about
-  95 MiB.
-- The ScanNet-to-SAGA exporter, alignment audits, resumable wave runner, search
-  execution glue, and adaptive 2,000-iteration feature training are committed
-  and pushed on branch `a800`.
-- The one-scene `scene0231_00` gate passed preparation, initial and trained
-  alignment audits, 30k 3DGS training, masks/labels, mask scales, contrastive
-  features, and scale-gate checks. Its postprocess results are exploratory only:
-  B0 mAP50-95 `0.14722`, B1 `0.15389`, and P000-B2 `0.05972`.
+- The official ScanNet minimal subset is complete: train `1201/1201`, validation
+  `312/312`; priors were fitted from train only.
+- All 24 val-tune SAGA assets are complete.
+- The 32-point global and prior searches are complete. The registered selections
+  are `global-003` and `prior-011`; the tune-only improvement is approximately
+  `+0.00377 mAP@[.50:.95]` and remains exploratory.
+- The cloud instance has a 350GB data disk with about 177GB free. Its actual
+  cgroup memory limit is 90GiB; host-level `free` output is not a valid limit.
+- No val-locked `.sens`, GT, 3DGS, feature, or postprocess output has been
+  generated yet.
 
-## Current cloud execution
+## Frozen design corrections
 
-- Mihomo is active and an actual ScanNet range-transfer comparison selected
-  Taiwan IEPL 03. It was the only tested node to return a complete 256 KiB
-  sample in the observation window; latency alone is not used for selection.
-- Commit `7015562` removed aria2's low-speed abort, retained resumable `.part`
-  files, and made retries unlimited by default. The patched downloader is
-  deployed in both clean and GPU workspaces.
-- Wave 1 contains the first eight val-tune scenes. Four `.sens` streams are
-  complete (`scene0231_00`, `scene0329_02`, `scene0474_01`, and
-  `scene0025_01`). At the checkpoint, allocated-block progress for the remaining
-  four was approximately 55% (`scene0025_02`), 14% (`scene0046_02`), 35%
-  (`scene0645_00`), and 6% (`scene0645_02`). The logical length of an aria2
-  sparse file must not be interpreted as downloaded bytes.
-- The downloader and wave supervisor are healthy. The supervisor wait window
-  was safely restarted at 48 hours and will automatically enter scene
-  preparation and training when the hashed eight-scene manifest passes.
-- The 350 GiB data disk has about 309 GiB free. GPU work is idle only while the
-  wave waits for its official-resolution RGB streams.
+- The old 48-scan locked list contains only 32 independent physical scenes. The
+  confirmatory list will instead choose 48 unique physical scenes solely from
+  the old `locked + locked_replacements` pool. The original selection remains
+  unchanged because the fitted mapping references it.
+- The new selector uses only pre-model class counts and a deterministic coverage
+  objective. It never reads predictions or AP values.
+- ScanNet matching/AP, positive-weight physical-scene bootstrap, paired
+  permutation, the full `2^3` factorial, Holm correction, and multi-seed
+  technical-replicate handling are implemented and covered by tests.
+- The locked workflow uses `locked_plan.json` plus `locked_progress.json` rather
+  than a hash-heavy experiment-lock stack. Git commit and the mapping format's
+  existing internal content hash are the only routine identities retained.
 
-## Mirror audit and experimental boundary
+## Execution sequence
 
-- `insomnia7/SIU3R` provides fast per-scene archives, but its RGB is resized to
-  `256x256`; it is not admissible for the formal SAGA baseline.
-- `WHB139426/Scannet` exposes a range-readable 99.1 GB frames ZIP with
-  `1296x968` RGB, but it keeps only about 300 frames per scene and recompresses
-  JPEGs. It is also not admissible as a silent replacement for official `.sens`
-  input.
-- `General-Level/General-Bench-Closeset` contains original `.sens` LFS objects.
-  The mirrored `scene0231_00` has the same byte length and SHA-256
-  (`615f0a816579bf77076ef0d7f4c5f2c9c84377b02a829b7e41e60a84b0c04574`)
-  as the official local file. Five of the 24 selected scenes are present; four
-  not already complete (`scene0025_00`, `scene0046_00`, `scene0356_00`, and
-  `scene0608_00`) may be transported from this mirror in later waves only with
-  fixed size/SHA-256 verification. All other scenes remain on the official
-  downloader. The source route must never change experiment content.
+1. Re-evaluate all existing global-search outputs with the corrected official
+   evaluator and rerun global selection. If the selected global configuration
+   changes, rerun prior search under it; otherwise re-evaluate all existing
+   prior-search outputs and rerun prior selection. Build the final mapping from
+   those official-protocol selections.
+2. Re-evaluate the selected seed-42 tune outputs with that same evaluator, then
+   run only `P000-B2` and `P111-combined` for seeds 3407 and 20260804 (`96` new
+   postprocess runs). Never mix old approximate metrics into this decision.
+3. Apply the preregistered rule: use locked seed 42 only when both conditions'
+   cross-seed ranges are at most `0.002` and all three `P111-P000` deltas have
+   the same non-zero sign; otherwise retain all three seeds as technical
+   replicates.
+4. Freeze `locked_evaluation_scenes.json` and `locked_plan.json` before producing
+   any locked model output.
+5. Remove only the two completed search contributor caches (about 50GB). Preserve
+   every search output, metric, selected config, model, and log.
+6. Download the 48 official `.sens` streams in six waves of eight. In no-GPU mode
+   downloading stops at complete readable files and never starts training.
+7. In GPU mode, prepare each wave sequentially: 30k 3DGS, masks/labels, scales,
+   2,000-step feature training, and one trained-Gaussian 5cm alignment. Delete a
+   wave's raw `.sens` only after every scene in that wave passes.
+8. Run all 12 registered conditions for every scene. Conditions share one
+   contributor cache inside a scene; the cache is removed only after that
+   scene's full block completes. Do not inspect comparative locked AP early.
+9. Produce `locked_metrics.parquet` and `confirmatory_analysis.json`; only then
+   select best/median/worst qualitative viewer examples.
 
-## Resume sequence
-
-1. Keep the current wave-1 aria2 process running and preserve every `.part` and
-   `.aria2` checkpoint. Do not use `--clean`.
-2. Require eight nonempty `.sens` files, no aria2 control files, and a complete
-   hashed download manifest before accepting the wave.
-3. Let the existing supervisor prepare and gate the remaining seven scenes
-   sequentially. Every scene must pass preparation, initial/trained alignment,
-   30k 3DGS, masks/labels, mask scales, 2,000-step feature, and scale-gate checks.
-4. Expand the remaining 16 val-tune scenes in two bounded waves. A verified raw
-   mirror may accelerate only the four byte-preserving scenes listed above.
-5. After all 24 assets pass, run randomized resumable global search, select the
-   global configuration on val-tune, run prior search, and freeze the mapping
-   and experiment lock before touching val-locked.
-6. Continue with registered baselines, factor ablations, locked evaluation, and
-   executable cross-dataset validation. A scene or intermediate wave remains
-   exploratory and cannot support an effectiveness claim.
-
-Experimental unit remains the physical scene. Priors are fitted from train only,
-search coefficients are selected on val-tune only, and the 48-scene val-locked
-set remains untouched until the experiment lock is frozen.
+The experimental unit is the physical scene. Seeds, scans, views, points,
+Gaussians, and instances are not counted as independent experimental units.
+Failure of the registered primary comparison is reported as failure or
+insufficient evidence and is not followed by retuning on val-locked.

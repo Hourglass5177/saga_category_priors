@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 import time
 from collections.abc import Mapping
@@ -7,6 +9,12 @@ from pathlib import Path
 from typing import Any
 
 from .io import hash_json, load_json, sha256_file, write_json
+from .locked import (
+    expand_locked_runs,
+    summarize_mapping,
+    summarize_priors,
+    validate_locked_plan,
+)
 
 CONDITION_OPTIONS: dict[str, tuple[str, ...]] = {
     "B0-legacy": ("--prior-mode", "off", "--disable-other-classes"),
@@ -68,6 +76,7 @@ def build_postprocess_command(
     output_root: str | Path,
     priors_path: str | Path | None,
     mapping_path: str | Path | None,
+    staging: bool = False,
 ) -> tuple[list[str], dict[str, Path]]:
     condition = str(run["condition"])
     if condition not in CONDITION_OPTIONS:
@@ -80,9 +89,18 @@ def build_postprocess_command(
         "run_dir": run_dir,
         "output_json": run_dir / "output.json",
         "metadata_json": run_dir / "output.json.metadata.json",
+        "run_record": run_dir / "run.json",
         "progress": run_dir / "progress.txt",
         "log": run_dir / "postprocess.log",
     }
+    command_output = (
+        run_dir / "output.pending.json" if staging else paths["output_json"]
+    )
+    command_metadata = (
+        run_dir / "output.pending.metadata.json" if staging else paths["metadata_json"]
+    )
+    paths["staged_output_json"] = command_output
+    paths["staged_metadata_json"] = command_metadata
     command = [
         "bash",
         str(Path(pipeline_path).resolve()),
@@ -91,9 +109,9 @@ def build_postprocess_command(
         "--base-path",
         str(scene["base_path"]),
         "--json-path",
-        str(paths["output_json"]),
+        str(command_output),
         "--prior-metadata-path",
-        str(paths["metadata_json"]),
+        str(command_metadata),
         "--progress-path",
         str(paths["progress"]),
         "--max-contributor-cache-path",
@@ -104,6 +122,8 @@ def build_postprocess_command(
         str(int(run["run_seed"])),
         *CONDITION_OPTIONS[condition],
     ]
+    if staging:
+        command.append("--minimal-metadata")
     if scene.get("python_bin"):
         command[2:2] = ["--python", str(scene["python_bin"])]
     if condition.startswith("P"):
@@ -118,6 +138,324 @@ def build_postprocess_command(
             ]
         )
     return command, paths
+
+
+def _completed_locked_run(paths: Mapping[str, Path], run: Mapping[str, Any]) -> bool:
+    try:
+        output = load_json(paths["output_json"])
+        metadata = load_json(paths["metadata_json"])
+        record = load_json(paths["run_record"])
+    except (FileNotFoundError, OSError, ValueError, TypeError):
+        return False
+    if not isinstance(output.get("point_labels"), list) or not isinstance(
+        output.get("instances"), dict
+    ):
+        return False
+    if metadata.get("kind") != "saga_instance_metadata":
+        return False
+    expected = {
+        "run_id": str(run["run_id"]),
+        "scene_id": str(run["scene_id"]),
+        "condition": str(run["condition"]),
+        "run_seed": int(run["run_seed"]),
+    }
+    metadata_run = metadata.get("run", {})
+    metadata_expected = {
+        "scene_id": expected["scene_id"],
+        "condition": expected["condition"],
+        "seed": expected["run_seed"],
+    }
+    return (
+        record.get("status") == "complete"
+        and all(record.get(key) == value for key, value in expected.items())
+        and all(
+            metadata_run.get(key) == value
+            for key, value in metadata_expected.items()
+        )
+    )
+
+
+def _finalize_locked_run(
+    paths: Mapping[str, Path],
+    run: Mapping[str, Any],
+    runtime_seconds: float,
+    attempt_number: int,
+    first_attempt_failed: bool,
+) -> None:
+    output = load_json(paths["staged_output_json"])
+    metadata = load_json(paths["staged_metadata_json"])
+    if not isinstance(output.get("point_labels"), list) or not isinstance(
+        output.get("instances"), dict
+    ):
+        raise ValueError(f"{run['run_id']}: invalid postprocess output")
+    if metadata.get("kind") != "saga_instance_metadata":
+        raise ValueError(f"{run['run_id']}: invalid postprocess metadata")
+    metadata.pop("content_sha256", None)
+    metadata_run = dict(metadata.get("run", {}))
+    for key in (
+        "output_json_sha256",
+        "category_priors_sha256",
+        "prior_mapping_config_sha256",
+    ):
+        metadata_run.pop(key, None)
+    metadata_run.update(
+        {
+            "scene_id": str(run["scene_id"]),
+            "physical_scene_id": str(run["physical_scene_id"]),
+            "condition": str(run["condition"]),
+            "seed": int(run["run_seed"]),
+            "output_json": str(paths["output_json"]),
+        }
+    )
+    metadata["run"] = metadata_run
+    os.replace(paths["staged_output_json"], paths["output_json"])
+    write_json(paths["metadata_json"], metadata)
+    paths["staged_metadata_json"].unlink(missing_ok=True)
+    write_json(
+        paths["run_record"],
+        {
+            "schema_version": "1.0",
+            "kind": "locked_run",
+            "run_id": str(run["run_id"]),
+            "scene_id": str(run["scene_id"]),
+            "physical_scene_id": str(run["physical_scene_id"]),
+            "condition": str(run["condition"]),
+            "run_seed": int(run["run_seed"]),
+            "runtime_seconds": float(runtime_seconds),
+            "attempts": int(attempt_number),
+            "first_attempt_failed": bool(first_attempt_failed),
+            "recovered": bool(first_attempt_failed),
+            "status": "complete",
+        },
+    )
+
+
+def _evict_scene_cache(output_root: Path, scene_id: str) -> bool:
+    cache_root = (output_root / ".cache" / "max_contributors").resolve()
+    target = (cache_root / scene_id).resolve()
+    if target.parent != cache_root:
+        raise ValueError(f"Unsafe scene cache path: {target}")
+    if not target.exists():
+        return False
+    shutil.rmtree(target)
+    return True
+
+
+def _deployed_code_commit(pipeline_repo: Path) -> str:
+    """Prefer a real checkout identity; use a marker only for exported code."""
+    completed = subprocess.run(
+        ["git", "-C", str(pipeline_repo), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode == 0 and completed.stdout.strip():
+        return completed.stdout.strip()
+    commit_marker = pipeline_repo / ".category_priors_commit"
+    return (
+        commit_marker.read_text(encoding="utf-8").strip()
+        if commit_marker.is_file()
+        else ""
+    )
+
+
+def execute_locked_plan(
+    plan_path: str | Path,
+    scene_manifest_path: str | Path,
+    output_root: str | Path,
+    progress_path: str | Path,
+    pipeline_path: str | Path,
+    priors_path: str | Path | None = None,
+    mapping_path: str | Path | None = None,
+    dry_run: bool = False,
+    max_runs: int | None = None,
+) -> dict[str, Any]:
+    """Run a frozen locked plan with field-based resume and one failed-run retry."""
+    plan = load_json(plan_path)
+    validate_locked_plan(plan)
+    all_runs = expand_locked_runs(plan)
+    runs = list(all_runs)
+    if max_runs is not None:
+        if max_runs <= 0:
+            raise ValueError("max_runs must be positive")
+        runs = runs[:max_runs]
+    scenes = load_scene_runtime_manifest(scene_manifest_path)
+    planned_scene_ids = {str(item["scene_id"]) for item in plan["scenes"]}
+    if not planned_scene_ids.issubset(scenes):
+        missing = sorted(planned_scene_ids - set(scenes))
+        raise ValueError(f"Locked runtime manifest is missing scenes: {missing}")
+
+    output_root = Path(output_root).resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
+    progress_path = Path(progress_path).resolve()
+    plan_base = Path(plan_path).resolve().parent
+
+    def plan_input(name: str) -> Path:
+        path = Path(str(plan["inputs"][name]))
+        return path.resolve() if path.is_absolute() else (plan_base / path).resolve()
+
+    planned_priors = plan_input("category_priors")
+    planned_mapping = plan_input("prior_mapping")
+    if priors_path is not None and Path(priors_path).resolve() != planned_priors:
+        raise ValueError("Locked priors path must match locked_plan.json")
+    if mapping_path is not None and Path(mapping_path).resolve() != planned_mapping:
+        raise ValueError("Locked mapping path must match locked_plan.json")
+    priors_path = planned_priors
+    mapping_path = planned_mapping
+    if summarize_priors(load_json(priors_path)) != plan["priors"]:
+        raise ValueError("Locked category priors differ from the frozen plan")
+    if summarize_mapping(load_json(mapping_path)) != plan["parameters"]:
+        raise ValueError("Locked prior mapping differs from the frozen plan")
+    if not dry_run:
+        pipeline_repo = Path(pipeline_path).resolve().parent
+        deployed_commit = _deployed_code_commit(pipeline_repo)
+        if deployed_commit != str(plan["code_commit"]):
+            raise ValueError("Deployed pipeline commit differs from the frozen plan")
+    selected_run_ids = {str(run["run_id"]) for run in runs}
+    records: dict[str, dict[str, Any]] = {}
+    if progress_path.is_file():
+        previous = load_json(progress_path)
+        records = {
+            str(item["run_id"]): dict(item)
+            for item in previous.get("runs", [])
+            if str(item.get("run_id", "")) in selected_run_ids
+        }
+
+    expected_by_scene: dict[str, list[dict[str, Any]]] = {}
+    for run in all_runs:
+        expected_by_scene.setdefault(str(run["scene_id"]), []).append(run)
+
+    expected_ids_by_scene = {
+        scene_id: {str(run["run_id"]) for run in scene_runs}
+        for scene_id, scene_runs in expected_by_scene.items()
+    }
+    complete_run_ids: set[str] = set()
+
+    pending = list(runs)
+    for attempt in range(2):
+        failed: list[dict[str, Any]] = []
+        for run in pending:
+            scene_id = str(run["scene_id"])
+            command, paths = build_postprocess_command(
+                pipeline_path,
+                run,
+                scenes[scene_id],
+                output_root,
+                priors_path,
+                mapping_path,
+                staging=True,
+            )
+            paths["run_dir"].mkdir(parents=True, exist_ok=True)
+            if _completed_locked_run(paths, run):
+                record = dict(load_json(paths["run_record"]))
+                record["status"] = "skipped_complete"
+                previous_record = records.get(str(run["run_id"]), {})
+                for key in ("attempts", "first_attempt_failed", "recovered"):
+                    if key in previous_record:
+                        record[key] = previous_record[key]
+            elif dry_run:
+                record = {
+                    "run_id": run["run_id"],
+                    "scene_id": scene_id,
+                    "condition": run["condition"],
+                    "run_seed": run["run_seed"],
+                    "status": "planned",
+                    "command": command,
+                }
+            else:
+                # run.json is the commit marker.  Invalidate an old marker
+                # before replacing output/metadata so an interrupted rerun
+                # cannot be mistaken for a complete transaction.
+                paths["run_record"].unlink(missing_ok=True)
+                paths["staged_output_json"].unlink(missing_ok=True)
+                paths["staged_metadata_json"].unlink(missing_ok=True)
+                started = time.perf_counter()
+                attempt_log = paths["run_dir"] / f"postprocess-attempt-{attempt + 1}.log"
+                with attempt_log.open("w", encoding="utf-8") as log_handle:
+                    completed = subprocess.run(
+                        command,
+                        cwd=Path(pipeline_path).resolve().parent,
+                        stdout=log_handle,
+                        stderr=subprocess.STDOUT,
+                        check=False,
+                        text=True,
+                    )
+                runtime_seconds = time.perf_counter() - started
+                record = {
+                    "run_id": run["run_id"],
+                    "scene_id": scene_id,
+                    "physical_scene_id": run["physical_scene_id"],
+                    "condition": run["condition"],
+                    "run_seed": run["run_seed"],
+                    "runtime_seconds": runtime_seconds,
+                    "return_code": completed.returncode,
+                    "log": str(attempt_log),
+                    "attempts": attempt + 1,
+                    "first_attempt_failed": bool(
+                        records.get(str(run["run_id"]), {}).get(
+                            "first_attempt_failed", False
+                        )
+                    ),
+                    "status": "failed",
+                }
+                if completed.returncode == 0:
+                    try:
+                        first_attempt_failed = bool(
+                            attempt > 0
+                            or records.get(str(run["run_id"]), {}).get(
+                                "first_attempt_failed", False
+                            )
+                        )
+                        _finalize_locked_run(
+                            paths,
+                            run,
+                            runtime_seconds,
+                            attempt + 1,
+                            first_attempt_failed,
+                        )
+                        record["status"] = "complete"
+                        record["first_attempt_failed"] = first_attempt_failed
+                    except (OSError, ValueError, TypeError) as exc:
+                        record["error"] = f"{type(exc).__name__}: {exc}"
+                if record["status"] != "complete":
+                    if attempt == 0:
+                        record["first_attempt_failed"] = True
+                    failed.append(dict(run))
+                elif record["first_attempt_failed"]:
+                    record["recovered"] = True
+            records[str(run["run_id"])] = record
+            if record.get("status") in {"complete", "skipped_complete"}:
+                complete_run_ids.add(str(run["run_id"]))
+            progress = {
+                "schema_version": "1.0",
+                "kind": "locked_progress",
+                "split": "val-locked",
+                "planned": len(runs),
+                "complete": sum(
+                    item.get("status") in {"complete", "skipped_complete"}
+                    for item in records.values()
+                ),
+                "failed": sum(item.get("status") == "failed" for item in records.values()),
+                "attempt": attempt + 1,
+                "runs": [records[key] for key in sorted(records)],
+            }
+            write_json(progress_path, progress)
+            if (
+                not dry_run
+                and expected_ids_by_scene[scene_id].issubset(complete_run_ids)
+            ):
+                _evict_scene_cache(output_root, scene_id)
+        if dry_run or not failed:
+            break
+        pending = failed
+
+    result = load_json(progress_path)
+    if not dry_run and result["complete"] != len(runs):
+        failures = [
+            item["run_id"] for item in result["runs"] if item.get("status") == "failed"
+        ]
+        raise RuntimeError(f"Locked execution incomplete; failures={failures}")
+    return result
 
 
 def execute_schedule(

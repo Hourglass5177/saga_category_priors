@@ -205,12 +205,14 @@ python -m category_priors audit-saga-alignment \
 
 The `.sens` downloader uses a `.part` file, HTTP range resumption, a nonempty
 final-file check, a sanitized failure manifest, and the same 80GB free-space
-gate. The exporter records `scene_scale_m_per_unit=1.0` and an identity
+gate. Official downloads are accepted after the header and frame count are
+readable; SHA-256 is reserved for explicitly approved third-party mirrors. The
+exporter records `scene_scale_m_per_unit=1.0` and an identity
 Gaussian-to-GT transform; these are accepted only after the one-scene mapping
 audit passes. The audit writes diagnostics even when it fails and gates the
 registered 5 cm GT coverage, identity transform, metric scale, and padded camera
-trajectory. Run it once on the prepared initial points and again on the trained
-Gaussian point cloud before postprocessing.
+trajectory. The wave runner performs one audit on the trained Gaussian point
+cloud before postprocessing.
 
 `run_scannet_scene_pipeline.sh` resumes at four nonempty-output gates: metric
 3DGS, masks/labels, mask scales, and contrastive features/scale gate. It archives
@@ -219,13 +221,15 @@ never invokes `--clean`. When `--hf-home` is supplied, the GroundingDINO BERT
 dependency is resolved from that cache with Hugging Face and Transformers
 offline modes enabled by default.
 
-After the one-scene gate passes, `run_scannet_tune_wave.sh` expands tune assets
-in bounded waves. It waits for a hashed `.sens` manifest, validates every target
-file, then sequentially prepares, audits, trains, and re-audits each scene while
-retaining completed stage outputs. Use `--limit 8` for the registered first wave.
+After the one-scene gate passes, `run_scannet_tune_wave.sh` expands assets in
+bounded waves. It optionally waits for a downloader status file, validates each
+official `.sens` header, then sequentially prepares, trains, and audits each
+scene while retaining completed stage outputs. `--gt-dir` selects tune or locked
+GT, and `--delete-sens-after-success` removes a raw stream only after its trained
+alignment passes. Use `--limit 8` for one bounded wave.
 When Python `urllib` cannot obtain ScanNet response headers through the cloud
 proxy, `download_scannet_sens_aria2.sh` provides bounded concurrent, atomic
-`.part` resume and finishes by generating the same hashed download manifest.
+`.part` resume and finishes by generating a downloader status file.
 `--verified-url-map` may route explicitly listed scenes through a transport
 mirror. The TSV must pin scene ID, URL, byte length, and SHA-256; both size and
 hash are checked before atomic rename, while scenes absent from the map retain
@@ -294,3 +298,110 @@ bootstrap interval that excludes zero; exploratory tune-set gains remain
 exploratory. The factorial report includes all three main effects, all three
 two-factor interactions, and the three-factor interaction, with one Holm family
 across those seven registered contrasts.
+
+## Lightweight locked evaluation
+
+The confirmatory path deliberately avoids the search workflow's hash-heavy
+manifests. Existing search artifacts remain readable, while new locked runs use
+one human-readable `locked_plan.json`, field-based resume, and one
+`locked_progress.json`.
+
+Before the seed audit, re-evaluate **all existing global-search outputs** with
+the `scannet-official-instance-v1` evaluator and rerun `select-config`. If the
+selected global configuration changes, materialize and rerun prior search under
+that new global baseline. Otherwise re-evaluate all existing prior-search
+outputs and rerun its selection directly. Build the final mapping from these
+official-protocol selections. Seed 42 and both added seeds must then be evaluated
+with that same protocol; old approximate metrics must never be mixed into the
+six-row seed decision.
+
+1. Select 48 independent physical scenes from the previously partitioned locked
+   pool. The selector uses validation class counts for coverage only; it never
+   reads model predictions or AP values.
+
+   ```bash
+   python -m category_priors select-locked-scenes \
+     --stats artifacts/val_instance_stats.parquet \
+     --scene-selection artifacts/scene_selection.json \
+     --output artifacts/locked_evaluation_scenes.json
+   ```
+
+2. On `val-tune`, evaluate `P000-B2` and `P111-combined` at seeds 42, 3407,
+   and 20260804. Combine the metric tables and apply the preregistered rule:
+
+   ```bash
+   python -m category_priors schedule \
+     --scene-selection artifacts/scene_selection.json --split tune \
+     --condition P000-B2 --condition P111-combined \
+     --run-seed 3407 --run-seed 20260804 \
+     --output artifacts/seed_audit_schedule.json
+
+   python -m category_priors run-experiment \
+     --schedule artifacts/seed_audit_schedule.json \
+     --scene-manifest artifacts/scene_runtime_manifest.json \
+     --output-root runs/prior-search \
+     --output artifacts/seed_audit_execution.json \
+     --pipeline run_pipeline.sh \
+     --priors artifacts/category_priors.json \
+     --mapping artifacts/final_mapping_config_official_v1.json
+
+   python -m category_priors evaluate-seed-audit \
+     --schedule artifacts/seed_audit_schedule.json \
+     --execution artifacts/seed_audit_execution.json \
+     --scene-manifest artifacts/scene_runtime_manifest.json \
+     --gt-dir artifacts/gt_val_tune \
+     --output artifacts/seed3407-20260804.parquet
+
+   python -m category_priors assess-seeds \
+     --metrics artifacts/seed42_p000_official_v1.parquet \
+     --metrics artifacts/seed42_p111_official_v1.parquet \
+     --metrics artifacts/seed3407-20260804.parquet \
+     --output artifacts/seed_sensitivity_decision.json
+   ```
+
+   A single locked seed is used only when both conditions have a cross-seed
+   `mAP@[.50:.95]` range at most 0.002 and `P111-P000` has the same non-zero sign
+   for all three seeds. Otherwise all three seeds are retained as technical
+   replicates.
+
+3. Freeze and dry-run the plan before preparing locked model assets:
+
+   ```bash
+   python -m category_priors build-locked-plan \
+     --locked-scenes artifacts/locked_evaluation_scenes.json \
+     --seed-decision artifacts/seed_sensitivity_decision.json \
+     --priors artifacts/category_priors.json \
+     --mapping artifacts/prior_mapping_config.json \
+     --output artifacts/locked_plan.json
+
+   python -m category_priors run-locked \
+     --plan artifacts/locked_plan.json \
+     --scene-manifest artifacts/locked_scene_runtime.json \
+     --output-root runs/locked \
+     --progress artifacts/locked_progress.json \
+     --pipeline run_pipeline.sh --dry-run
+   ```
+
+   A normal Git checkout is verified with `git rev-parse HEAD`. When the same
+   committed files are deployed into a non-Git runtime directory, deployment
+   writes that commit to `.category_priors_commit` beside `run_pipeline.sh`
+   using a temporary file followed by rename. This readable marker is the only
+   code identity used by the lightweight runner.
+
+4. After every run is complete, run official-protocol metrics and the registered
+   physical-scene analysis together:
+
+   ```bash
+   python -m category_priors evaluate-locked \
+     --plan artifacts/locked_plan.json \
+     --scene-manifest artifacts/locked_scene_runtime.json \
+     --gt-dir artifacts/gt_val_locked \
+     --output-root runs/locked \
+     --metrics-output artifacts/locked_metrics.parquet \
+     --analysis-output artifacts/confirmatory_analysis.json
+   ```
+
+The locked evaluator follows ScanNet's GT-first matching, strict IoU comparison,
+void/small-region ignore rules, and AP integration. The experimental unit is the
+physical scene. Seeds are technical replicates averaged inside each resample;
+they are never counted as independent scenes.

@@ -761,6 +761,7 @@ def build_instance_metadata(
     classes: Sequence[str],
     overlay: OverlayResult | None,
     run_info: Mapping[str, Any],
+    include_content_hash: bool = True,
 ) -> dict[str, Any]:
     label_array = labels.detach().cpu().numpy().astype(np.int64, copy=False)
     confidence = (
@@ -797,7 +798,8 @@ def build_instance_metadata(
         "instances": instances,
         "overlay_diagnostics": overlay.diagnostics if overlay else {},
     })
-    payload["content_sha256"] = hash_json(payload)
+    if include_content_hash:
+        payload["content_sha256"] = hash_json(payload)
     return payload
 
 

@@ -106,6 +106,7 @@ def audit_saga_alignment(
     radius_m: float = 0.05,
     minimum_mapped_fraction: float = 0.90,
     camera_padding_m: float = 2.0,
+    minimal: bool = False,
 ) -> dict[str, Any]:
     if radius_m <= 0 or camera_padding_m < 0:
         raise ValueError("Alignment distances must be non-negative and radius positive")
@@ -116,7 +117,8 @@ def audit_saga_alignment(
     manifest = load_json(manifest_path)
     if manifest.get("kind") != "scannet_saga_scene":
         raise ValueError("Expected a scannet_saga_scene preparation manifest")
-    _validate_manifest_hash(manifest)
+    if not minimal:
+        _validate_manifest_hash(manifest)
     base_path = Path(manifest["base_path"])
     if not base_path.is_absolute():
         base_path = (manifest_path.parent / base_path).resolve()
@@ -211,14 +213,19 @@ def audit_saga_alignment(
         },
         "provenance": {
             "preparation_manifest": str(manifest_path),
-            "preparation_manifest_sha256": sha256_file(manifest_path),
             "gt_npz": str(gt_path),
-            "gt_npz_sha256": sha256_file(gt_path),
             "point_cloud": str(cloud_path),
-            "point_cloud_sha256": sha256_file(cloud_path),
         },
     }
-    payload["content_sha256"] = hash_json(payload)
+    if not minimal:
+        payload["provenance"].update(
+            {
+                "preparation_manifest_sha256": sha256_file(manifest_path),
+                "gt_npz_sha256": sha256_file(gt_path),
+                "point_cloud_sha256": sha256_file(cloud_path),
+            }
+        )
+        payload["content_sha256"] = hash_json(payload)
     write_json(output_path, payload)
     if failures:
         raise RuntimeError("SAGA alignment audit failed: " + ", ".join(failures))

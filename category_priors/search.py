@@ -343,6 +343,7 @@ def evaluate_search_execution(
             {
                 "config_id": config_id,
                 "split": "val-tune",
+                "protocol_version": evaluated["protocol_version"],
                 "run_seed": run_seed,
                 "scene_count": len(group),
                 "map_50_95": aggregate["map_50_95"],

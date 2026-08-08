@@ -127,6 +127,123 @@ def _greedy_select(
     return selected, replacements, dict(covered)
 
 
+def _greedy_select_independent_scenes(
+    candidates: Sequence[str],
+    counts: Mapping[str, Mapping[str, int]],
+    canonical_classes: Sequence[str],
+    scene_budget: int,
+    target_per_class: int,
+) -> tuple[list[str], dict[str, int]]:
+    """Select at most one scan from each physical scene."""
+    available_totals = {
+        category: sum(
+            int(counts.get(scene, {}).get(category, 0)) for scene in candidates
+        )
+        for category in canonical_classes
+    }
+    selected: list[str] = []
+    covered = defaultdict(int)
+    remaining = set(candidates)
+    while remaining and len(selected) < scene_budget:
+        best_scene: str | None = None
+        best_gain = -1.0
+        for scene in sorted(remaining):
+            gain = 0.0
+            for category in canonical_classes:
+                count = int(counts.get(scene, {}).get(category, 0))
+                if count <= 0:
+                    continue
+                need = max(target_per_class - covered[category], 0)
+                rarity = 1.0 / max(available_totals[category], 1)
+                gain += min(count, need) * (1.0 + 10.0 * rarity)
+                if covered[category] == 0:
+                    gain += 3.0
+            if gain > best_gain or (
+                np.isclose(gain, best_gain)
+                and (best_scene is None or scene < best_scene)
+            ):
+                best_scene = scene
+                best_gain = gain
+        assert best_scene is not None
+        selected.append(best_scene)
+        selected_group = physical_scene_id(best_scene)
+        remaining = {
+            scene
+            for scene in remaining
+            if physical_scene_id(scene) != selected_group
+        }
+        for category, count in counts.get(best_scene, {}).items():
+            covered[category] += int(count)
+
+    return selected, dict(covered)
+
+
+def select_locked_evaluation_scenes(
+    rows: Sequence[Mapping[str, Any]],
+    taxonomy: Taxonomy,
+    previous_selection: Mapping[str, Any],
+    locked_budget: int = 48,
+    target_per_class: int = 20,
+) -> dict[str, Any]:
+    """Choose independent locked scans from a previously registered split."""
+    counts = _scene_class_counts(rows)
+    selection = previous_selection["selection"]
+    candidates = list(
+        dict.fromkeys(
+            str(scene)
+            for key in ("locked", "locked_replacements")
+            for scene in selection[key]
+        )
+    )
+    tune_scenes = [
+        str(scene)
+        for key in ("tune", "tune_replacements")
+        for scene in selection[key]
+    ]
+    candidate_groups = {physical_scene_id(scene) for scene in candidates}
+    tune_groups = {physical_scene_id(scene) for scene in tune_scenes}
+    if candidate_groups & tune_groups:
+        raise ValueError(
+            "Physical scene leakage between tune pool and locked candidate pool"
+        )
+    if len(candidate_groups) < locked_budget:
+        raise ValueError(
+            "Insufficient independent locked candidates: "
+            f"groups={len(candidate_groups)}, required={locked_budget}"
+        )
+    missing = [scene for scene in candidates if scene not in counts]
+    if missing:
+        raise ValueError(f"Locked candidates missing validation statistics: {missing}")
+
+    selected, coverage = _greedy_select_independent_scenes(
+        candidates,
+        counts,
+        taxonomy.canonical_classes,
+        locked_budget,
+        target_per_class,
+    )
+    return {
+        "schema_version": "1.0",
+        "kind": "locked_evaluation_scenes",
+        "benchmark_name": taxonomy.benchmark_name,
+        "split": "val-locked",
+        "scenes": [
+            {
+                "scene_id": scene,
+                "physical_scene_id": physical_scene_id(scene),
+            }
+            for scene in selected
+        ],
+        "coverage": {
+            category: coverage.get(category, 0)
+            for category in taxonomy.canonical_classes
+        },
+        "target_per_class": target_per_class,
+        "candidate_scan_count": len(candidates),
+        "candidate_physical_scene_count": len(candidate_groups),
+    }
+
+
 def select_scenes(
     rows: Sequence[Mapping[str, Any]],
     taxonomy: Taxonomy,
