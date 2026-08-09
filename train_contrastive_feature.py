@@ -442,6 +442,7 @@ def training(args, dataset, opt, pipe, iteration, saving_iterations, checkpoint_
     
     # Adam moments are not needed for serialization and can otherwise leave too
     # little headroom for KNN smoothing on large ScanNet scenes.
+    feature_gaussians.feature_smooth_map = None
     feature_gaussians.optimizer = None
     torch.cuda.empty_cache()
 
