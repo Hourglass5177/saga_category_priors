@@ -440,6 +440,11 @@ def training(args, dataset, opt, pipe, iteration, saving_iterations, checkpoint_
             progress_bar.update(10)
 
     
+    # Adam moments are not needed for serialization and can otherwise leave too
+    # little headroom for KNN smoothing on large ScanNet scenes.
+    feature_gaussians.optimizer = None
+    torch.cuda.empty_cache()
+
     # scene.save_feature(iteration, target = 'contrastive_feature', smooth_weights = torch.softmax(smooth_weights, dim = -1) if smooth_weights is not None else None, smooth_type = 'traditional', smooth_K = opt.smooth_K)
     scene.feature_gaussians.save_ply(args.contrastive_feature_point_cloud_path, 
                                      smooth_weights=torch.softmax(smooth_weights, dim = -1) if smooth_weights is not None else None,

@@ -384,6 +384,36 @@ class FeatureGaussianModel:
 
         return ret
 
+    @torch.no_grad()
+    def get_smoothed_point_features_chunked_cpu(self, K=16, chunk_size=32768):
+        """Return the same KNN-smoothed features without a full-scene GPU map."""
+        if pytorch3d is None:
+            raise ImportError("pytorch3d is required for point-feature smoothing")
+        if K <= 1:
+            return self._point_features.detach().cpu().numpy()
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be positive")
+
+        xyz = self.get_xyz
+        result = np.empty(
+            (xyz.shape[0], self._point_features.shape[1]), dtype=np.float32
+        )
+        for start in range(0, xyz.shape[0], chunk_size):
+            stop = min(start + chunk_size, xyz.shape[0])
+            nearest_k_idx = pytorch3d.ops.knn_points(
+                xyz[start:stop].unsqueeze(0),
+                xyz.unsqueeze(0),
+                K=K,
+            ).idx.squeeze(0)
+            neighbor_features = torch.nn.functional.normalize(
+                self._point_features[nearest_k_idx], dim=-1, p=2
+            )
+            result[start:stop] = (
+                neighbor_features.mean(dim=1).detach().cpu().numpy()
+            )
+            del nearest_k_idx, neighbor_features
+        return result
+
     def get_multi_resolution_smoothed_point_features(self, sample_rates = (0.1, 0.5, 1.5), Ks = (4,4,16), smooth_weights = None):
         if pytorch3d is None:
             raise ImportError("pytorch3d is required for point-feature smoothing")
@@ -616,7 +646,7 @@ class FeatureGaussianModel:
         elif smooth_type is None:
             f = self.get_point_features.detach().contiguous().cpu().numpy()
         elif smooth_type == 'traditional':
-            f = self.get_smoothed_point_features(K=smooth_K, dropout=-1).detach().contiguous().cpu().numpy()
+            f = self.get_smoothed_point_features_chunked_cpu(K=smooth_K)
 
         sf = self.get_point_semantic_features.detach().contiguous().cpu().numpy()
 
