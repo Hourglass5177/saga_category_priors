@@ -34,6 +34,10 @@ scene_scale_m_per_unit="0"
 seed=42
 disable_other_classes=0
 minimal_metadata=0
+clustering_mode="legacy"
+class_prior_mode="uniform"
+category_priors=""
+class_first_config=""
 
 sam_checkpoint_path="${SCRIPT_DIR}/weights/sam_vit_h_4b8939.pth"
 groundingdino_checkpoint_path="${SCRIPT_DIR}/weights/groundingdino_swint_ogc.pth"
@@ -90,6 +94,12 @@ Category-prior postprocess options:
   --seed INT                     Default: 42
   --disable-other-classes        Registered B0; default is B1-compatible enabled
   --minimal-metadata             Omit per-artifact hashes in locked-run metadata
+
+Class-first postprocess options:
+  --clustering-mode MODE         legacy|class-first
+  --class-prior-mode MODE        uniform|size|smooth|small|combined
+  --category-priors PATH
+  --class-first-config PATH
 
 Model options:
   --sam-checkpoint-path PATH
@@ -202,6 +212,10 @@ Resolved configuration:
   scene_scale_m_per_unit: $scene_scale_m_per_unit
   seed: $seed
   disable_other_classes: $disable_other_classes
+  clustering_mode: $clustering_mode
+  class_prior_mode: $class_prior_mode
+  category_priors: $category_priors
+  class_first_config: $class_first_config
   sam_checkpoint_path: $sam_checkpoint_path
   groundingdino_checkpoint_path: $groundingdino_checkpoint_path
   groundingdino_config_path: $groundingdino_config_path
@@ -278,24 +292,31 @@ preflight_stage() {
             ensure_parent_dir "$progress_path"
             ;;
         postprocess)
-            require_dir "$images_path" "Images directory"
-            require_dir "$sparse_path" "Sparse directory"
-            require_file "$point_cloud_path" "Point cloud"
-            require_dir "$masks_path" "Masks directory"
-            require_dir "$labels_path" "Labels directory"
-            require_dir "$mask_scales_path" "Mask scales directory"
             require_file "$contrastive_feature_point_cloud_path" "Contrastive feature point cloud"
             require_file "$scale_gate_path" "Scale gate weights"
-            ensure_parent_dir "$label_features_path"
             ensure_parent_dir "$json_path"
             ensure_parent_dir "$progress_path"
             ensure_parent_dir "$prior_metadata_path"
-            if [[ "$disable_other_classes" -eq 0 || "$prior_mode" != "off" ]]; then
+            if [[ "$clustering_mode" == "class-first" ]]; then
                 require_file "$label_features_path" "Label features file"
-            fi
-            if [[ "$prior_mode" != "off" ]]; then
-                require_file "$prior_config" "Category priors"
-                require_file "$prior_mapping_config" "Prior mapping config"
+                require_file "$category_priors" "Category priors"
+                require_file "$class_first_config" "Class-first config"
+            else
+                require_dir "$images_path" "Images directory"
+                require_dir "$sparse_path" "Sparse directory"
+                require_file "$point_cloud_path" "Point cloud"
+                require_dir "$masks_path" "Masks directory"
+                require_dir "$labels_path" "Labels directory"
+                require_dir "$mask_scales_path" "Mask scales directory"
+                if [[ "$disable_other_classes" -eq 0 || "$prior_mode" != "off" ]]; then
+                    require_file "$label_features_path" "Label features file"
+                else
+                    ensure_parent_dir "$label_features_path"
+                fi
+                if [[ "$prior_mode" != "off" ]]; then
+                    require_file "$prior_config" "Category priors"
+                    require_file "$prior_mapping_config" "Prior mapping config"
+                fi
             fi
             ;;
         render)
@@ -386,6 +407,14 @@ run_postprocess() {
     fi
     if [[ "$minimal_metadata" -eq 1 ]]; then
         prior_args+=(--minimal_metadata)
+    fi
+    if [[ "$clustering_mode" == "class-first" ]]; then
+        prior_args+=(
+            --clustering-mode "$clustering_mode"
+            --class-prior-mode "$class_prior_mode"
+            --category-priors "$category_priors"
+            --class-first-config "$class_first_config"
+        )
     fi
     "$python_bin" "${SCRIPT_DIR}/postprocess.py" \
         --progress_path "$progress_path" \
@@ -537,6 +566,22 @@ while [[ $# -gt 0 ]]; do
             minimal_metadata=1
             shift
             ;;
+        --clustering-mode)
+            clustering_mode="$2"
+            shift 2
+            ;;
+        --class-prior-mode)
+            class_prior_mode="$2"
+            shift 2
+            ;;
+        --category-priors)
+            category_priors="$2"
+            shift 2
+            ;;
+        --class-first-config)
+            class_first_config="$2"
+            shift 2
+            ;;
         --sam-checkpoint-path)
             sam_checkpoint_path="$2"
             shift 2
@@ -581,6 +626,14 @@ done
 
 resolve_defaults
 [[ "$feature_iterations" =~ ^[0-9]+$ ]] || err "--feature-iterations must be nonnegative"
+[[ "$clustering_mode" == "legacy" || "$clustering_mode" == "class-first" ]] \
+    || err "--clustering-mode must be legacy or class-first"
+if [[ "$clustering_mode" == "class-first" ]]; then
+    case "$class_prior_mode" in
+        uniform|size|smooth|small|combined) ;;
+        *) err "unsupported --class-prior-mode: $class_prior_mode" ;;
+    esac
+fi
 if [[ -z "$python_bin" ]]; then
     find_python
 else

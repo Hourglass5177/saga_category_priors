@@ -1,0 +1,23 @@
+{
+  "schema_version": "1.0",
+  "kind": "class_first_config",
+  "semantic_threshold": 0.5,
+  "sample_fraction": 0.03,
+  "class_sample_max": 5000,
+  "min_cluster_size": 10,
+  "min_samples": 10,
+  "knn_k": 256,
+  "instance_feature_ratio": 0.3,
+  "semantic_feature_ratio": 0.3,
+  "xyz_feature_ratio": 0.4,
+  "instance_threshold": 0.25,
+  "cluster_selection_epsilon": 0.01,
+  "allow_single_cluster": false,
+  "use_sor": true,
+  "sor_nb_neighbors": 50,
+  "sor_std_ratio": 0.05,
+  "opacity_threshold": 0.01,
+  "scale_threshold": 0.8,
+  "rescue_radius_ratio": 0.1,
+  "small_area_exponent": 0.5
+}

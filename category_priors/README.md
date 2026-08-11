@@ -405,3 +405,103 @@ The locked evaluator follows ScanNet's GT-first matching, strict IoU comparison,
 void/small-region ignore rules, and AP integration. The experimental unit is the
 physical scene. Seeds are technical replicates averaged inside each resample;
 they are never counted as independent scenes.
+
+## Class-first recovery workflow
+
+This is the direct recovery of the teacher/source-refactor pipeline: 32-way
+top-1 semantic competition, clustering only `selected_classes`, then class-local
+HDBSCAN, KNN and SOR. It reuses existing 3DGS/feature assets and runs
+**postprocess only**: it does not train, create artifact hashes, or enter the B2
+global-first overlay.
+
+First materialize the readable 20-class parameter table. The default config is
+`category_priors/default_class_first_config.json`; the output contains the
+resolved `d_c`, `A_c`, `b_c`, `m_c`, `K_c`, and rescue radius without a hash.
+
+```bash
+python -m category_priors build-class-first-params \
+  --category-priors artifacts/category_priors.json \
+  --class-first-config category_priors/default_class_first_config.json \
+  --output artifacts/class_first_params.json --mode combined
+```
+
+Use manifests containing exactly the intended scenes. Start with two scenes and
+only the uniform teacher baseline plus the combined treatment:
+
+```bash
+python -m category_priors run-class-first \
+  --scene-manifest artifacts/scene_runtime_smoke2.json \
+  --output-root runs/class-first-smoke \
+  --category-priors artifacts/category_priors.json \
+  --class-first-config category_priors/default_class_first_config.json \
+  --condition U0-uniform --condition D-combined --seed 42
+```
+
+For the fixed eight-scene calibration subset, first create three configs that
+only set `min_samples` to `3`, `5`, or `10`, and run `U0-uniform` for each.
+Freeze the value with the best official mAP (AP50, then the smaller value, break
+an exact tie). Next create four configs using that frozen `min_samples` and one
+pair from `rescue_radius_ratio in {0.10,0.20}` x
+`small_area_exponent in {0.25,0.50}`. Run `D-small` for those four configs and
+freeze the best pair with the same tie rule. Each config may contain only
+`{"kind":"class_first_config"}` plus the fields being calibrated.
+
+```bash
+for cfg in artifacts/class-first-calibration/min-samples-*.json; do
+  tag="$(basename "$cfg" .json)"
+  python -m category_priors run-class-first \
+    --scene-manifest artifacts/scene_runtime_calibration8.json \
+    --output-root "runs/class-first-calibration/$tag" \
+    --category-priors artifacts/category_priors.json \
+    --class-first-config "$cfg" --condition U0-uniform --seed 42
+  python -m category_priors evaluate-class-first \
+    --scene-manifest artifacts/scene_runtime_calibration8.json \
+    --gt-dir artifacts/gt_val_tune \
+    --output-root "runs/class-first-calibration/$tag" \
+    --condition U0-uniform --seed 42 \
+    --metrics-output "artifacts/$tag-metrics.parquet" \
+    --analysis-output "artifacts/$tag-analysis.json"
+done
+
+for cfg in artifacts/class-first-calibration/small-*.json; do
+  tag="$(basename "$cfg" .json)"
+  python -m category_priors run-class-first \
+    --scene-manifest artifacts/scene_runtime_calibration8.json \
+    --output-root "runs/class-first-calibration/$tag" \
+    --category-priors artifacts/category_priors.json \
+    --class-first-config "$cfg" --condition D-small --seed 42
+  python -m category_priors evaluate-class-first \
+    --scene-manifest artifacts/scene_runtime_calibration8.json \
+    --gt-dir artifacts/gt_val_tune \
+    --output-root "runs/class-first-calibration/$tag" \
+    --condition D-small --seed 42 \
+    --metrics-output "artifacts/$tag-metrics.parquet" \
+    --analysis-output "artifacts/$tag-analysis.json"
+done
+```
+
+Finally run all five registered conditions on the 24-scene tune manifest with
+the frozen config, then evaluate once. If a data-driven condition beats
+`U0-uniform`, rerun only that best condition and `U0-uniform` at seeds 3407 and
+20260804. Enter the 48-scene evaluation only when the three-seed mean delta is
+positive and at least two of three seed deltas are positive.
+
+```bash
+python -m category_priors run-class-first \
+  --scene-manifest artifacts/scene_runtime_tune24.json \
+  --output-root runs/class-first-tune24 \
+  --category-priors artifacts/category_priors.json \
+  --class-first-config artifacts/class_first_config_frozen.json \
+  --seed 42
+
+python -m category_priors evaluate-class-first \
+  --scene-manifest artifacts/scene_runtime_tune24.json \
+  --gt-dir artifacts/gt_val_tune \
+  --output-root runs/class-first-tune24 \
+  --metrics-output artifacts/class_first_tune24_metrics.parquet \
+  --analysis-output artifacts/class_first_tune24_analysis.json \
+  --seed 42
+```
+
+Pass the tune-selected condition as `--treatment` (with
+`--reference U0-uniform`) only after selection; it need not be `D-combined`.

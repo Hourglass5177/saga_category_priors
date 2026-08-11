@@ -11,6 +11,9 @@ import numpy as np
 
 from .alignment import audit_saga_alignment
 from .analysis import analyze_manifest
+from .class_first import write_class_first_params
+from .class_first_runner import CLASS_FIRST_CONDITIONS, execute_class_first_runs
+from .class_first_evaluation import evaluate_class_first_runs
 from .download import (
     MINIMAL_FILE_TYPES,
     download_scannet_saga_scenes,
@@ -466,6 +469,63 @@ def command_run_locked(args: argparse.Namespace) -> None:
     )
 
 
+def command_run_class_first(args: argparse.Namespace) -> None:
+    result = execute_class_first_runs(
+        scene_manifest_path=args.scene_manifest,
+        output_root=args.output_root,
+        pipeline_path=args.pipeline,
+        category_priors_path=args.category_priors,
+        class_first_config_path=args.class_first_config,
+        conditions=args.condition,
+        seeds=args.seed,
+        scene_ids=args.scene,
+        resume=not args.no_resume,
+        continue_on_error=args.continue_on_error,
+        dry_run=args.dry_run,
+        max_runs=args.max_runs,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def command_build_class_first_params(args: argparse.Namespace) -> None:
+    payload = write_class_first_params(
+        args.category_priors,
+        args.class_first_config,
+        args.output,
+        mode=args.mode,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def command_evaluate_class_first(args: argparse.Namespace) -> None:
+    output_root = Path(args.output_root).resolve()
+    payload = evaluate_class_first_runs(
+        scene_manifest_path=args.scene_manifest,
+        gt_dir=args.gt_dir,
+        output_root=output_root,
+        taxonomy=load_taxonomy(args.taxonomy),
+        metrics_path=args.metrics_output
+        or output_root / "class_first_metrics.parquet",
+        analysis_path=args.analysis_output
+        or output_root / "class_first_analysis.json",
+        conditions=args.condition,
+        seeds=args.seed or (42, 3407, 20260804),
+        scene_ids=args.scene,
+        scene_list_path=args.scene_list,
+        selection_path=args.selection,
+        selection_split=args.selection_split,
+        reference=args.reference,
+        treatment=args.treatment,
+        bootstrap_samples=args.bootstrap_samples,
+        bootstrap_seed=args.bootstrap_seed,
+        radius_m=args.radius_m,
+        minimum_mapped_fraction=args.minimum_mapped_fraction,
+        min_region_size=args.min_region_size,
+        split=args.split,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
 def command_evaluate_seed_audit(args: argparse.Namespace) -> None:
     taxonomy = load_taxonomy(args.taxonomy)
     evaluate_tune_seed_execution(
@@ -817,6 +877,77 @@ def build_parser() -> argparse.ArgumentParser:
     run_locked.add_argument("--dry-run", action="store_true")
     run_locked.add_argument("--max-runs", type=int)
     run_locked.set_defaults(func=command_run_locked)
+
+    run_class_first = subparsers.add_parser(
+        "run-class-first",
+        help="Run lightweight class-first postprocess experiments without a schedule",
+    )
+    run_class_first.add_argument("--scene-manifest", required=True)
+    run_class_first.add_argument("--output-root", required=True)
+    run_class_first.add_argument("--category-priors", required=True)
+    run_class_first.add_argument("--class-first-config", required=True)
+    run_class_first.add_argument("--pipeline", default="run_pipeline.sh")
+    run_class_first.add_argument(
+        "--condition", action="append", choices=tuple(CLASS_FIRST_CONDITIONS)
+    )
+    run_class_first.add_argument("--seed", action="append", type=int)
+    run_class_first.add_argument("--scene", action="append")
+    run_class_first.add_argument("--no-resume", action="store_true")
+    run_class_first.add_argument("--continue-on-error", action="store_true")
+    run_class_first.add_argument("--dry-run", action="store_true")
+    run_class_first.add_argument("--max-runs", type=int)
+    run_class_first.set_defaults(func=command_run_class_first)
+
+    class_first_params = subparsers.add_parser(
+        "build-class-first-params",
+        help="Write the explicit no-hash d/A/b/m/K/rescue table",
+    )
+    class_first_params.add_argument("--category-priors", required=True)
+    class_first_params.add_argument("--class-first-config", required=True)
+    class_first_params.add_argument("--output", required=True)
+    class_first_params.add_argument(
+        "--mode",
+        choices=("uniform", "size", "smooth", "small", "combined"),
+        default="combined",
+    )
+    class_first_params.set_defaults(func=command_build_class_first_params)
+
+    evaluate_class_first = subparsers.add_parser(
+        "evaluate-class-first",
+        help="Evaluate and compare class-first runs without schedules or locks",
+    )
+    evaluate_class_first.add_argument("--scene-manifest", required=True)
+    evaluate_class_first.add_argument("--gt-dir", required=True)
+    evaluate_class_first.add_argument("--output-root", required=True)
+    evaluate_class_first.add_argument("--taxonomy")
+    evaluate_class_first.add_argument("--metrics-output")
+    evaluate_class_first.add_argument("--analysis-output")
+    evaluate_class_first.add_argument(
+        "--condition", action="append", choices=tuple(CLASS_FIRST_CONDITIONS)
+    )
+    evaluate_class_first.add_argument("--seed", action="append", type=int)
+    scene_source = evaluate_class_first.add_mutually_exclusive_group()
+    scene_source.add_argument("--scene", action="append")
+    scene_source.add_argument("--scene-list")
+    scene_source.add_argument("--selection")
+    evaluate_class_first.add_argument(
+        "--selection-split", choices=("tune", "locked"), default="locked"
+    )
+    evaluate_class_first.add_argument(
+        "--reference", choices=tuple(CLASS_FIRST_CONDITIONS)
+    )
+    evaluate_class_first.add_argument(
+        "--treatment", choices=tuple(CLASS_FIRST_CONDITIONS)
+    )
+    evaluate_class_first.add_argument("--bootstrap-samples", type=int, default=10000)
+    evaluate_class_first.add_argument("--bootstrap-seed", type=int, default=20260804)
+    evaluate_class_first.add_argument("--radius-m", type=float, default=0.05)
+    evaluate_class_first.add_argument(
+        "--minimum-mapped-fraction", type=float, default=0.90
+    )
+    evaluate_class_first.add_argument("--min-region-size", type=int, default=100)
+    evaluate_class_first.add_argument("--split", default="class-first")
+    evaluate_class_first.set_defaults(func=command_evaluate_class_first)
 
     evaluate_seed_audit = subparsers.add_parser(
         "evaluate-seed-audit",

@@ -232,6 +232,94 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
     print(f"\nSemantic-guided clustering complete: {current_instance_id} instances created")
     return other_point_labels, other_instance_to_class
 
+
+def run_class_first_postprocess(args):
+    """Independent class-first path: no RGB model, cameras, masks, or 2-D vote."""
+    from category_priors.class_first import (
+        build_class_first_metadata,
+        load_class_first_config,
+        run_class_first,
+    )
+    from category_priors.io import load_json, write_json
+
+    config = load_class_first_config(args.class_first_config)
+    priors = load_json(args.category_priors)
+    feature_model = FeatureGaussianModel(args.feature_dim, args.semantic_feature_dim)
+    feature_model.load_ply(args.contrastive_feature_point_cloud_path)
+    point_features = feature_model.get_point_features.detach().cpu()
+    semantic_features = feature_model.get_point_semantic_features.detach().cpu()
+    point_xyz = feature_model.get_xyz.detach().cpu()
+    point_scales = feature_model.get_scaling.detach().cpu()
+    point_opacities = feature_model.get_opacity.detach().cpu().squeeze()
+
+    scale_gate = torch.nn.Sequential(
+        torch.nn.Linear(1, args.feature_dim, bias=True), torch.nn.Sigmoid()
+    ).cuda()
+    scale_gate.load_state_dict(torch.load(args.scale_gate_path))
+    gates = scale_gate(torch.tensor([args.scale]).cuda()).unsqueeze(0).detach().cpu()
+    point_features = F.normalize(
+        F.normalize(point_features, dim=-1, p=2) * gates, dim=-1, p=2
+    )
+    semantic_features = F.normalize(semantic_features, dim=-1, p=2)
+    label_features = torch.load(args.label_features_path, map_location="cpu")
+    if not isinstance(label_features, torch.Tensor):
+        raise TypeError("label_features must be a tensor")
+    label_features = F.normalize(label_features.detach().cpu(), dim=-1, p=2)
+
+    max_scale = point_scales.max(dim=-1).values
+    valid_mask = (
+        (point_opacities >= config.opacity_threshold)
+        & (max_scale <= config.scale_threshold)
+    )
+    result = run_class_first(
+        point_features,
+        semantic_features,
+        point_xyz,
+        label_features,
+        args.classes,
+        priors,
+        config,
+        args.class_prior_mode,
+        args.scene_scale_m_per_unit,
+        seed=args.seed,
+        valid_mask=valid_mask,
+        selected_classes=args.selected_classes,
+    )
+    output = {
+        "point_labels": result.labels.tolist(),
+        "is_big_gaussian": (max_scale > config.scale_threshold).tolist(),
+        "is_transparent_gaissian": (
+            point_opacities < config.opacity_threshold
+        ).tolist(),
+        "instances": {
+            str(instance_id): dict(values)
+            for instance_id, values in sorted(result.instances.items())
+        },
+    }
+    write_json(args.json_path, output)
+    if args.prior_metadata_path:
+        write_json(
+            args.prior_metadata_path,
+            build_class_first_metadata(
+                result,
+                {
+                    "clustering_mode": "class-first",
+                    "class_prior_mode": args.class_prior_mode,
+                    "seed": int(args.seed),
+                    "scene_scale_m_per_unit": float(args.scene_scale_m_per_unit),
+                },
+            ),
+        )
+    progress_path = os.path.abspath(args.progress_path)
+    os.makedirs(os.path.dirname(progress_path), exist_ok=True)
+    with open(progress_path, "w", encoding="utf-8") as handle:
+        handle.write("1.0\n")
+    print(
+        "class-first complete: "
+        f"{result.diagnostics['totals']['final_instances']} instances, "
+        f"coverage={result.diagnostics['totals']['coverage']:.4f}"
+    )
+
 @resource_error_handler("语义识别后处理阶段")
 def main():
     parser = ArgumentParser(description="Training script parameters")
@@ -295,6 +383,12 @@ def main():
     parser.add_argument("--scene_scale_m_per_unit", type=float, default=0.0,
                         help="Known metric conversion for Gaussian coordinates; required by category priors")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--clustering-mode", choices=['legacy', 'class-first'], default='legacy')
+    parser.add_argument("--class-prior-mode", choices=[
+        'uniform', 'size', 'smooth', 'small', 'combined'
+    ], default='uniform')
+    parser.add_argument("--category-priors", type=str, default=None)
+    parser.add_argument("--class-first-config", type=str, default=None)
     args = parser.parse_args(sys.argv[1:])
     prior_resolver = None
     if args.prior_mode != 'off':
@@ -312,6 +406,21 @@ def main():
         args.min_cluster_size = int(tuned_baseline['min_cluster_size'])
         args.k = int(tuned_baseline['knn_k'])
         args.sample_num = int(tuned_baseline['sample_num'])
+    if args.clustering_mode == 'class-first':
+        if not args.category_priors or not args.class_first_config:
+            parser.error(
+                "--clustering-mode class-first requires --category-priors and --class-first-config"
+            )
+        if args.scene_scale_m_per_unit <= 0:
+            parser.error(
+                "--clustering-mode class-first requires positive --scene_scale_m_per_unit"
+            )
+        if not args.prior_metadata_path:
+            args.prior_metadata_path = f"{args.json_path}.metadata.json"
+        torch.manual_seed(args.seed)
+        np.random.seed(args.seed)
+        run_class_first_postprocess(args)
+        return
     bg_color = torch.tensor([1,1,1] if args.white_background else [0, 0, 0], dtype=torch.float32, device="cuda")
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
