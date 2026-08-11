@@ -2,6 +2,8 @@
 
 set -euo pipefail
 
+# This entrypoint is deployed directly to Linux; keep it LF-normalized.
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 python_bin=""
 
