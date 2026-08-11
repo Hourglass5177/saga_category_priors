@@ -134,7 +134,7 @@ def _perfect_prediction(scene_id: str, class_id: int = 0) -> PredictedInstance:
     )
 
 
-def test_positive_weight_bootstrap_keeps_every_registered_class() -> None:
+def test_positive_weight_bootstrap_keeps_every_globally_evaluable_class() -> None:
     ground_truth = [
         _single_instance_scene("chair-scene", 0),
         _single_instance_scene("cup-scene", 1),
@@ -160,6 +160,96 @@ def test_positive_weight_bootstrap_keeps_every_registered_class() -> None:
     assert result["difference"] == pytest.approx(0.5)
     assert result["ci95"] == pytest.approx([0.5, 0.5])
     assert result["bootstrap_method"] == "physical_scene_exp1_positive_weights"
+
+
+def test_globally_unsupported_classes_are_fixed_map_exclusions() -> None:
+    ground_truth = [
+        _single_instance_scene("chair-scene", 0),
+        _single_instance_scene("switch-scene", 1),
+    ]
+    predictions = {
+        "P000": [_perfect_prediction("chair-scene", 0)],
+        "P111": [
+            _perfect_prediction("chair-scene", 0),
+            _perfect_prediction("switch-scene", 1),
+            PredictedInstance(
+                "chair-scene",
+                99,
+                2,
+                0.99,
+                np.ones(3, dtype=bool),
+            ),
+        ],
+    }
+    classes = ["chair", "switch", "socket"]
+    groups = {"chair-scene": "chair", "switch-scene": "switch"}
+
+    compiled = evaluate_compiled(
+        compile_predictions(ground_truth, predictions["P111"], classes, 1)
+    )
+    assert compiled["aggregate"]["map_50_95"] == pytest.approx(1.0)
+    assert compiled["class_evaluation"] == {
+        "evaluable_classes": ["chair", "switch"],
+        "globally_unevaluable_classes": ["socket"],
+        "globally_unevaluable_reason": "no_gt_instances_at_min_region_size",
+        "map_denominator_class_count": 2,
+    }
+
+    bootstrap = paired_scene_bootstrap(
+        ground_truth,
+        predictions,
+        groups,
+        classes,
+        "P000",
+        "P111",
+        samples=50,
+        seed=11,
+        min_region_size=1,
+    )
+    assert bootstrap["difference"] == pytest.approx(0.5)
+    assert bootstrap["ci95"] == pytest.approx([0.5, 0.5])
+    assert bootstrap["evaluable_classes"] == ["chair", "switch"]
+    assert bootstrap["globally_unevaluable_classes"] == ["socket"]
+
+    permutation = paired_scene_permutation_test(
+        ground_truth,
+        predictions,
+        groups,
+        classes,
+        "P000",
+        "P111",
+        samples=100,
+        seed=11,
+        min_region_size=1,
+    )
+    assert permutation["observed"] == pytest.approx(0.5)
+    assert permutation["evaluable_classes"] == ["chair", "switch"]
+    assert permutation["globally_unevaluable_classes"] == ["socket"]
+
+
+def test_min_region_filter_can_make_canonical_class_globally_unevaluable() -> None:
+    scene = GroundTruthScene(
+        "scene",
+        semantic=np.asarray([0, 0, 0, 1]),
+        instance=np.asarray([1, 1, 1, 2]),
+    )
+    chair_prediction = PredictedInstance(
+        "scene",
+        1,
+        0,
+        0.9,
+        np.asarray([True, True, True, False]),
+    )
+    compiled = evaluate_compiled(
+        compile_predictions(
+            [scene], [chair_prediction], ["chair", "socket"], 2
+        )
+    )
+    assert compiled["class_evaluation"]["evaluable_classes"] == ["chair"]
+    assert compiled["class_evaluation"]["globally_unevaluable_classes"] == [
+        "socket"
+    ]
+    assert compiled["per_class"]["socket"]["gt_instances"] == 0
 
 
 def test_weighted_metric_matches_unweighted_perfect_result() -> None:

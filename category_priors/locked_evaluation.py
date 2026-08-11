@@ -249,8 +249,8 @@ def _condition_metric_rows(
 
 def _class_support(
     ground_truth: list[GroundTruthScene], taxonomy: Taxonomy, min_region_size: int
-) -> dict[str, dict[str, int]]:
-    support: dict[str, dict[str, int]] = {}
+) -> dict[str, dict[str, Any]]:
+    support: dict[str, dict[str, Any]] = {}
     for class_id, name in enumerate(taxonomy.canonical_classes):
         instances = 0
         scenes = 0
@@ -267,6 +267,11 @@ def _class_support(
         support[name] = {
             "gt_instances": instances,
             "physical_scene_support": scenes,
+            "globally_evaluable": instances > 0,
+            "map_denominator": "included" if instances > 0 else "excluded",
+            "exclusion_reason": None
+            if instances > 0
+            else "no_gt_instances_at_min_region_size",
         }
     return support
 

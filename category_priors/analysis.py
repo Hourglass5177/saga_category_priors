@@ -463,6 +463,11 @@ def _weighted_compiled_metric(
     class_values: list[float] = []
     missing_classes: list[str] = []
     for class_name, curves in zip(compiled.class_names, compiled.curves, strict=True):
+        # The confirmatory denominator is fixed from the complete locked GT,
+        # after applying min_region_size.  Registered classes with no such GT
+        # are not evaluable; predictions for them must not manufacture support.
+        if float(curves[0].ground_truth_instances.sum()) <= 0.0:
+            continue
         overlap_values = [
             value
             for overlap, curve in zip(
@@ -477,12 +482,32 @@ def _weighted_compiled_metric(
             class_values.append(float(np.mean(overlap_values)))
     if require_all_classes and missing_classes:
         raise ValueError(
-            "Positive-weight bootstrap requires GT support for every registered class; "
+            "Positive-weight bootstrap lost a globally evaluable class; "
             f"missing={missing_classes}"
         )
     if not class_values:
         raise ValueError("mAP is undefined because the selected scenes contain no GT")
     return float(np.mean(class_values))
+
+
+def _class_evaluation_partition(
+    compiled: CompiledEvaluation,
+) -> tuple[list[str], list[str]]:
+    """Partition canonical classes using complete-set, post-filter GT support."""
+    evaluable = [
+        class_name
+        for class_name, curves in zip(
+            compiled.class_names, compiled.curves, strict=True
+        )
+        if float(curves[0].ground_truth_instances.sum()) > 0.0
+    ]
+    evaluable_set = set(evaluable)
+    unevaluable = [
+        class_name
+        for class_name in compiled.class_names
+        if class_name not in evaluable_set
+    ]
+    return evaluable, unevaluable
 
 
 def weighted_scene_metric(
@@ -564,11 +589,20 @@ def evaluate_compiled(compiled: CompiledEvaluation) -> dict[str, Any]:
         if any(value is not None for value in main_values)
         else None
     )
+    evaluable_classes, globally_unevaluable_classes = (
+        _class_evaluation_partition(compiled)
+    )
     return {
         "schema_version": "1.0",
         "protocol": "ScanNet200-SAGA20",
         "overlaps": list(compiled.overlaps),
         "min_region_size": compiled.min_region_size,
+        "class_evaluation": {
+            "evaluable_classes": evaluable_classes,
+            "globally_unevaluable_classes": globally_unevaluable_classes,
+            "globally_unevaluable_reason": "no_gt_instances_at_min_region_size",
+            "map_denominator_class_count": len(evaluable_classes),
+        },
         "aggregate": aggregate,
         "per_class": per_class,
     }
@@ -609,6 +643,7 @@ def _compiled_replicates(
     expected_scenes = tuple(scene.scene_id for scene in ground_truth)
     expected_classes = tuple(class_names)
     result: dict[str, dict[str, CompiledEvaluation]] = {}
+    expected_gt: tuple[tuple[np.ndarray, ...], ...] | None = None
     for condition, replicates in normalised.items():
         result[condition] = {}
         for seed, predictions in replicates.items():
@@ -628,6 +663,25 @@ def _compiled_replicates(
                 raise ValueError(
                     f"{condition}/{seed}: compiled predictions do not match "
                     "the requested scenes, classes, or min_region_size"
+                )
+            compiled_gt = tuple(
+                tuple(curve.ground_truth_instances for curve in curves)
+                for curves in compiled.curves
+            )
+            if expected_gt is None:
+                expected_gt = compiled_gt
+            elif any(
+                not np.array_equal(actual, expected)
+                for actual_curves, expected_curves in zip(
+                    compiled_gt, expected_gt, strict=True
+                )
+                for actual, expected in zip(
+                    actual_curves, expected_curves, strict=True
+                )
+            ):
+                raise ValueError(
+                    f"{condition}/{seed}: compiled predictions do not share "
+                    "the fixed locked-set GT support"
                 )
             result[condition][seed] = compiled
     seeds = tuple(sorted(next(iter(normalised.values()))))
@@ -740,11 +794,14 @@ def _prepare_swap_curves(
             )
             reference_gt = float(reference_curve.ground_truth_instances.sum())
             treatment_gt = float(treatment_curve.ground_truth_instances.sum())
-            if reference_gt != treatment_gt or reference_gt <= 0.0:
+            if reference_gt != treatment_gt:
                 raise ValueError(
-                    "Paired pooled permutation requires fixed GT support for "
-                    "every registered class"
+                    "Paired pooled permutation requires identical fixed GT support"
                 )
+            if reference_gt <= 0.0:
+                # Globally unsupported canonical classes are fixed exclusions
+                # from every permutation, just as they are from point mAP.
+                continue
             prepared.append(
                 _PreparedSwapCurve(
                     reference_true_positive=reference_tp.sum(axis=0),
@@ -888,6 +945,9 @@ def paired_scene_bootstrap(
             compiled[treatment], weights, require_all_classes=True
         ) - _condition_metric(compiled[reference], weights, require_all_classes=True)
     low, high = np.quantile(differences, (0.025, 0.975))
+    evaluable_classes, globally_unevaluable_classes = _class_evaluation_partition(
+        next(iter(compiled[reference].values()))
+    )
     return {
         "reference": reference,
         "treatment": treatment,
@@ -897,6 +957,8 @@ def paired_scene_bootstrap(
         "ci95": [float(low), float(high)],
         "bootstrap_samples": samples,
         "bootstrap_method": "physical_scene_exp1_positive_weights",
+        "evaluable_classes": evaluable_classes,
+        "globally_unevaluable_classes": globally_unevaluable_classes,
         "technical_replicates": list(technical_replicates),
         "technical_replicate_aggregation": "mean_within_resample",
         "seed": seed,
@@ -975,6 +1037,9 @@ def paired_scene_permutation_test(
             np.count_nonzero(np.abs(differences) >= abs(observed) - tolerance)
         )
         remaining -= batch
+    evaluable_classes, globally_unevaluable_classes = _class_evaluation_partition(
+        next(iter(compiled[reference].values()))
+    )
     return {
         "reference": reference,
         "treatment": treatment,
@@ -986,6 +1051,8 @@ def paired_scene_permutation_test(
         "extreme_permutations": extreme,
         "permutation_samples": samples,
         "permutation_method": "paired_physical_scene_whole_prediction_swap",
+        "evaluable_classes": evaluable_classes,
+        "globally_unevaluable_classes": globally_unevaluable_classes,
         "technical_replicates": list(technical_replicates),
         "technical_replicate_aggregation": "mean_pooled_map_within_permutation",
         "seed": seed,
@@ -1095,11 +1162,16 @@ def factorial_bootstrap(
             "p_two_sided": raw_p[index],
             "p_holm": adjusted[index],
         }
+    evaluable_classes, globally_unevaluable_classes = _class_evaluation_partition(
+        next(iter(next(iter(compiled.values())).values()))
+    )
     return {
         "effects": result,
         "holm_family": list(names),
         "bootstrap_samples": samples,
         "bootstrap_method": "physical_scene_exp1_positive_weights",
+        "evaluable_classes": evaluable_classes,
+        "globally_unevaluable_classes": globally_unevaluable_classes,
         "technical_replicates": list(technical_replicates),
         "technical_replicate_aggregation": "mean_within_resample",
         "seed": seed,
