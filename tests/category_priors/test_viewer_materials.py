@@ -3,11 +3,17 @@ from __future__ import annotations
 import numpy as np
 
 from category_priors.viewer_materials import (
+    _condition_slug,
     _instance_colors,
     _prediction_labels,
     _sample_indices,
     _semantic_colors,
 )
+
+
+def test_condition_slug_is_stable_and_filesystem_friendly() -> None:
+    assert _condition_slug("U0-uniform") == "u0_uniform"
+    assert _condition_slug("D-small") == "d_small"
 
 
 def test_sample_indices_are_deterministic_and_bounded() -> None:

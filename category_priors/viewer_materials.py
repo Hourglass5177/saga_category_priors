@@ -80,6 +80,13 @@ def _prediction_labels(
     return instances, semantics
 
 
+def _condition_slug(condition: str) -> str:
+    return "".join(
+        character.lower() if character.isalnum() else "_"
+        for character in condition
+    ).strip("_")
+
+
 def build_viewer_materials(
     analysis_path: Path,
     runtime_manifest_path: Path,
@@ -101,6 +108,9 @@ def build_viewer_materials(
         for item in runtime["scenes"]
     }
     selected = analysis["qualitative_cases"]
+    comparison = analysis["comparison"]
+    reference = str(comparison["reference"])
+    treatment = str(comparison["treatment"])
     cases = []
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -152,10 +162,8 @@ def build_viewer_materials(
         )
 
         condition_files: dict[str, dict[str, str]] = {}
-        for short_name, condition in (
-            ("p000", "P000-B2"),
-            ("p111", "P111-combined"),
-        ):
+        for condition in (reference, treatment):
+            short_name = _condition_slug(condition)
             prediction_path = runs_root / condition / scene_id / f"seed-{seed}" / "output.json"
             prediction = _read_json(prediction_path)
             instance_labels, semantic_labels = _prediction_labels(prediction, classes)
@@ -204,10 +212,10 @@ def build_viewer_materials(
         )
 
     payload = {
-        "kind": "locked_viewer_materials",
-        "split": "val-locked",
+        "kind": "class_first_viewer_materials",
+        "split": analysis["split"],
         "selection_rule": "best_median_worst_by_preregistered_paired_scene_delta",
-        "comparison": ["P000-B2", "P111-combined"],
+        "comparison": [reference, treatment],
         "cases": cases,
         "qualitative_only": True,
         "not_for_parameter_selection": True,
@@ -216,10 +224,10 @@ def build_viewer_materials(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     (output_dir / "README.md").write_text(
-        "# Locked qualitative viewer materials\n\n"
+        "# Class-first qualitative viewer materials\n\n"
         "Open the PLY files in the Windows viewer using the same camera for each "
-        "case. Compare RGB, GT, P000-B2 and P111-combined instance/semantic views. "
-        "The cases were selected only after all 1,728 runs completed and are "
+        f"case. Compare RGB, GT, {reference} and {treatment} instance/semantic views. "
+        "The cases were selected only after all final runs completed and are "
         "qualitative illustrations, not inputs to parameter selection.\n",
         encoding="utf-8",
     )
