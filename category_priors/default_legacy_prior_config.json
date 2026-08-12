@@ -1,0 +1,16 @@
+{
+  "alpha": 0.05,
+  "assignment_threshold": 0.25,
+  "boundary_beta": 0.1,
+  "halo_min_agreement": 3,
+  "halo_neighbors": 8,
+  "kind": "legacy_prior_config",
+  "knn_max": 64,
+  "min_cluster_high": 20,
+  "min_cluster_low": 3,
+  "min_samples": 3,
+  "sample_cap": 5000,
+  "sample_fraction": 0.03,
+  "semantic_threshold": 0.2,
+  "support_multiplier": 4
+}

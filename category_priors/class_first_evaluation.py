@@ -338,9 +338,11 @@ def evaluate_class_first_runs(
     minimum_mapped_fraction: float = 0.90,
     min_region_size: int = 100,
     split: str = "class-first",
+    supported_conditions: Sequence[str] | None = None,
 ) -> dict[str, Any]:
-    selected_conditions = list(conditions or CLASS_FIRST_CONDITIONS)
-    unknown = sorted(set(selected_conditions) - set(CLASS_FIRST_CONDITIONS))
+    allowed_conditions = tuple(supported_conditions or CLASS_FIRST_CONDITIONS)
+    selected_conditions = list(conditions or allowed_conditions)
+    unknown = sorted(set(selected_conditions) - set(allowed_conditions))
     if not selected_conditions or unknown:
         raise ValueError(f"Invalid class-first conditions: {unknown}")
     selected_seeds = [int(value) for value in seeds]

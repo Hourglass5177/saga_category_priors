@@ -10,10 +10,16 @@ from typing import Any
 import numpy as np
 
 from .alignment import audit_saga_alignment
+from .backbone_diagnostics import diagnose_backbone_runs
 from .analysis import analyze_manifest
 from .class_first import write_class_first_params
 from .class_first_runner import CLASS_FIRST_CONDITIONS, execute_class_first_runs
 from .class_first_evaluation import evaluate_class_first_runs
+from .legacy_prior import load_legacy_prior_config, write_legacy_prior_params
+from .legacy_prior_runner import (
+    LEGACY_PRIOR_CONDITIONS,
+    execute_legacy_prior_runs,
+)
 from .download import (
     MINIMAL_FILE_TYPES,
     download_scannet_saga_scenes,
@@ -526,6 +532,80 @@ def command_evaluate_class_first(args: argparse.Namespace) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+def command_run_prior_v2(args: argparse.Namespace) -> None:
+    result = execute_legacy_prior_runs(
+        scene_manifest=args.scene_manifest,
+        output_root=args.output_root,
+        pipeline=args.pipeline,
+        category_priors=args.category_priors,
+        config=args.legacy_prior_config,
+        conditions=args.condition,
+        seeds=args.seed,
+        scene_ids=args.scene,
+        score=args.score,
+        semantic_source=args.semantic_source,
+        resume=not args.no_resume,
+        continue_on_error=args.continue_on_error,
+        dry_run=args.dry_run,
+        max_runs=args.max_runs,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def command_build_prior_v2_params(args: argparse.Namespace) -> None:
+    payload = write_legacy_prior_params(
+        load_json(args.category_priors),
+        load_legacy_prior_config(args.legacy_prior_config),
+        args.output,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def command_evaluate_prior_v2(args: argparse.Namespace) -> None:
+    output_root = Path(args.output_root).resolve()
+    payload = evaluate_class_first_runs(
+        scene_manifest_path=args.scene_manifest,
+        gt_dir=args.gt_dir,
+        output_root=output_root,
+        taxonomy=load_taxonomy(args.taxonomy),
+        metrics_path=args.metrics_output or output_root / "prior_v2_metrics.parquet",
+        analysis_path=args.analysis_output or output_root / "prior_v2_analysis.json",
+        conditions=args.condition,
+        seeds=args.seed or (42,),
+        scene_ids=args.scene,
+        scene_list_path=args.scene_list,
+        selection_path=args.selection,
+        selection_split=args.selection_split,
+        reference=args.reference,
+        treatment=args.treatment,
+        bootstrap_samples=args.bootstrap_samples,
+        bootstrap_seed=args.bootstrap_seed,
+        radius_m=args.radius_m,
+        minimum_mapped_fraction=args.minimum_mapped_fraction,
+        min_region_size=args.min_region_size,
+        split=args.split,
+        supported_conditions=tuple(LEGACY_PRIOR_CONDITIONS),
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def command_diagnose_backbone(args: argparse.Namespace) -> None:
+    payload = diagnose_backbone_runs(
+        scene_manifest=args.scene_manifest,
+        gt_dir=args.gt_dir,
+        output_root=args.output_root,
+        taxonomy=load_taxonomy(args.taxonomy),
+        output_json=args.output,
+        output_table=args.table,
+        conditions=args.condition,
+        seeds=args.seed,
+        scene_ids=args.scene,
+        radius_m=args.radius_m,
+        min_region_size=args.min_region_size,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
 def command_evaluate_seed_audit(args: argparse.Namespace) -> None:
     taxonomy = load_taxonomy(args.taxonomy)
     evaluate_tune_seed_execution(
@@ -948,6 +1028,92 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_class_first.add_argument("--min-region-size", type=int, default=100)
     evaluate_class_first.add_argument("--split", default="class-first")
     evaluate_class_first.set_defaults(func=command_evaluate_class_first)
+
+    run_prior_v2 = subparsers.add_parser(
+        "run-prior-v2",
+        help="Run proposal-first legacy category-prior postprocess experiments",
+    )
+    run_prior_v2.add_argument("--scene-manifest", required=True)
+    run_prior_v2.add_argument("--output-root", required=True)
+    run_prior_v2.add_argument("--category-priors", required=True)
+    run_prior_v2.add_argument("--legacy-prior-config", required=True)
+    run_prior_v2.add_argument("--pipeline", default="run_pipeline.sh")
+    run_prior_v2.add_argument(
+        "--condition", action="append", choices=tuple(LEGACY_PRIOR_CONDITIONS)
+    )
+    run_prior_v2.add_argument("--seed", action="append", type=int)
+    run_prior_v2.add_argument("--scene", action="append")
+    run_prior_v2.add_argument(
+        "--score", choices=("unit", "vote", "assignment"), default="unit"
+    )
+    run_prior_v2.add_argument(
+        "--semantic-source", choices=("gaussian", "vote"), default="gaussian"
+    )
+    run_prior_v2.add_argument("--no-resume", action="store_true")
+    run_prior_v2.add_argument("--continue-on-error", action="store_true")
+    run_prior_v2.add_argument("--dry-run", action="store_true")
+    run_prior_v2.add_argument("--max-runs", type=int)
+    run_prior_v2.set_defaults(func=command_run_prior_v2)
+
+    prior_v2_params = subparsers.add_parser(
+        "build-prior-v2-params", help="Write the no-hash proposal-first prior table"
+    )
+    prior_v2_params.add_argument("--category-priors", required=True)
+    prior_v2_params.add_argument("--legacy-prior-config", required=True)
+    prior_v2_params.add_argument("--output", required=True)
+    prior_v2_params.set_defaults(func=command_build_prior_v2_params)
+
+    evaluate_prior_v2 = subparsers.add_parser(
+        "evaluate-prior-v2", help="Evaluate proposal-first prior-v2 runs"
+    )
+    evaluate_prior_v2.add_argument("--scene-manifest", required=True)
+    evaluate_prior_v2.add_argument("--gt-dir", required=True)
+    evaluate_prior_v2.add_argument("--output-root", required=True)
+    evaluate_prior_v2.add_argument("--taxonomy")
+    evaluate_prior_v2.add_argument("--metrics-output")
+    evaluate_prior_v2.add_argument("--analysis-output")
+    evaluate_prior_v2.add_argument(
+        "--condition", action="append", choices=tuple(LEGACY_PRIOR_CONDITIONS)
+    )
+    evaluate_prior_v2.add_argument("--seed", action="append", type=int)
+    prior_v2_scenes = evaluate_prior_v2.add_mutually_exclusive_group()
+    prior_v2_scenes.add_argument("--scene", action="append")
+    prior_v2_scenes.add_argument("--scene-list")
+    prior_v2_scenes.add_argument("--selection")
+    evaluate_prior_v2.add_argument(
+        "--selection-split", choices=("tune", "locked"), default="tune"
+    )
+    evaluate_prior_v2.add_argument(
+        "--reference", choices=tuple(LEGACY_PRIOR_CONDITIONS), default="L1-uniform"
+    )
+    evaluate_prior_v2.add_argument(
+        "--treatment", choices=tuple(LEGACY_PRIOR_CONDITIONS)
+    )
+    evaluate_prior_v2.add_argument("--bootstrap-samples", type=int, default=10000)
+    evaluate_prior_v2.add_argument("--bootstrap-seed", type=int, default=20260804)
+    evaluate_prior_v2.add_argument("--radius-m", type=float, default=0.05)
+    evaluate_prior_v2.add_argument(
+        "--minimum-mapped-fraction", type=float, default=0.90
+    )
+    evaluate_prior_v2.add_argument("--min-region-size", type=int, default=100)
+    evaluate_prior_v2.add_argument("--split", default="prior-v2")
+    evaluate_prior_v2.set_defaults(func=command_evaluate_prior_v2)
+
+    diagnose_backbone = subparsers.add_parser(
+        "diagnose-backbone", help="Measure coverage, semantic errors and proposal fragmentation"
+    )
+    diagnose_backbone.add_argument("--scene-manifest", required=True)
+    diagnose_backbone.add_argument("--gt-dir", required=True)
+    diagnose_backbone.add_argument("--output-root", required=True)
+    diagnose_backbone.add_argument("--taxonomy")
+    diagnose_backbone.add_argument("--condition", action="append", required=True)
+    diagnose_backbone.add_argument("--seed", action="append", type=int, required=True)
+    diagnose_backbone.add_argument("--scene", action="append", required=True)
+    diagnose_backbone.add_argument("--output", required=True)
+    diagnose_backbone.add_argument("--table", required=True)
+    diagnose_backbone.add_argument("--radius-m", type=float, default=0.05)
+    diagnose_backbone.add_argument("--min-region-size", type=int, default=100)
+    diagnose_backbone.set_defaults(func=command_diagnose_backbone)
 
     evaluate_seed_audit = subparsers.add_parser(
         "evaluate-seed-audit",

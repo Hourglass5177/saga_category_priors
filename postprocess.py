@@ -65,7 +65,10 @@ def select_points_by_semantic_similarity(point_semantic_features, label_features
     return selection_mask, similarity
 
 def cluster_other_classes(point_features, point_semantic_features, point_xyz, label_features, class_to_idx,
-                          other_classes, args, device='cpu'):
+                          other_classes, args, device='cpu', legacy_prior=None,
+                          raw_point_features=None, scale_gate=None,
+                          mask_scales=(), surface_density=1.0,
+                          semantic_vote_scores=None):
     """
     Perform semantic-guided clustering for 'other_classes' (small objects).
 
@@ -94,6 +97,7 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
     other_point_labels = torch.full((N,), -1, dtype=torch.long, device=device)
     other_instance_to_class = {}
     current_instance_id = 0
+    branch_diagnostics = {}
 
     # Normalize spatial coordinates
     min_val = torch.min(point_xyz, dim=0).values
@@ -109,24 +113,84 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
         print(f"\nProcessing other class: {class_name} (idx={class_idx})")
 
         # Step 1: Select points by semantic similarity (using semantic features)
-        selection_mask, similarity_scores = select_points_by_semantic_similarity(
-            point_semantic_features, label_features, class_idx,
-            args.other_classes_similarity_threshold, device
-        )
+        semantic_threshold = args.other_classes_similarity_threshold
+        parameters = None
+        if legacy_prior is not None:
+            from category_priors.legacy_prior import resolve_class_parameters
+            if semantic_vote_scores is not None:
+                preliminary_scores = semantic_vote_scores[:, class_idx]
+                preliminary_mask = (
+                    preliminary_scores >= legacy_prior["config"].semantic_threshold
+                )
+            else:
+                preliminary_mask, _ = select_points_by_semantic_similarity(
+                    point_semantic_features, label_features, class_idx,
+                    legacy_prior["config"].semantic_threshold, device
+                )
+            parameters = resolve_class_parameters(
+                legacy_prior["priors"], legacy_prior["config"], class_name,
+                legacy_prior["mode"], int(preliminary_mask.sum()),
+                surface_density, mask_scales,
+            )
+            semantic_threshold = float(parameters["semantic_threshold"])
+        if semantic_vote_scores is not None:
+            similarity_scores = semantic_vote_scores[:, class_idx]
+            selection_mask = similarity_scores >= semantic_threshold
+        else:
+            selection_mask, similarity_scores = select_points_by_semantic_similarity(
+                point_semantic_features, label_features, class_idx,
+                semantic_threshold, device
+            )
 
         num_selected = selection_mask.sum().item()
-        print(f"  Selected {num_selected} points (similarity >= {args.other_classes_similarity_threshold})")
+        print(f"  Selected {num_selected} points (similarity >= {semantic_threshold})")
 
-        if num_selected < args.other_classes_min_cluster_size:
+        min_cluster_size = (
+            int(parameters["min_cluster_size"])
+            if parameters is not None else args.other_classes_min_cluster_size
+        )
+        min_samples = (
+            int(parameters["min_samples"])
+            if parameters is not None else min_cluster_size
+        )
+        if num_selected < min_cluster_size:
             print(f"  Skipping: insufficient points")
+            branch_diagnostics[class_name] = {
+                "candidate_points": int(num_selected), "status": "insufficient_points",
+                "parameters": parameters,
+            }
             continue
 
         # Step 2: Sample selected points for efficiency
         selected_features = point_features[selection_mask]
-        selected_xyz = std_point_xyz[selection_mask]
+        if (
+            parameters is not None and raw_point_features is not None
+            and scale_gate is not None
+        ):
+            gate_input = float(parameters["scale_gate_input"])
+            with torch.no_grad():
+                gate = scale_gate(
+                    torch.tensor([gate_input], dtype=torch.float32, device="cuda")
+                ).detach().cpu()
+            selected_features = F.normalize(
+                F.normalize(raw_point_features[selection_mask], dim=-1, p=2) * gate,
+                dim=-1,
+                p=2,
+            )
+        if parameters is not None and parameters["spatial_scale_m"] is not None:
+            selected_xyz = (
+                point_xyz[selection_mask]
+                * float(args.scene_scale_m_per_unit)
+                / max(float(parameters["spatial_scale_m"]), 1e-12)
+            )
+        else:
+            selected_xyz = std_point_xyz[selection_mask]
         selected_similarities = similarity_scores[selection_mask]
 
-        sample_size = min(num_selected, args.other_classes_sample_num)
+        sample_size = (
+            int(parameters["sample_count"])
+            if parameters is not None else min(num_selected, args.other_classes_sample_num)
+        )
         sampled_indices = torch.randperm(num_selected, device=device)[:sample_size]
         sampled_features = selected_features[sampled_indices]
         sampled_xyz = selected_xyz[sampled_indices]
@@ -163,7 +227,8 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
 
         # Step 4: HDBSCAN clustering
         clusterer = HDBSCAN(
-            min_cluster_size=args.other_classes_min_cluster_size,
+            min_cluster_size=min_cluster_size,
+            min_samples=min_samples,
             cluster_selection_epsilon=0.01,
             allow_single_cluster=False,
             metric='precomputed'
@@ -175,6 +240,12 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
 
         if num_clusters == 0:
             print(f"  Skipping: no valid clusters")
+            branch_diagnostics[class_name] = {
+                "candidate_points": int(num_selected),
+                "sampled_points": int(sample_size),
+                "hdbscan_noise_points": int((cluster_labels < 0).sum()),
+                "status": "no_clusters", "parameters": parameters,
+            }
             continue
 
         # Step 5: Compute cluster centers for full assignment
@@ -205,8 +276,32 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
         selected_mask, selected_cluster_labels = selected_confidence.max(dim=-1)
 
         # Apply threshold
-        below_threshold = selected_mask < args.instance_threshold
+        assignment_threshold = (
+            float(parameters["assignment_threshold"])
+            if parameters is not None else args.instance_threshold
+        )
+        below_threshold = selected_mask < assignment_threshold
         selected_cluster_labels[below_threshold] = -1
+
+        rescued = 0
+        if parameters is not None:
+            from category_priors.legacy_prior import radius_vote_labels, rescue_halo
+            selected_xyz_m = (
+                point_xyz[selection_mask].detach().cpu().numpy()
+                * float(args.scene_scale_m_per_unit)
+            )
+            local = selected_cluster_labels.detach().cpu().numpy()
+            local = radius_vote_labels(
+                local, selected_xyz_m, parameters["smoothing_radius_m"],
+                int(parameters["knn_max"]),
+            )
+            if parameters["rescue_enabled"]:
+                local, rescued = rescue_halo(
+                    local, selected_xyz_m, parameters["rescue_radius_m"],
+                    int(parameters["halo_neighbors"]),
+                    int(parameters["halo_min_agreement"]),
+                )
+            selected_cluster_labels = torch.as_tensor(local, device=device)
 
         # Step 7: Map back to original point indices and assign instance IDs
         selected_indices_original = torch.where(selection_mask)[0]
@@ -215,7 +310,7 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
             # Find points assigned to this cluster
             points_in_cluster = (selected_cluster_labels == local_cluster_id)
 
-            if points_in_cluster.sum() < args.other_classes_min_cluster_size:
+            if points_in_cluster.sum() < min_cluster_size:
                 continue
 
             # Get original point indices
@@ -229,7 +324,17 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
             current_instance_id += 1
             print(f"  Instance {instance_id}: {points_in_cluster.sum()} points -> {class_name}")
 
+        branch_diagnostics[class_name] = {
+            "candidate_points": int(num_selected),
+            "sampled_points": int(sample_size),
+            "hdbscan_noise_points": int((cluster_labels < 0).sum()),
+            "rescued_points": int(rescued),
+            "final_instances": int(sum(1 for value in other_instance_to_class.values() if value == class_name)),
+            "status": "complete", "parameters": parameters,
+        }
+
     print(f"\nSemantic-guided clustering complete: {current_instance_id} instances created")
+    args._legacy_prior_diagnostics = branch_diagnostics
     return other_point_labels, other_instance_to_class
 
 
@@ -383,12 +488,22 @@ def main():
     parser.add_argument("--scene_scale_m_per_unit", type=float, default=0.0,
                         help="Known metric conversion for Gaussian coordinates; required by category priors")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--clustering-mode", choices=['legacy', 'class-first'], default='legacy')
+    parser.add_argument("--clustering-mode", choices=['legacy', 'class-first', 'legacy-prior'], default='legacy')
     parser.add_argument("--class-prior-mode", choices=[
         'uniform', 'size', 'smooth', 'small', 'combined'
     ], default='uniform')
     parser.add_argument("--category-priors", type=str, default=None)
     parser.add_argument("--class-first-config", type=str, default=None)
+    parser.add_argument("--legacy-prior-config", type=str, default=None)
+    parser.add_argument("--legacy-prior-mode", choices=[
+        'uniform', 'size', 'smooth', 'small', 'combined'
+    ], default='uniform')
+    parser.add_argument("--legacy-prior-score", choices=[
+        'unit', 'vote', 'assignment'
+    ], default='unit')
+    parser.add_argument("--legacy-prior-semantic-source", choices=[
+        'gaussian', 'vote'
+    ], default='gaussian')
     args = parser.parse_args(sys.argv[1:])
     prior_resolver = None
     if args.prior_mode != 'off':
@@ -421,6 +536,25 @@ def main():
         np.random.seed(args.seed)
         run_class_first_postprocess(args)
         return
+    legacy_prior = None
+    if args.clustering_mode == 'legacy-prior':
+        if not args.category_priors or not args.legacy_prior_config:
+            parser.error(
+                "--clustering-mode legacy-prior requires --category-priors and --legacy-prior-config"
+            )
+        if args.scene_scale_m_per_unit <= 0:
+            parser.error(
+                "--clustering-mode legacy-prior requires positive --scene-scale-m-per-unit"
+            )
+        from category_priors.io import load_json
+        from category_priors.legacy_prior import load_legacy_prior_config
+        legacy_prior = {
+            "priors": load_json(args.category_priors),
+            "config": load_legacy_prior_config(args.legacy_prior_config),
+            "mode": args.legacy_prior_mode,
+        }
+        if not args.prior_metadata_path:
+            args.prior_metadata_path = f"{args.json_path}.metadata.json"
     bg_color = torch.tensor([1,1,1] if args.white_background else [0, 0, 0], dtype=torch.float32, device="cuda")
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -488,13 +622,14 @@ def main():
 
     def get_max_contributor(camera, device):
         nonlocal max_contributor_cache_hits, max_contributor_cache_misses
-        camera_key = hashlib.sha256(camera.image_name.encode("utf-8")).hexdigest()
-        if camera_key in max_contributor_memory:
+        memory_key = camera.image_name
+        if memory_key in max_contributor_memory:
             max_contributor_cache_hits += 1
-            return max_contributor_memory[camera_key].to(device)
+            return max_contributor_memory[memory_key].to(device)
         cache_file = None
         max_contributor = None
         if max_contributor_cache_dir is not None:
+            camera_key = hashlib.sha256(camera.image_name.encode("utf-8")).hexdigest()
             cache_file = os.path.join(max_contributor_cache_dir, f"{camera_key}.pt")
             if os.path.isfile(cache_file):
                 try:
@@ -520,7 +655,7 @@ def main():
                 temporary_cache = f"{cache_file}.tmp-{os.getpid()}"
                 torch.save(max_contributor, temporary_cache)
                 os.replace(temporary_cache, cache_file)
-        max_contributor_memory[camera_key] = max_contributor
+        max_contributor_memory[memory_key] = max_contributor
         return max_contributor.to(device)
 
     point_features = feat_gs_model.get_point_features.detach().cpu()
@@ -544,6 +679,23 @@ def main():
         label_features = None
         class_to_idx = None
         print("Warning: label_features.pt not found, semantic-guided clustering disabled")
+
+    legacy_mask_scales = []
+    legacy_surface_density = 1.0
+    if legacy_prior is not None:
+        from category_priors.legacy_prior import estimate_surface_density
+        if os.path.isdir(args.mask_scales_path):
+            for filename in sorted(os.listdir(args.mask_scales_path)):
+                if not filename.endswith('.pt'):
+                    continue
+                values = torch.load(
+                    os.path.join(args.mask_scales_path, filename), map_location='cpu'
+                )
+                if isinstance(values, torch.Tensor):
+                    legacy_mask_scales.extend(values.detach().cpu().flatten().tolist())
+        legacy_surface_density = estimate_surface_density(
+            point_xyz.detach().cpu().numpy() * float(args.scene_scale_m_per_unit)
+        )
 
     sampled_mask = uniform_sample(point_xyz, args.sample_num)
     # sampled_mask = torch.rand(point_features.shape[0]) > 0.99
@@ -628,6 +780,40 @@ def main():
     print(f'HDBSCAN finish')
 
     # ========== SEMANTIC-GUIDED CLUSTERING (for other_classes) ==========
+    pending_legacy_branch = None
+    pending_legacy_classes = {}
+    legacy_semantic_vote_scores = None
+    if legacy_prior is not None and args.legacy_prior_semantic_source == 'vote':
+        gaussian_votes = torch.zeros(
+            (len(point_xyz), len(args.classes)), dtype=torch.float64
+        )
+        for camera in tqdm(camera_list, desc='Gaussian semantic vote'):
+            mask_file = os.path.join(args.masks_path, f'{camera.image_name}.pt')
+            label_file = os.path.join(args.labels_path, f'{camera.image_name}.pt')
+            if not os.path.isfile(mask_file) or not os.path.isfile(label_file):
+                continue
+            masks = torch.load(mask_file, map_location='cpu')
+            if masks.shape[-2:] != (camera.image_height, camera.image_width):
+                masks = torch.nn.functional.interpolate(
+                    masks.float().unsqueeze(1), mode='bilinear',
+                    size=(camera.image_height, camera.image_width),
+                    align_corners=False,
+                ).squeeze(1) > 0.5
+            else:
+                masks = masks.bool()
+            labels_2d = torch.load(label_file, map_location='cpu')
+            contributors = get_max_contributor(camera, torch.device('cpu'))
+            for label_2d, mask_2d in zip(labels_2d, masks):
+                class_index = int(label_2d)
+                if class_index < 0 or class_index >= len(args.classes):
+                    continue
+                gaussian_votes[:, class_index] += torch.bincount(
+                    contributors[mask_2d].long(), minlength=len(point_xyz)
+                ).double()
+        vote_sum = gaussian_votes.sum(dim=1, keepdim=True)
+        legacy_semantic_vote_scores = torch.where(
+            vote_sum > 0, gaussian_votes / vote_sum.clamp_min(1), gaussian_votes
+        ).float()
     if (
         prior_resolver is None
         and not args.disable_other_classes
@@ -637,7 +823,13 @@ def main():
     ):
         print(f"\n{'='*60}")
         print(f"Starting semantic-guided clustering for other_classes")
-        print(f"Classes: {args.other_classes}")
+        branch_classes = args.other_classes
+        if legacy_prior is not None:
+            supported = set(legacy_prior['priors'].get('categories', {}))
+            branch_classes = [
+                name for name in args.selected_classes if name in supported
+            ]
+        print(f"Classes: {branch_classes}")
         print(f"Feature ratio: {args.other_classes_feature_ratio}, Spatial ratio: {args.other_classes_spatial_ratio}, Semantic ratio: {args.other_classes_semantic_ratio}")
         print(f"{'='*60}")
 
@@ -645,26 +837,41 @@ def main():
             normed_point_features.clone(),  # Instance features for clustering
             normed_point_semantic_features.clone(),  # Semantic features for class filtering
             point_xyz.clone(),
-            label_features,
+            F.normalize(label_features.detach().cpu(), dim=-1, p=2)
+            if legacy_prior is not None else label_features,
             class_to_idx,
-            args.other_classes,
+            branch_classes,
             args,
-            device='cpu'
+            device='cpu',
+            legacy_prior=legacy_prior,
+            raw_point_features=point_features,
+            scale_gate=scale_gate,
+            mask_scales=legacy_mask_scales,
+            surface_density=legacy_surface_density,
+            semantic_vote_scores=legacy_semantic_vote_scores,
         )
 
         # ========== MERGE other_class instances into main labels (BEFORE filters) ==========
         if len(other_instance_to_class) > 0:
+            if legacy_prior is not None:
+                pending_legacy_branch = other_point_labels
+                pending_legacy_classes = other_instance_to_class
+                print(
+                    "Deferred legacy-prior proposals until after the global KNN; "
+                    "small proposals will not be voted away by global smoothing"
+                )
+            else:
             # Get max instance ID from main clustering (excluding -1 background)
-            max_main_instance_id = point_labels.max().item() if point_labels.max() >= 0 else -1
+                max_main_instance_id = point_labels.max().item() if point_labels.max() >= 0 else -1
 
             # Merge assigned instances (>= 0)
-            for other_instance_id in other_instance_to_class.keys():
-                new_instance_id = max_main_instance_id + 1 + other_instance_id
-                mask = (other_point_labels == other_instance_id)
-                point_labels[mask] = new_instance_id
+                for other_instance_id in other_instance_to_class.keys():
+                    new_instance_id = max_main_instance_id + 1 + other_instance_id
+                    mask = (other_point_labels == other_instance_id)
+                    point_labels[mask] = new_instance_id
 
-            print(f"Merged {len(other_instance_to_class)} other_class instances into main labels")
-            print(f"Total instances before filters: {len(torch.unique(point_labels))}")
+                print(f"Merged {len(other_instance_to_class)} other_class instances into main labels")
+                print(f"Total instances before filters: {len(torch.unique(point_labels))}")
 
         print(f"{'='*60}\n")
 
@@ -808,6 +1015,15 @@ def main():
         if args.k>0:
             point_labels = filter3d(point_xyz, point_labels, args.k)
         point_labels = filter_num(point_labels, min_num=10)
+        if pending_legacy_branch is not None:
+            max_main_instance_id = (
+                point_labels.max().item() if point_labels.max() >= 0 else -1
+            )
+            for branch_id in pending_legacy_classes:
+                mask = (pending_legacy_branch == branch_id) & (point_labels < 0)
+                if int(mask.sum()) < 3:
+                    continue
+                point_labels[mask] = max_main_instance_id + 1 + int(branch_id)
     end_time = datetime.now()
     elapsed_time = end_time - start_time
     print(f'{elapsed_time=}, {len(torch.unique(point_labels))=}') # 89, pytorch3d.ops.knn_points=49
@@ -948,6 +1164,8 @@ def main():
         run_info = {
             "seed": args.seed,
             "prior_mode": args.prior_mode,
+            "clustering_mode": args.clustering_mode,
+            "legacy_prior_mode": args.legacy_prior_mode,
             "prior_gate": args.prior_gate,
             "prior_shrink": args.prior_shrink,
             "scene_scale_m_per_unit": args.scene_scale_m_per_unit,
@@ -973,6 +1191,20 @@ def main():
             run_info,
             include_content_hash=not args.minimal_metadata,
         )
+        if legacy_prior is not None:
+            metadata.pop("content_sha256", None)
+            metadata["legacy_prior"] = {
+                "mode": args.legacy_prior_mode,
+                "surface_density_points_per_m2": legacy_surface_density,
+                "classes": getattr(args, '_legacy_prior_diagnostics', {}),
+            }
+            for values in metadata["instances"].values():
+                if args.legacy_prior_score == 'unit':
+                    values["score"] = 1.0
+                elif args.legacy_prior_score == 'vote':
+                    values["score"] = float(values["semantic_confidence"])
+                else:
+                    values["score"] = float(values["mean_assignment_confidence"])
         write_instance_metadata(args.prior_metadata_path, metadata)
     if(args.clean):
         if os.path.isdir(args.masks_path):

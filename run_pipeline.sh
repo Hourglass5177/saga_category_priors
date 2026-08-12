@@ -40,6 +40,10 @@ clustering_mode="legacy"
 class_prior_mode="uniform"
 category_priors=""
 class_first_config=""
+legacy_prior_config=""
+legacy_prior_mode="uniform"
+legacy_prior_score="unit"
+legacy_prior_semantic_source="gaussian"
 
 sam_checkpoint_path="${SCRIPT_DIR}/weights/sam_vit_h_4b8939.pth"
 groundingdino_checkpoint_path="${SCRIPT_DIR}/weights/groundingdino_swint_ogc.pth"
@@ -98,10 +102,14 @@ Category-prior postprocess options:
   --minimal-metadata             Omit per-artifact hashes in locked-run metadata
 
 Class-first postprocess options:
-  --clustering-mode MODE         legacy|class-first
+  --clustering-mode MODE         legacy|class-first|legacy-prior
   --class-prior-mode MODE        uniform|size|smooth|small|combined
   --category-priors PATH
   --class-first-config PATH
+  --legacy-prior-config PATH
+  --legacy-prior-mode MODE       uniform|size|smooth|small|combined
+  --legacy-prior-score MODE      unit|vote|assignment
+  --legacy-prior-semantic-source MODE  gaussian|vote
 
 Model options:
   --sam-checkpoint-path PATH
@@ -319,6 +327,10 @@ preflight_stage() {
                     require_file "$prior_config" "Category priors"
                     require_file "$prior_mapping_config" "Prior mapping config"
                 fi
+                if [[ "$clustering_mode" == "legacy-prior" ]]; then
+                    require_file "$category_priors" "Category priors"
+                    require_file "$legacy_prior_config" "Legacy-prior config"
+                fi
             fi
             ;;
         render)
@@ -416,6 +428,15 @@ run_postprocess() {
             --class-prior-mode "$class_prior_mode"
             --category-priors "$category_priors"
             --class-first-config "$class_first_config"
+        )
+    elif [[ "$clustering_mode" == "legacy-prior" ]]; then
+        prior_args+=(
+            --clustering-mode "$clustering_mode"
+            --category-priors "$category_priors"
+            --legacy-prior-config "$legacy_prior_config"
+            --legacy-prior-mode "$legacy_prior_mode"
+            --legacy-prior-score "$legacy_prior_score"
+            --legacy-prior-semantic-source "$legacy_prior_semantic_source"
         )
     fi
     "$python_bin" "${SCRIPT_DIR}/postprocess.py" \
@@ -582,6 +603,22 @@ while [[ $# -gt 0 ]]; do
             ;;
         --class-first-config)
             class_first_config="$2"
+            shift 2
+            ;;
+        --legacy-prior-config)
+            legacy_prior_config="$2"
+            shift 2
+            ;;
+        --legacy-prior-mode)
+            legacy_prior_mode="$2"
+            shift 2
+            ;;
+        --legacy-prior-score)
+            legacy_prior_score="$2"
+            shift 2
+            ;;
+        --legacy-prior-semantic-source)
+            legacy_prior_semantic_source="$2"
             shift 2
             ;;
         --sam-checkpoint-path)

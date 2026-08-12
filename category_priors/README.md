@@ -406,13 +406,77 @@ void/small-region ignore rules, and AP integration. The experimental unit is the
 physical scene. Seeds are technical replicates averaged inside each resample;
 they are never counted as independent scenes.
 
-## Class-first recovery workflow
+## Proposal-first category priors (current workflow)
 
-This is the direct recovery of the teacher/source-refactor pipeline: 32-way
-top-1 semantic competition, clustering only `selected_classes`, then class-local
-HDBSCAN, KNN and SOR. It reuses existing 3DGS/feature assets and runs
-**postprocess only**: it does not train, create artifact hashes, or enter the B2
-global-first overlay.
+The current experiment keeps the validated a800 legacy pipeline as its
+backbone: global instance proposals, filtering, and 2D semantic/background
+voting remain unchanged. Category branches add proposals only to points left
+unassigned by the global path. They never overwrite a global proposal and
+never smooth across semantic classes. The five conditions share this exact
+structure; only the train-derived category parameters differ:
+
+- `L1-uniform`: fixed category parameters;
+- `D-size`: category size controls physical spatial scaling and the scale gate;
+- `D-smooth`: boundary statistics select a physical within-class vote radius;
+- `D-small`: expected scene support controls sampled-domain cluster size and a
+  conservative multi-anchor noise rescue;
+- `D-combined`: enables all three mechanisms.
+
+All runs are postprocess-only and reuse the existing 3DGS, SAGA features,
+masks, cameras, and GT. The runner creates no schedule, lock, cache, or hash.
+First write the readable parameter table:
+
+```bash
+python -m category_priors build-prior-v2-params \
+  --category-priors artifacts/category_priors.json \
+  --legacy-prior-config category_priors/default_legacy_prior_config.json \
+  --output artifacts/legacy_prior_params.json
+```
+
+Run the two-scene smoke test with the uniform and combined conditions:
+
+```bash
+python -m category_priors run-prior-v2 \
+  --scene-manifest artifacts/scene_runtime_manifest.json \
+  --output-root runs/prior-v2-smoke \
+  --category-priors artifacts/category_priors.json \
+  --legacy-prior-config category_priors/default_legacy_prior_config.json \
+  --scene scene0231_00 --scene scene0011_00 \
+  --condition L1-uniform --condition D-combined --seed 42
+
+python -m category_priors evaluate-prior-v2 \
+  --scene-manifest artifacts/scene_runtime_manifest.json \
+  --gt-dir artifacts/gt_val_tune \
+  --output-root runs/prior-v2-smoke \
+  --scene scene0231_00 --scene scene0011_00 \
+  --condition L1-uniform --condition D-combined --seed 42 \
+  --reference L1-uniform --treatment D-combined \
+  --metrics-output artifacts/prior_v2_smoke_metrics.parquet \
+  --analysis-output artifacts/prior_v2_smoke_analysis.json \
+  --bootstrap-samples 1000 --split val-tune-smoke
+```
+
+Before tuning priors, use `diagnose-backbone` on existing legacy and failed
+class-first outputs. It reports semantic coverage, GT/prediction instance
+ratio, proposal recall, split/merge counts, and score/IoU correlation. The
+eight-scene structural target is to recover near the existing B0/B1 AP and
+coverage range; a tiny improvement over the failed class-first score is not a
+success criterion.
+
+Then run the five conditions on the existing 24 tune scenes at seed 42. Only
+when a data-driven condition beats `L1-uniform` is it paired with the uniform
+condition at seeds 3407 and 20260804. A positive three-seed mean with at least
+two positive seed differences advances to the existing 48-scene assets. No
+scene is downloaded or retrained.
+
+## Deprecated class-first diagnostic workflow
+
+This workflow is retained only to reproduce and diagnose the failed
+`source/refactor` experiment. It is **not** the teacher's validated a800
+baseline: its hard 32-way semantic split, destructive SOR, and class-local
+propagation produced severe under-coverage and over-segmentation. Do not use it
+as the performance backbone for category-prior experiments. It still reuses
+existing assets and remains useful for failure analysis.
 
 First materialize the readable 20-class parameter table. The default config is
 `category_priors/default_class_first_config.json`; the output contains the
