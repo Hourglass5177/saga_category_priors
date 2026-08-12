@@ -665,8 +665,9 @@ done
 
 resolve_defaults
 [[ "$feature_iterations" =~ ^[0-9]+$ ]] || err "--feature-iterations must be nonnegative"
-[[ "$clustering_mode" == "legacy" || "$clustering_mode" == "class-first" ]] \
-    || err "--clustering-mode must be legacy or class-first"
+[[ "$clustering_mode" == "legacy" || "$clustering_mode" == "class-first" \
+    || "$clustering_mode" == "legacy-prior" ]] \
+    || err "--clustering-mode must be legacy, class-first, or legacy-prior"
 if [[ "$clustering_mode" == "class-first" ]]; then
     case "$class_prior_mode" in
         uniform|size|smooth|small|combined) ;;
