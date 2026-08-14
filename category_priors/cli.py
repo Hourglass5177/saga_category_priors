@@ -26,6 +26,7 @@ from .teacher_prior_runner import (
     TEACHER_PRIOR_CONDITIONS,
     execute_teacher_prior_runs,
 )
+from .v3_stage0 import prepare_v3_stage0
 from .download import (
     MINIMAL_FILE_TYPES,
     download_scannet_saga_scenes,
@@ -668,6 +669,22 @@ def command_diagnose_backbone(args: argparse.Namespace) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+def command_prepare_v3_stage0(args: argparse.Namespace) -> None:
+    payload = prepare_v3_stage0(
+        locked_metrics_path=args.locked_metrics,
+        train_instance_stats_path=args.train_instance_stats,
+        tune_scene_manifest_path=args.tune_scene_manifest,
+        tune_gt_dir=args.tune_gt_dir,
+        taxonomy=load_taxonomy(args.taxonomy),
+        history_output=args.history_output,
+        size_bins_output=args.size_bins_output,
+        diagnostic_scenes_output=args.diagnostic_scenes_output,
+        diagnostic_budget=args.diagnostic_budget,
+        target_small_per_class=args.target_small_per_class,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
 def command_evaluate_seed_audit(args: argparse.Namespace) -> None:
     taxonomy = load_taxonomy(args.taxonomy)
     evaluate_tune_seed_execution(
@@ -1248,6 +1265,22 @@ def build_parser() -> argparse.ArgumentParser:
     diagnose_backbone.add_argument("--radius-m", type=float, default=0.05)
     diagnose_backbone.add_argument("--min-region-size", type=int, default=100)
     diagnose_backbone.set_defaults(func=command_diagnose_backbone)
+
+    prepare_v3_stage0 = subparsers.add_parser(
+        "prepare-v3-stage0",
+        help="Freeze V3 history anchors, train-only physical size bins, and GT-only diagnostic scenes",
+    )
+    prepare_v3_stage0.add_argument("--locked-metrics", required=True)
+    prepare_v3_stage0.add_argument("--train-instance-stats", required=True)
+    prepare_v3_stage0.add_argument("--tune-scene-manifest", required=True)
+    prepare_v3_stage0.add_argument("--tune-gt-dir", required=True)
+    prepare_v3_stage0.add_argument("--taxonomy")
+    prepare_v3_stage0.add_argument("--history-output", required=True)
+    prepare_v3_stage0.add_argument("--size-bins-output", required=True)
+    prepare_v3_stage0.add_argument("--diagnostic-scenes-output", required=True)
+    prepare_v3_stage0.add_argument("--diagnostic-budget", type=int, default=8)
+    prepare_v3_stage0.add_argument("--target-small-per-class", type=int, default=2)
+    prepare_v3_stage0.set_defaults(func=command_prepare_v3_stage0)
 
     evaluate_seed_audit = subparsers.add_parser(
         "evaluate-seed-audit",
