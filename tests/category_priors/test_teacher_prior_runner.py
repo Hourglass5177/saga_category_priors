@@ -211,9 +211,11 @@ def test_cli_exposes_runner_and_evaluator_without_branch_flag() -> None:
             "--output",
             "params.json",
             "--branch-preservation",
+            "--restore-after-global-filter",
         ]
     )
     assert build.branch_preservation is True
+    assert build.restore_after_global_filter is True
     args = parser.parse_args(
         [
             "run-teacher-prior",

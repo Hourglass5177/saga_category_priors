@@ -100,7 +100,8 @@ def _materialized_row(
 
 
 def materialize_teacher_prior(
-    priors: Mapping[str, Any], *, branch_preservation: bool = False
+    priors: Mapping[str, Any], *, branch_preservation: bool = False,
+    restore_after_global_filter: bool = False,
 ) -> dict[str, Any]:
     """Materialize one mode-independent table from train-only shrunk priors."""
     global_diag_m, global_area_m2, global_boundary = _statistics(priors["global"])
@@ -131,6 +132,7 @@ def materialize_teacher_prior(
     return {
         "kind": "teacher_category_params",
         "branch_preservation": bool(branch_preservation),
+        "restore_after_global_filter": bool(restore_after_global_filter),
         "global": global_row,
         "classes": classes,
     }

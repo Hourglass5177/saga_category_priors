@@ -225,6 +225,9 @@ def test_top1_and_preserved_branches_are_independent_of_category_order() -> None
     assert materialize_teacher_prior(
         _priors(), branch_preservation=True
     )["branch_preservation"] is True
+    assert materialize_teacher_prior(
+        _priors(), restore_after_global_filter=True
+    )["restore_after_global_filter"] is True
     semantic = np.asarray([[1.0, 0.0], [0.0, 1.0], [0.8, 0.2]])
     label_features = np.eye(2)
     forward = exclusive_top1_masks(semantic, label_features, [0, 1], 0.5)

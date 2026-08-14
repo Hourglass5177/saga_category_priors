@@ -917,6 +917,10 @@ def main():
         teacher_prior is not None
         and teacher_prior["table"].get("branch_preservation", False)
     )
+    teacher_restore_after_global_filter = bool(
+        teacher_prior is not None
+        and teacher_prior["table"].get("restore_after_global_filter", False)
+    )
     legacy_semantic_vote_scores = None
     if legacy_prior is not None and args.legacy_prior_semantic_source == 'vote':
         gaussian_votes = torch.zeros(
@@ -1183,6 +1187,9 @@ def main():
             point_labels = filter3d(point_xyz, point_labels, args.k)
         teacher_after_knn = point_labels.detach().cpu().clone()
         point_labels = filter_num(point_labels, min_num=10)
+        if teacher_restore_after_global_filter and teacher_merged_classes:
+            restore_mask = teacher_merged_membership >= 0
+            point_labels[restore_mask] = teacher_merged_membership[restore_mask]
         if pending_legacy_branch is not None:
             max_main_instance_id = (
                 point_labels.max().item() if point_labels.max() >= 0 else -1
@@ -1463,6 +1470,9 @@ def main():
             metadata["teacher_prior"] = {
                 "mode": args.teacher_prior_mode,
                 "branch_preservation": teacher_branch_preservation,
+                "restore_after_global_filter": (
+                    teacher_restore_after_global_filter
+                ),
                 "classes": (
                     getattr(args, '_teacher_prior_diagnostics', {})
                     if teacher_prior is not None

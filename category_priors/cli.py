@@ -559,6 +559,7 @@ def command_build_teacher_category_params(args: argparse.Namespace) -> None:
     payload = materialize_teacher_prior(
         load_json(args.category_priors),
         branch_preservation=args.branch_preservation,
+        restore_after_global_filter=args.restore_after_global_filter,
     )
     write_json(args.output, payload)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -1116,6 +1117,9 @@ def build_parser() -> argparse.ArgumentParser:
     build_teacher_params.add_argument("--category-priors", required=True)
     build_teacher_params.add_argument("--output", required=True)
     build_teacher_params.add_argument("--branch-preservation", action="store_true")
+    build_teacher_params.add_argument(
+        "--restore-after-global-filter", action="store_true"
+    )
     build_teacher_params.set_defaults(func=command_build_teacher_category_params)
 
     evaluate_teacher_prior = subparsers.add_parser(
