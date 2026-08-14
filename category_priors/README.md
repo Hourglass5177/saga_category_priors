@@ -12,6 +12,47 @@ The independent experimental unit is the physical scene, not a rendered view,
 Gaussian, point, or repeated scan. The confirmatory analysis therefore resamples
 physical-scene groups.
 
+## Current teacher-style experiment
+
+The active lightweight experiment keeps the trained SAGA assets and changes only
+postprocessing. `original` means the `source/a800` function path on the current
+32-class label-feature asset: its compatible B1 route is the eight classes
+`switch, socket, book, remote, key, cup, vase, phone`. The five registered
+teacher conditions (`U0-all-uniform`, `D-size`, `D-smooth`, `D-small`, and
+`D-combined`) instead run the same class branch over the fixed SAGA20 evaluation
+taxonomy. Extra entries in the 32-class codebook do not become teacher branches.
+
+Stage 1 first materializes the table without branch preservation to measure the
+unaltered a800 branch's order sensitivity, post-filter survival, and vote
+agreement. If any preregistered threshold fires, rematerialize the one formal
+table with `branch_preservation=True`; that defers every U0/D class branch until
+after the unchanged legacy global KNN and 10-point filter. All subsequent U0/D
+runs must use the same selected table.
+
+```bash
+python -m category_priors build-teacher-category-params \
+  --category-priors artifacts/category_priors.json \
+  --output artifacts/teacher_category_params_unprotected.json
+
+# Run the Stage-1 diagnostics, then use this only if a preservation threshold fires.
+python -m category_priors build-teacher-category-params \
+  --category-priors artifacts/category_priors.json \
+  --output artifacts/teacher_category_params.json \
+  --branch-preservation
+
+python -m category_priors run-teacher-prior \
+  --scene-manifest artifacts/scene_runtime_smoke2.json \
+  --output-root runs/teacher-prior-smoke2 \
+  --teacher-category-params artifacts/teacher_category_params.json \
+  --condition U0-all-uniform --condition D-combined --seed 42
+```
+
+U0 and every D condition must use that same materialized file. They therefore
+share semantic selection, sampling, feature weights, explicit
+`min_samples=3`, and branch preservation; a D condition changes only its named
+train-statistics-derived factor. No scene download or model training belongs to
+this workflow.
+
 ## Environment
 
 Keep the CPU statistics environment separate from the CUDA SAGA environment:

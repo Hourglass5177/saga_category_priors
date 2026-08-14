@@ -44,6 +44,8 @@ legacy_prior_config=""
 legacy_prior_mode="uniform"
 legacy_prior_score="unit"
 legacy_prior_semantic_source="gaussian"
+teacher_prior_mode="original"
+teacher_category_params=""
 
 sam_checkpoint_path="${SCRIPT_DIR}/weights/sam_vit_h_4b8939.pth"
 groundingdino_checkpoint_path="${SCRIPT_DIR}/weights/groundingdino_swint_ogc.pth"
@@ -110,6 +112,10 @@ Class-first postprocess options:
   --legacy-prior-mode MODE       uniform|size|smooth|small|combined
   --legacy-prior-score MODE      unit|vote|assignment
   --legacy-prior-semantic-source MODE  gaussian|vote
+
+Teacher-prior postprocess options:
+  --teacher-prior-mode MODE      off|original|all-uniform|size|smooth|small|combined
+  --teacher-category-params PATH Shared train-only category statistics/parameters
 
 Model options:
   --sam-checkpoint-path PATH
@@ -226,6 +232,8 @@ Resolved configuration:
   class_prior_mode: $class_prior_mode
   category_priors: $category_priors
   class_first_config: $class_first_config
+  teacher_prior_mode: $teacher_prior_mode
+  teacher_category_params: $teacher_category_params
   sam_checkpoint_path: $sam_checkpoint_path
   groundingdino_checkpoint_path: $groundingdino_checkpoint_path
   groundingdino_config_path: $groundingdino_config_path
@@ -331,6 +339,11 @@ preflight_stage() {
                     require_file "$category_priors" "Category priors"
                     require_file "$legacy_prior_config" "Legacy-prior config"
                 fi
+                case "$teacher_prior_mode" in
+                    all-uniform|size|smooth|small|combined)
+                        require_file "$teacher_category_params" "Teacher category parameters"
+                        ;;
+                esac
             fi
             ;;
         render)
@@ -406,6 +419,7 @@ run_postprocess() {
         --scene_scale_m_per_unit "$scene_scale_m_per_unit"
         --seed "$seed"
         --prior_metadata_path "$prior_metadata_path"
+        --teacher-prior-mode "$teacher_prior_mode"
     )
     if [[ "$prior_mode" != "off" ]]; then
         prior_args+=(
@@ -422,6 +436,11 @@ run_postprocess() {
     if [[ "$minimal_metadata" -eq 1 ]]; then
         prior_args+=(--minimal_metadata)
     fi
+    case "$teacher_prior_mode" in
+        all-uniform|size|smooth|small|combined)
+            prior_args+=(--teacher-category-params "$teacher_category_params")
+            ;;
+    esac
     if [[ "$clustering_mode" == "class-first" ]]; then
         prior_args+=(
             --clustering-mode "$clustering_mode"
@@ -621,6 +640,14 @@ while [[ $# -gt 0 ]]; do
             legacy_prior_semantic_source="$2"
             shift 2
             ;;
+        --teacher-prior-mode)
+            teacher_prior_mode="$2"
+            shift 2
+            ;;
+        --teacher-category-params)
+            teacher_category_params="$2"
+            shift 2
+            ;;
         --sam-checkpoint-path)
             sam_checkpoint_path="$2"
             shift 2
@@ -674,6 +701,10 @@ if [[ "$clustering_mode" == "class-first" ]]; then
         *) err "unsupported --class-prior-mode: $class_prior_mode" ;;
     esac
 fi
+case "$teacher_prior_mode" in
+    off|original|all-uniform|size|smooth|small|combined) ;;
+    *) err "unsupported --teacher-prior-mode: $teacher_prior_mode" ;;
+esac
 if [[ -z "$python_bin" ]]; then
     find_python
 else

@@ -68,7 +68,8 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
                           other_classes, args, device='cpu', legacy_prior=None,
                           raw_point_features=None, scale_gate=None,
                           mask_scales=(), surface_density=1.0,
-                          semantic_vote_scores=None):
+                          semantic_vote_scores=None, teacher_prior=None,
+                          exclusive_masks=None):
     """
     Perform semantic-guided clustering for 'other_classes' (small objects).
 
@@ -98,6 +99,11 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
     other_instance_to_class = {}
     current_instance_id = 0
     branch_diagnostics = {}
+    candidate_memberships = torch.zeros(N, dtype=torch.int32, device=device)
+    preserve_teacher_branch = bool(
+        teacher_prior is not None
+        and teacher_prior["table"].get("branch_preservation", False)
+    )
 
     # Normalize spatial coordinates
     min_val = torch.min(point_xyz, dim=0).values
@@ -115,7 +121,14 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
         # Step 1: Select points by semantic similarity (using semantic features)
         semantic_threshold = args.other_classes_similarity_threshold
         parameters = None
-        if legacy_prior is not None:
+        teacher_parameters = None
+        if teacher_prior is not None:
+            from category_priors.teacher_prior import resolve_teacher_parameters
+            teacher_parameters = resolve_teacher_parameters(
+                teacher_prior["table"], class_name, teacher_prior["mode"]
+            )
+            semantic_threshold = float(teacher_parameters["semantic_threshold"])
+        elif legacy_prior is not None:
             from category_priors.legacy_prior import resolve_class_parameters
             if semantic_vote_scores is not None:
                 preliminary_scores = semantic_vote_scores[:, class_idx]
@@ -133,7 +146,14 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
                 surface_density, mask_scales,
             )
             semantic_threshold = float(parameters["semantic_threshold"])
-        if semantic_vote_scores is not None:
+        if exclusive_masks is not None:
+            similarity_scores = torch.einsum(
+                'nc,c->n', point_semantic_features, label_features[class_idx]
+            )
+            selection_mask = torch.as_tensor(
+                exclusive_masks[class_idx], dtype=torch.bool, device=device
+            )
+        elif semantic_vote_scores is not None:
             similarity_scores = semantic_vote_scores[:, class_idx]
             selection_mask = similarity_scores >= semantic_threshold
         else:
@@ -141,23 +161,30 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
                 point_semantic_features, label_features, class_idx,
                 semantic_threshold, device
             )
+        candidate_memberships += selection_mask.to(torch.int32)
 
         num_selected = selection_mask.sum().item()
         print(f"  Selected {num_selected} points (similarity >= {semantic_threshold})")
 
         min_cluster_size = (
-            int(parameters["min_cluster_size"])
-            if parameters is not None else args.other_classes_min_cluster_size
+            int(teacher_parameters["min_cluster_size"])
+            if teacher_parameters is not None else (
+                int(parameters["min_cluster_size"])
+                if parameters is not None else args.other_classes_min_cluster_size
+            )
         )
         min_samples = (
-            int(parameters["min_samples"])
-            if parameters is not None else min_cluster_size
+            int(teacher_parameters["min_samples"])
+            if teacher_parameters is not None else (
+                int(parameters["min_samples"])
+                if parameters is not None else min_cluster_size
+            )
         )
         if num_selected < min_cluster_size:
             print(f"  Skipping: insufficient points")
             branch_diagnostics[class_name] = {
                 "candidate_points": int(num_selected), "status": "insufficient_points",
-                "parameters": parameters,
+                "parameters": teacher_parameters if teacher_parameters is not None else parameters,
             }
             continue
 
@@ -177,7 +204,15 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
                 dim=-1,
                 p=2,
             )
-        if parameters is not None and parameters["spatial_scale_m"] is not None:
+        selected_xyz_m = None
+        if teacher_parameters is not None:
+            selected_xyz_m = (
+                point_xyz[selection_mask] * float(args.scene_scale_m_per_unit)
+            )
+            selected_xyz = selected_xyz_m / max(
+                float(teacher_parameters["spatial_scale_m"]), 1e-12
+            )
+        elif parameters is not None and parameters["spatial_scale_m"] is not None:
             selected_xyz = (
                 point_xyz[selection_mask]
                 * float(args.scene_scale_m_per_unit)
@@ -188,10 +223,24 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
         selected_similarities = similarity_scores[selection_mask]
 
         sample_size = (
-            int(parameters["sample_count"])
-            if parameters is not None else min(num_selected, args.other_classes_sample_num)
+            min(num_selected, int(teacher_parameters["sample_num"]))
+            if teacher_parameters is not None else (
+                int(parameters["sample_count"])
+                if parameters is not None else min(num_selected, args.other_classes_sample_num)
+            )
         )
-        sampled_indices = torch.randperm(num_selected, device=device)[:sample_size]
+        if teacher_parameters is not None and exclusive_masks is not None:
+            class_seed = int(args.seed) + sum(
+                (index + 1) * ord(character)
+                for index, character in enumerate(class_name)
+            )
+            generator = torch.Generator(device=device)
+            generator.manual_seed(class_seed)
+            sampled_indices = torch.randperm(
+                num_selected, device=device, generator=generator
+            )[:sample_size]
+        else:
+            sampled_indices = torch.randperm(num_selected, device=device)[:sample_size]
         sampled_features = selected_features[sampled_indices]
         sampled_xyz = selected_xyz[sampled_indices]
         sampled_similarities = selected_similarities[sampled_indices]
@@ -206,6 +255,8 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
         spatial_dist = torch.clamp(
             torch.norm(sampled_xyz[:, None, :] - sampled_xyz[None, :, :], dim=-1), 0
         )
+        if teacher_parameters is not None:
+            spatial_dist = torch.clamp(spatial_dist, max=1.0)
 
         # Semantic distance: 1 - similarity to class feature (lower is better)
         # Both points should be similar to the class semantic feature
@@ -217,22 +268,40 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
         # Normalize distances to [0, 1] range
         if instance_feature_dist.max() > 0:
             instance_feature_dist = instance_feature_dist / (instance_feature_dist.max() + 1e-8)
-        if spatial_dist.max() > 0:
+        if teacher_parameters is None and spatial_dist.max() > 0:
             spatial_dist = spatial_dist / (spatial_dist.max() + 1e-8)
 
         # Hybrid distance with three components
-        hybrid_distance = (args.other_classes_feature_ratio * instance_feature_dist +
-                          args.other_classes_spatial_ratio * spatial_dist +
-                          args.other_classes_semantic_ratio * semantic_dist)
+        feature_ratio = (
+            float(teacher_parameters["feature_ratio"])
+            if teacher_parameters is not None else args.other_classes_feature_ratio
+        )
+        spatial_ratio = (
+            float(teacher_parameters["spatial_ratio"])
+            if teacher_parameters is not None else args.other_classes_spatial_ratio
+        )
+        semantic_ratio = (
+            float(teacher_parameters["semantic_ratio"])
+            if teacher_parameters is not None else args.other_classes_semantic_ratio
+        )
+        hybrid_distance = (feature_ratio * instance_feature_dist +
+                          spatial_ratio * spatial_dist +
+                          semantic_ratio * semantic_dist)
 
         # Step 4: HDBSCAN clustering
-        clusterer = HDBSCAN(
-            min_cluster_size=min_cluster_size,
-            min_samples=min_samples,
-            cluster_selection_epsilon=0.01,
-            allow_single_cluster=False,
-            metric='precomputed'
-        )
+        if teacher_parameters is not None:
+            from category_priors.teacher_prior import build_teacher_hdbscan
+            clusterer = build_teacher_hdbscan(
+                HDBSCAN, min_cluster_size=min_cluster_size, min_samples=min_samples
+            )
+        else:
+            clusterer = HDBSCAN(
+                min_cluster_size=min_cluster_size,
+                min_samples=min_samples,
+                cluster_selection_epsilon=0.01,
+                allow_single_cluster=False,
+                metric='precomputed'
+            )
         cluster_labels = clusterer.fit_predict(hybrid_distance.numpy().astype(np.float64))
 
         num_clusters = len([l for l in np.unique(cluster_labels) if l >= 0])
@@ -244,7 +313,8 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
                 "candidate_points": int(num_selected),
                 "sampled_points": int(sample_size),
                 "hdbscan_noise_points": int((cluster_labels < 0).sum()),
-                "status": "no_clusters", "parameters": parameters,
+                "status": "no_clusters",
+                "parameters": teacher_parameters if teacher_parameters is not None else parameters,
             }
             continue
 
@@ -270,21 +340,40 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
         selected_xyz_sim = torch.clamp(
             torch.exp(-torch.norm(selected_xyz[:, None, :] - xyz_cluster_centers[None, :, :], dim=-1)), 0, 1
         )
-        selected_hybrid_sim = (args.other_classes_feature_ratio * selected_feature_sim +
-                              (1 - args.other_classes_feature_ratio) * selected_xyz_sim)
+        selected_hybrid_sim = (feature_ratio * selected_feature_sim +
+                              (1 - feature_ratio) * selected_xyz_sim)
         selected_confidence = torch.softmax(selected_hybrid_sim * 10, dim=-1)
         selected_mask, selected_cluster_labels = selected_confidence.max(dim=-1)
 
         # Apply threshold
         assignment_threshold = (
-            float(parameters["assignment_threshold"])
-            if parameters is not None else args.instance_threshold
+            float(teacher_parameters["assignment_threshold"])
+            if teacher_parameters is not None else (
+                float(parameters["assignment_threshold"])
+                if parameters is not None else args.instance_threshold
+            )
         )
         below_threshold = selected_mask < assignment_threshold
         selected_cluster_labels[below_threshold] = -1
 
         rescued = 0
-        if parameters is not None:
+        if teacher_parameters is not None and preserve_teacher_branch:
+            from category_priors.teacher_prior import (
+                class_local_knn,
+                filter_small_class_clusters,
+                rescue_same_class_noise,
+            )
+            local = selected_cluster_labels.detach().cpu().numpy()
+            selected_xyz_m_np = selected_xyz_m.detach().cpu().numpy()
+            local = class_local_knn(
+                local, selected_xyz_m_np, int(teacher_parameters["knn_k"])
+            )
+            local = filter_small_class_clusters(local, min_cluster_size)
+            local, rescued = rescue_same_class_noise(
+                local, selected_xyz_m_np, teacher_parameters["rescue_radius_m"]
+            )
+            selected_cluster_labels = torch.as_tensor(local, device=device)
+        elif parameters is not None:
             from category_priors.legacy_prior import radius_vote_labels, rescue_halo
             selected_xyz_m = (
                 point_xyz[selection_mask].detach().cpu().numpy()
@@ -330,11 +419,20 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
             "hdbscan_noise_points": int((cluster_labels < 0).sum()),
             "rescued_points": int(rescued),
             "final_instances": int(sum(1 for value in other_instance_to_class.values() if value == class_name)),
-            "status": "complete", "parameters": parameters,
+            "status": "complete",
+            "parameters": teacher_parameters if teacher_parameters is not None else parameters,
         }
 
     print(f"\nSemantic-guided clustering complete: {current_instance_id} instances created")
-    args._legacy_prior_diagnostics = branch_diagnostics
+    branch_diagnostics["__summary__"] = {
+        "candidate_points": int((candidate_memberships > 0).sum()),
+        "candidate_memberships": int(candidate_memberships.sum()),
+        "overlap_points": int((candidate_memberships > 1).sum()),
+    }
+    if teacher_prior is not None:
+        args._teacher_prior_diagnostics = branch_diagnostics
+    else:
+        args._legacy_prior_diagnostics = branch_diagnostics
     return other_point_labels, other_instance_to_class
 
 
@@ -504,6 +602,10 @@ def main():
     parser.add_argument("--legacy-prior-semantic-source", choices=[
         'gaussian', 'vote'
     ], default='gaussian')
+    parser.add_argument("--teacher-prior-mode", choices=[
+        'off', 'original', 'all-uniform', 'size', 'smooth', 'small', 'combined'
+    ], default='original')
+    parser.add_argument("--teacher-category-params", type=str, default=None)
     args = parser.parse_args(sys.argv[1:])
     prior_resolver = None
     if args.prior_mode != 'off':
@@ -555,6 +657,25 @@ def main():
         }
         if not args.prior_metadata_path:
             args.prior_metadata_path = f"{args.json_path}.metadata.json"
+    teacher_prior = None
+    if args.teacher_prior_mode in {'all-uniform', 'size', 'smooth', 'small', 'combined'}:
+        if args.clustering_mode != 'legacy' or args.prior_mode != 'off':
+            parser.error(
+                "data-driven --teacher-prior-mode requires the unchanged legacy main path"
+            )
+        if not args.teacher_category_params:
+            parser.error(
+                "data-driven --teacher-prior-mode requires --teacher-category-params"
+            )
+        if args.scene_scale_m_per_unit <= 0:
+            parser.error(
+                "data-driven --teacher-prior-mode requires positive --scene_scale_m_per_unit"
+            )
+        from category_priors.teacher_prior import load_teacher_category_params
+        teacher_prior = {
+            "table": load_teacher_category_params(args.teacher_category_params),
+            "mode": args.teacher_prior_mode,
+        }
     bg_color = torch.tensor([1,1,1] if args.white_background else [0, 0, 0], dtype=torch.float32, device="cuda")
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -782,6 +903,19 @@ def main():
     # ========== SEMANTIC-GUIDED CLUSTERING (for other_classes) ==========
     pending_legacy_branch = None
     pending_legacy_classes = {}
+    pending_teacher_branch = None
+    pending_teacher_classes = {}
+    teacher_preservation = None
+    teacher_preserved_classes = {}
+    teacher_merged_membership = torch.full(
+        (len(point_xyz),), -1, dtype=torch.long
+    )
+    teacher_merged_classes = {}
+    teacher_post_filter = {}
+    teacher_branch_preservation = bool(
+        teacher_prior is not None
+        and teacher_prior["table"].get("branch_preservation", False)
+    )
     legacy_semantic_vote_scores = None
     if legacy_prior is not None and args.legacy_prior_semantic_source == 'vote':
         gaussian_votes = torch.zeros(
@@ -816,6 +950,7 @@ def main():
         ).float()
     if (
         prior_resolver is None
+        and args.teacher_prior_mode != 'off'
         and not args.disable_other_classes
         and label_features is not None
         and class_to_idx is not None
@@ -829,6 +964,23 @@ def main():
             branch_classes = [
                 name for name in args.selected_classes if name in supported
             ]
+        elif teacher_prior is not None:
+            from category_priors.teacher_prior import saga20_branch_classes
+            branch_classes = list(saga20_branch_classes(class_to_idx))
+        teacher_exclusive_masks = None
+        normalized_label_features = label_features
+        if teacher_prior is not None:
+            normalized_label_features = F.normalize(
+                label_features.detach().cpu(), dim=-1, p=2
+            )
+            if teacher_branch_preservation:
+                from category_priors.teacher_prior import exclusive_top1_masks
+                teacher_exclusive_masks = exclusive_top1_masks(
+                    normed_point_semantic_features.numpy(),
+                    normalized_label_features.numpy(),
+                    [class_to_idx[name] for name in branch_classes],
+                    threshold=0.7,
+                )
         print(f"Classes: {branch_classes}")
         print(f"Feature ratio: {args.other_classes_feature_ratio}, Spatial ratio: {args.other_classes_spatial_ratio}, Semantic ratio: {args.other_classes_semantic_ratio}")
         print(f"{'='*60}")
@@ -838,7 +990,7 @@ def main():
             normed_point_semantic_features.clone(),  # Semantic features for class filtering
             point_xyz.clone(),
             F.normalize(label_features.detach().cpu(), dim=-1, p=2)
-            if legacy_prior is not None else label_features,
+            if legacy_prior is not None else normalized_label_features,
             class_to_idx,
             branch_classes,
             args,
@@ -849,6 +1001,8 @@ def main():
             mask_scales=legacy_mask_scales,
             surface_density=legacy_surface_density,
             semantic_vote_scores=legacy_semantic_vote_scores,
+            teacher_prior=teacher_prior,
+            exclusive_masks=teacher_exclusive_masks,
         )
 
         # ========== MERGE other_class instances into main labels (BEFORE filters) ==========
@@ -860,6 +1014,13 @@ def main():
                     "Deferred legacy-prior proposals until after the global KNN; "
                     "small proposals will not be voted away by global smoothing"
                 )
+            elif teacher_branch_preservation:
+                pending_teacher_branch = other_point_labels
+                pending_teacher_classes = other_instance_to_class
+                print(
+                    f"Deferred {len(pending_teacher_classes)} teacher-prior "
+                    "instances until after legacy global filtering"
+                )
             else:
             # Get max instance ID from main clustering (excluding -1 background)
                 max_main_instance_id = point_labels.max().item() if point_labels.max() >= 0 else -1
@@ -869,6 +1030,11 @@ def main():
                     new_instance_id = max_main_instance_id + 1 + other_instance_id
                     mask = (other_point_labels == other_instance_id)
                     point_labels[mask] = new_instance_id
+                    if bool(mask.any()):
+                        teacher_merged_membership[mask] = new_instance_id
+                        teacher_merged_classes[new_instance_id] = (
+                            other_instance_to_class[other_instance_id]
+                        )
 
                 print(f"Merged {len(other_instance_to_class)} other_class instances into main labels")
                 print(f"Total instances before filters: {len(torch.unique(point_labels))}")
@@ -1024,6 +1190,43 @@ def main():
                 if int(mask.sum()) < 3:
                     continue
                 point_labels[mask] = max_main_instance_id + 1 + int(branch_id)
+        if pending_teacher_branch is not None:
+            next_instance_id = (
+                int(point_labels.max()) + 1 if bool((point_labels >= 0).any()) else 0
+            )
+            ordered_branches = sorted(
+                pending_teacher_classes.items(), key=lambda item: (item[1], item[0])
+            )
+            for branch_id, branch_class in ordered_branches:
+                mask = pending_teacher_branch == int(branch_id)
+                if not bool(mask.any()):
+                    continue
+                point_labels[mask] = next_instance_id
+                teacher_merged_membership[mask] = next_instance_id
+                teacher_merged_classes[next_instance_id] = branch_class
+                teacher_preserved_classes[next_instance_id] = branch_class
+                next_instance_id += 1
+            teacher_preservation = teacher_merged_membership.clone()
+        merged_points = int((teacher_merged_membership >= 0).sum())
+        retained_points = 0
+        survived_instances = 0
+        for merged_id in teacher_merged_classes:
+            retained = (
+                (teacher_merged_membership == merged_id)
+                & (point_labels == merged_id)
+            )
+            retained_count = int(retained.sum())
+            retained_points += retained_count
+            survived_instances += int(retained_count > 0)
+        teacher_post_filter = {
+            "merged_instances": len(teacher_merged_classes),
+            "merged_points": merged_points,
+            "survived_instances": survived_instances,
+            "retained_points": retained_points,
+            "point_survival_rate": (
+                retained_points / merged_points if merged_points else None
+            ),
+        }
     end_time = datetime.now()
     elapsed_time = end_time - start_time
     print(f'{elapsed_time=}, {len(torch.unique(point_labels))=}') # 89, pytorch3d.ops.knn_points=49
@@ -1149,6 +1352,21 @@ def main():
         return merged
     bbox = get_bbox(point_labels.cpu(), point_xyz, is_big_gaussian)
     clazz = {instance: get_class(args.classes, ratio) for instance, ratio in instance_ratio.items()}
+    teacher_vote_class_mismatches = 0
+    teacher_vote_class_matches = 0
+    teacher_vote_class_total = 0
+    for instance_id, branch_class in teacher_merged_classes.items():
+        if instance_id not in clazz:
+            continue
+        teacher_vote_class_total += 1
+        if clazz[instance_id] == branch_class:
+            teacher_vote_class_matches += 1
+    for instance_id, branch_class in teacher_preserved_classes.items():
+        if instance_id not in clazz:
+            continue
+        if clazz[instance_id] != branch_class:
+            teacher_vote_class_mismatches += 1
+        clazz[instance_id] = branch_class
     output = dict()
     output['point_labels'] = point_labels.tolist()
     output['is_big_gaussian'] = is_big_gaussian.tolist()
@@ -1165,6 +1383,7 @@ def main():
             "seed": args.seed,
             "prior_mode": args.prior_mode,
             "clustering_mode": args.clustering_mode,
+            "teacher_prior_mode": args.teacher_prior_mode,
             "legacy_prior_mode": args.legacy_prior_mode,
             "prior_gate": args.prior_gate,
             "prior_shrink": args.prior_shrink,
@@ -1191,6 +1410,25 @@ def main():
             run_info,
             include_content_hash=not args.minimal_metadata,
         )
+        for instance_id, branch_class in teacher_preserved_classes.items():
+            values = metadata["instances"].get(str(instance_id))
+            if values is None:
+                continue
+            class_index = class_to_idx[branch_class]
+            ratio = instance_ratio.get(instance_id)
+            semantic_confidence = (
+                float(ratio[class_index])
+                if ratio is not None and len(ratio) > class_index else 0.0
+            )
+            values["class"] = branch_class
+            values["semantic_confidence"] = semantic_confidence
+            values["score"] = float(np.clip(
+                semantic_confidence * float(values["mean_assignment_confidence"]),
+                0.0,
+                1.0,
+            ))
+        if teacher_preserved_classes:
+            metadata.pop("content_sha256", None)
         if legacy_prior is not None:
             metadata.pop("content_sha256", None)
             metadata["legacy_prior"] = {
@@ -1205,6 +1443,39 @@ def main():
                     values["score"] = float(values["semantic_confidence"])
                 else:
                     values["score"] = float(values["mean_assignment_confidence"])
+        if args.clustering_mode == 'legacy':
+            metadata["teacher_prior"] = {
+                "mode": args.teacher_prior_mode,
+                "branch_preservation": teacher_branch_preservation,
+                "classes": (
+                    getattr(args, '_teacher_prior_diagnostics', {})
+                    if teacher_prior is not None
+                    else getattr(args, '_legacy_prior_diagnostics', {})
+                ),
+                "instance_id_to_branch_class": {
+                    str(key): value for key, value in teacher_merged_classes.items()
+                },
+                "post_global_filter": teacher_post_filter,
+                "vote_class_matches": teacher_vote_class_matches,
+                "vote_class_total": teacher_vote_class_total,
+                "vote_class_agreement": (
+                    teacher_vote_class_matches / teacher_vote_class_total
+                    if teacher_vote_class_total else None
+                ),
+                "preserved_instances": len(teacher_preserved_classes),
+                "preserved_points": (
+                    int((teacher_preservation >= 0).sum())
+                    if teacher_preservation is not None else 0
+                ),
+                "vote_class_mismatches_overridden": teacher_vote_class_mismatches,
+                "final_instances": len(output['instances']),
+                "assigned_points": int((point_labels >= 0).sum()),
+                "total_points": len(point_labels),
+                "coverage": (
+                    float((point_labels >= 0).sum()) / len(point_labels)
+                    if len(point_labels) else 0.0
+                ),
+            }
         write_instance_metadata(args.prior_metadata_path, metadata)
     if(args.clean):
         if os.path.isdir(args.masks_path):
