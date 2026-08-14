@@ -912,6 +912,7 @@ def main():
     )
     teacher_merged_classes = {}
     teacher_post_filter = {}
+    teacher_after_knn = None
     teacher_branch_preservation = bool(
         teacher_prior is not None
         and teacher_prior["table"].get("branch_preservation", False)
@@ -1180,6 +1181,7 @@ def main():
     else:
         if args.k>0:
             point_labels = filter3d(point_xyz, point_labels, args.k)
+        teacher_after_knn = point_labels.detach().cpu().clone()
         point_labels = filter_num(point_labels, min_num=10)
         if pending_legacy_branch is not None:
             max_main_instance_id = (
@@ -1207,20 +1209,34 @@ def main():
                 teacher_preserved_classes[next_instance_id] = branch_class
                 next_instance_id += 1
             teacher_preservation = teacher_merged_membership.clone()
+            teacher_after_knn = point_labels.detach().cpu().clone()
+        def teacher_stage_survival(labels):
+            labels = labels.detach().cpu()
+            retained_points = 0
+            survived_instances = 0
+            for merged_id in teacher_merged_classes:
+                retained = (
+                    (teacher_merged_membership == merged_id)
+                    & (labels == merged_id)
+                )
+                retained_count = int(retained.sum())
+                retained_points += retained_count
+                survived_instances += int(retained_count > 0)
+            return survived_instances, retained_points
+
         merged_points = int((teacher_merged_membership >= 0).sum())
-        retained_points = 0
-        survived_instances = 0
-        for merged_id in teacher_merged_classes:
-            retained = (
-                (teacher_merged_membership == merged_id)
-                & (point_labels == merged_id)
-            )
-            retained_count = int(retained.sum())
-            retained_points += retained_count
-            survived_instances += int(retained_count > 0)
+        after_knn_instances, after_knn_points = teacher_stage_survival(
+            teacher_after_knn
+        )
+        survived_instances, retained_points = teacher_stage_survival(point_labels)
         teacher_post_filter = {
             "merged_instances": len(teacher_merged_classes),
             "merged_points": merged_points,
+            "after_knn_survived_instances": after_knn_instances,
+            "after_knn_retained_points": after_knn_points,
+            "after_knn_point_survival_rate": (
+                after_knn_points / merged_points if merged_points else None
+            ),
             "survived_instances": survived_instances,
             "retained_points": retained_points,
             "point_survival_rate": (
