@@ -1,5 +1,11 @@
 # SAGA category-prior experiments
 
+> **Active plan:** Before changing code or resuming any cloud experiment, read
+> [TEACHER_PRIOR_V3_EXPERIMENT_PLAN.md](TEACHER_PRIOR_V3_EXPERIMENT_PLAN.md) in full.
+> It is the single source of truth for the current category-prior and small-object
+> protection study; the workflows below are retained as historical implementation
+> notes unless that plan explicitly reactivates them.
+
 This package implements the first-stage, postprocess-only study of category
 priors for SAGA. It keeps the three information boundaries executable:
 
