@@ -16,6 +16,25 @@ from category_priors.v3_stage0 import (
 )
 
 
+def test_stage0_cli_accepts_explicit_deployment_commit() -> None:
+    from category_priors.cli import build_parser
+
+    args = build_parser().parse_args(
+        [
+            "prepare-v3-stage0",
+            "--locked-metrics", "locked.parquet",
+            "--train-instance-stats", "train.parquet",
+            "--tune-scene-manifest", "runtime.json",
+            "--tune-gt-dir", "gt",
+            "--history-output", "history.parquet",
+            "--size-bins-output", "bins.json",
+            "--diagnostic-scenes-output", "selection.json",
+            "--git-commit", "abc123",
+        ]
+    )
+    assert args.git_commit == "abc123"
+
+
 def test_train_only_size_bins_ignore_invalid_and_nontrain_rows() -> None:
     rows = [
         {"split": "train", "canonical_class": "chair", "bbox_diag_m": value}

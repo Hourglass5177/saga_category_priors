@@ -681,6 +681,7 @@ def command_prepare_v3_stage0(args: argparse.Namespace) -> None:
         diagnostic_scenes_output=args.diagnostic_scenes_output,
         diagnostic_budget=args.diagnostic_budget,
         target_small_per_class=args.target_small_per_class,
+        git_commit=args.git_commit,
     )
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
@@ -1280,6 +1281,10 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_v3_stage0.add_argument("--diagnostic-scenes-output", required=True)
     prepare_v3_stage0.add_argument("--diagnostic-budget", type=int, default=8)
     prepare_v3_stage0.add_argument("--target-small-per-class", type=int, default=2)
+    prepare_v3_stage0.add_argument(
+        "--git-commit",
+        help="deployed source commit; inferred from the local Git checkout when omitted",
+    )
     prepare_v3_stage0.set_defaults(func=command_prepare_v3_stage0)
 
     evaluate_seed_audit = subparsers.add_parser(
