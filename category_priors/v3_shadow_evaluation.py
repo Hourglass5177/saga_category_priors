@@ -267,6 +267,7 @@ def evaluate_v3_shadow_runs(
     all_rows: list[dict[str, Any]] = []
     ceiling_instances: list[dict[str, Any]] = []
     mapping_diagnostics = []
+    evaluation_commit: str | None = None
     for scene_id in scene_ids:
         scene = scenes[scene_id]
         gt_coords, gt_scene = load_ground_truth_npz(Path(gt_dir) / f"{scene_id}.npz", scene_id)
@@ -285,6 +286,13 @@ def evaluate_v3_shadow_runs(
         sam_mapped = None
         for mode in ("exact", "exclusive"):
             capture = load_json(paths[f"{mode}_json"])
+            capture_commit = str(capture["git_commit"])
+            if evaluation_commit is None:
+                evaluation_commit = capture_commit
+            elif capture_commit != evaluation_commit:
+                raise ValueError("shadow captures use different Git commits")
+            if int(capture["seed"]) != int(seed) or capture["scene_id"] != scene_id:
+                raise ValueError("shadow capture identity does not match evaluation request")
             arrays = load_shadow_arrays(paths[f"{mode}_labels"])
             mapped_branch, branch_diag = map_gaussians_to_gt(
                 gt_coords, gaussian_coords, arrays["branch_labels"], radius_m
@@ -309,6 +317,9 @@ def evaluate_v3_shadow_runs(
                 candidates=capture["candidates"],
                 final_predictions=final_predictions,
             )
+            for row in rows:
+                row["seed"] = int(seed)
+                row["git_commit"] = capture_commit
             all_rows.extend(rows)
             candidate_classes = {
                 int(row["candidate_id"]): str(row["branch_class"])
@@ -332,6 +343,11 @@ def evaluate_v3_shadow_runs(
         affinity_features = _load_affinity_features(
             _feature_ply(scene), exact_capture["affinity_gate"]
         )
+        if len(affinity_features) != len(gaussian_coords):
+            raise ValueError(
+                f"{scene_id}: affinity feature count {len(affinity_features)} does not "
+                f"match Gaussian count {len(gaussian_coords)}"
+            )
         mapped_feature_indices = _map_gt_to_gaussian_indices(
             gt_coords, gaussian_coords, radius_m
         )
@@ -344,6 +360,8 @@ def evaluate_v3_shadow_runs(
             affinity = affinity_metrics[key]
             ceiling_instances.append({
                 "scene_id": scene_id,
+                "seed": int(seed),
+                "git_commit": evaluation_commit,
                 "canonical_class": gt["canonical_class"],
                 "gt_instance_id": gt["gt_instance_id"],
                 "point_count": gt["point_count"],
@@ -395,6 +413,7 @@ def evaluate_v3_shadow_runs(
     input_payload = {
         "kind": "v3_input_ceiling",
         "schema_version": "1.0",
+        "git_commit": evaluation_commit,
         "scene_count": len(scene_ids),
         "seed": int(seed),
         "instances": ceiling_instances,
@@ -403,6 +422,7 @@ def evaluate_v3_shadow_runs(
     analysis = {
         "kind": "v3_proposal_oracle_analysis",
         "schema_version": "1.0",
+        "git_commit": evaluation_commit,
         "scene_count": len(scene_ids),
         "seed": int(seed),
         "candidate_count": len(all_rows),
