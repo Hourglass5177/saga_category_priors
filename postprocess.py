@@ -69,7 +69,7 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
                           raw_point_features=None, scale_gate=None,
                           mask_scales=(), surface_density=1.0,
                           semantic_vote_scores=None, teacher_prior=None,
-                          exclusive_masks=None):
+                          exclusive_masks=None, diagnostics_attribute=None):
     """
     Perform semantic-guided clustering for 'other_classes' (small objects).
 
@@ -99,6 +99,7 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
     other_instance_to_class = {}
     current_instance_id = 0
     branch_diagnostics = {}
+    candidate_records = []
     candidate_memberships = torch.zeros(N, dtype=torch.int32, device=device)
     preserve_teacher_branch = bool(
         teacher_prior is not None
@@ -405,10 +406,56 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
             # Get original point indices
             original_indices = selected_indices_original[points_in_cluster]
 
+            candidate_semantic = torch.einsum(
+                'nc,mc->nm', point_semantic_features[original_indices], label_features
+            )
+            semantic_top1 = candidate_semantic.argmax(dim=1)
+            semantic_purity = float(
+                (semantic_top1 == int(class_idx)).float().mean()
+            )
+            if candidate_semantic.shape[1] > 1:
+                semantic_top2 = torch.topk(candidate_semantic, k=2, dim=1).values
+                semantic_margin = float(
+                    (semantic_top2[:, 0] - semantic_top2[:, 1]).mean()
+                )
+            else:
+                semantic_margin = 0.0
+            candidate_xyz_m = (
+                point_xyz[original_indices] * float(args.scene_scale_m_per_unit)
+            )
+            candidate_extent_m = candidate_xyz_m.max(dim=0).values - candidate_xyz_m.min(dim=0).values
+            sample_core_mask = cluster_labels == local_cluster_id
+            persistence_values = getattr(clusterer, 'cluster_persistence_', [])
+            membership_values = getattr(clusterer, 'probabilities_', None)
+            persistence = (
+                float(persistence_values[local_cluster_id])
+                if local_cluster_id < len(persistence_values) else None
+            )
+            membership_mean = (
+                float(np.asarray(membership_values)[sample_core_mask].mean())
+                if membership_values is not None and np.any(sample_core_mask) else None
+            )
+
             # Assign instance ID (starts from 0)
             instance_id = current_instance_id
             other_point_labels[original_indices] = instance_id
             other_instance_to_class[instance_id] = class_name
+
+            candidate_records.append({
+                "candidate_id": int(instance_id),
+                "branch_class": class_name,
+                "branch_class_index": int(class_idx),
+                "semantic_candidate_points": int(num_selected),
+                "sampled_points": int(sample_size),
+                "sample_core_points": int(np.sum(sample_core_mask)),
+                "full_assignment_points": int(points_in_cluster.sum()),
+                "assignment_confidence_mean": float(selected_mask[points_in_cluster].mean()),
+                "hdbscan_persistence": persistence,
+                "hdbscan_membership_mean": membership_mean,
+                "semantic_top1_purity": semantic_purity,
+                "semantic_margin_mean": semantic_margin,
+                "bbox_diag_m": float(torch.linalg.norm(candidate_extent_m)),
+            })
 
             current_instance_id += 1
             print(f"  Instance {instance_id}: {points_in_cluster.sum()} points -> {class_name}")
@@ -429,10 +476,13 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
         "candidate_memberships": int(candidate_memberships.sum()),
         "overlap_points": int((candidate_memberships > 1).sum()),
     }
-    if teacher_prior is not None:
-        args._teacher_prior_diagnostics = branch_diagnostics
-    else:
-        args._legacy_prior_diagnostics = branch_diagnostics
+    branch_diagnostics["__candidates__"] = candidate_records
+    if diagnostics_attribute is None:
+        diagnostics_attribute = (
+            "_teacher_prior_diagnostics"
+            if teacher_prior is not None else "_legacy_prior_diagnostics"
+        )
+    setattr(args, diagnostics_attribute, branch_diagnostics)
     return other_point_labels, other_instance_to_class
 
 
@@ -606,7 +656,26 @@ def main():
         'off', 'original', 'all-uniform', 'size', 'smooth', 'small', 'combined'
     ], default='original')
     parser.add_argument("--teacher-category-params", type=str, default=None)
+    parser.add_argument("--v3-shadow-mode", choices=['off', 'exact', 'exclusive', 'both'], default='off')
+    parser.add_argument("--v3-shadow-output", type=str, default=None)
+    parser.add_argument("--v3-branch-labels-output", type=str, default=None)
+    parser.add_argument("--v3-shadow-git-commit", type=str, default=None)
+    parser.add_argument("--v3-shadow-scene-id", type=str, default=None)
     args = parser.parse_args(sys.argv[1:])
+    if args.v3_shadow_mode != 'off':
+        if not args.v3_shadow_output or not args.v3_branch_labels_output:
+            parser.error("V3 shadow mode requires --v3-shadow-output and --v3-branch-labels-output")
+        if not args.v3_shadow_git_commit or not args.v3_shadow_scene_id:
+            parser.error("V3 shadow mode requires commit and scene identifiers")
+        if args.v3_shadow_mode == 'both' and (
+            '{mode}' not in args.v3_shadow_output
+            or '{mode}' not in args.v3_branch_labels_output
+        ):
+            parser.error("V3 shadow mode both requires {mode} in both output paths")
+        if args.clustering_mode != 'legacy' or args.prior_mode != 'off':
+            parser.error("V3 shadow audit requires the unchanged legacy main path")
+        if args.scene_scale_m_per_unit <= 0:
+            parser.error("V3 shadow audit requires positive --scene_scale_m_per_unit")
     prior_resolver = None
     if args.prior_mode != 'off':
         if not args.prior_config or not args.prior_mapping_config:
@@ -914,6 +983,11 @@ def main():
     teacher_post_filter = {}
     teacher_after_knn = None
     teacher_restored_after_filter = 0
+    v3_shadow_captures = {}
+    v3_semantic_top1 = None
+    v3_semantic_score = None
+    v3_semantic_margin = None
+    v3_sam_covered = torch.zeros(len(point_xyz), dtype=torch.bool)
     teacher_branch_preservation = bool(
         teacher_prior is not None
         and teacher_prior["table"].get("branch_preservation", False)
@@ -1047,6 +1121,55 @@ def main():
 
         print(f"{'='*60}\n")
 
+    if args.v3_shadow_mode != 'off':
+        from category_priors.teacher_prior import saga20_branch_classes
+        from category_priors.v3_shadow import target_top1_masks
+
+        shadow_classes = list(saga20_branch_classes(class_to_idx))
+        normalized_label_features = F.normalize(
+            label_features.detach().cpu(), dim=-1, p=2
+        )
+        shadow_masks, v3_semantic_top1, v3_semantic_score, v3_semantic_margin = (
+            target_top1_masks(
+                normed_point_semantic_features.numpy(),
+                normalized_label_features.numpy(),
+                [class_to_idx[name] for name in shadow_classes],
+                threshold=args.other_classes_similarity_threshold,
+            )
+        )
+        shadow_modes = (
+            ('exact', 'exclusive')
+            if args.v3_shadow_mode == 'both' else (args.v3_shadow_mode,)
+        )
+        rng_state = torch.random.get_rng_state()
+        for shadow_mode in shadow_modes:
+            try:
+                torch.manual_seed(args.seed)
+                shadow_branch, shadow_instance_classes = cluster_other_classes(
+                    normed_point_features.clone(),
+                    normed_point_semantic_features.clone(),
+                    point_xyz.clone(),
+                    normalized_label_features,
+                    class_to_idx,
+                    shadow_classes,
+                    args,
+                    device='cpu',
+                    exclusive_masks=(
+                        None if shadow_mode == 'exact' else shadow_masks
+                    ),
+                    diagnostics_attribute=f'_v3_shadow_diagnostics_{shadow_mode}',
+                )
+            finally:
+                torch.random.set_rng_state(rng_state)
+            v3_shadow_captures[shadow_mode] = {
+                'branch_labels': shadow_branch,
+                'classes': shadow_instance_classes,
+            }
+            print(
+                f"V3 {shadow_mode} shadow captured "
+                f"{len(shadow_instance_classes)} candidates without modifying legacy labels"
+            )
+
     def filter3d(pos, label, k):
         print('begin filter3d')
         assert pos.shape[0] == label.shape[0]
@@ -1110,6 +1233,11 @@ def main():
                 masks = masks.bool()
             labels_2d = torch.load(os.path.join(args.labels_path, f'{camera.image_name}.pt'))
             max_contributor = get_max_contributor(camera, labels_for_vote.device)
+            if args.v3_shadow_mode != 'off' and masks.numel() > 0:
+                foreground = masks.any(dim=0)
+                covered_indices = max_contributor[foreground].detach().cpu().long()
+                if covered_indices.numel():
+                    v3_sam_covered[covered_indices.unique()] = True
             max_instance_contributor = labels_for_vote[max_contributor]
             background_label = len(args.classes)
             background = torch.ones(
@@ -1148,6 +1276,7 @@ def main():
         return ratios
 
     start_time = datetime.now()
+    v3_shadow_stages = {}
     if prior_overlay is not None:
         from category_priors.runtime import filter_small_clusters, smooth_labels, validate_overlay
         preliminary_ratio = compute_instance_ratios(point_labels, update_progress=False)
@@ -1184,6 +1313,38 @@ def main():
         )
         point_labels = filter_small_clusters(point_labels, prior_overlay.branch_instances, default_min=args.min_cluster_size)
     else:
+        for shadow_mode, capture in v3_shadow_captures.items():
+            shadow_branch = capture['branch_labels']
+            shadow_classes = capture['classes']
+            shadow_global_pre = point_labels.detach().cpu().clone()
+            shadow_filter_input = point_labels.detach().cpu().clone()
+            next_shadow_id = (
+                int(shadow_filter_input.max()) + 1
+                if bool((shadow_filter_input >= 0).any()) else 0
+            )
+            merged_ids = {}
+            for shadow_id in sorted(shadow_classes):
+                mask = shadow_branch == int(shadow_id)
+                if not bool(mask.any()):
+                    continue
+                shadow_filter_input[mask] = next_shadow_id
+                merged_ids[int(shadow_id)] = next_shadow_id
+                next_shadow_id += 1
+            if args.k > 0:
+                shadow_after_knn = filter3d(
+                    point_xyz, shadow_filter_input, args.k
+                ).detach().cpu()
+            else:
+                shadow_after_knn = shadow_filter_input
+            shadow_after_filter = filter_num(
+                shadow_after_knn, min_num=10
+            ).detach().cpu()
+            v3_shadow_stages[shadow_mode] = {
+                'global_pre': shadow_global_pre,
+                'after_knn': shadow_after_knn,
+                'after_filter': shadow_after_filter,
+                'merged_ids': merged_ids,
+            }
         if args.k>0:
             point_labels = filter3d(point_xyz, point_labels, args.k)
         teacher_after_knn = point_labels.detach().cpu().clone()
@@ -1265,6 +1426,80 @@ def main():
     # point_labels = torch.load(os.path.join(args.model_path, 'point_labels.pth'))
 
     instance_ratio = compute_instance_ratios(point_labels, update_progress=True)
+    if v3_shadow_captures:
+        from category_priors.v3_shadow import (
+            candidate_survival,
+            label_overlap,
+            vote_summary,
+            write_shadow_capture,
+        )
+
+        for shadow_mode, capture in v3_shadow_captures.items():
+            shadow_branch = capture['branch_labels']
+            stages = v3_shadow_stages[shadow_mode]
+            shadow_ratios = compute_instance_ratios(
+                shadow_branch, update_progress=False
+            )
+            shadow_diagnostics = dict(
+                getattr(args, f'_v3_shadow_diagnostics_{shadow_mode}', {})
+            )
+            candidate_rows = list(shadow_diagnostics.pop('__candidates__', []))
+            enriched_candidates = []
+            for candidate in candidate_rows:
+                candidate = dict(candidate)
+                candidate_id = int(candidate['candidate_id'])
+                candidate_mask = (shadow_branch == candidate_id).numpy()
+                candidate['active_branch_points'] = int(candidate_mask.sum())
+                merged_id = stages['merged_ids'].get(candidate_id)
+                candidate['hypothetical_merged_instance_id'] = merged_id
+                if merged_id is not None:
+                    candidate.update(
+                        candidate_survival(
+                            candidate_mask,
+                            merged_id,
+                            stages['after_knn'].numpy(),
+                            stages['after_filter'].numpy(),
+                        )
+                    )
+                else:
+                    candidate.update({
+                        'after_knn_points': 0,
+                        'after_knn_survival_rate': 0.0,
+                        'after_filter_points': 0,
+                        'after_filter_survival_rate': 0.0,
+                    })
+                candidate['global_pre_overlap'] = label_overlap(
+                    stages['global_pre'].numpy(), candidate_mask
+                )
+                candidate['global_final_overlap'] = label_overlap(
+                    point_labels.detach().cpu().numpy(), candidate_mask
+                )
+                class_ratios = shadow_ratios.get(
+                    candidate_id, np.zeros(len(args.classes), dtype=np.float64)
+                )
+                candidate['vote'] = vote_summary(
+                    class_ratios, args.classes, candidate['branch_class']
+                )
+                enriched_candidates.append(candidate)
+            output_json = args.v3_shadow_output.format(mode=shadow_mode)
+            output_labels = args.v3_branch_labels_output.format(mode=shadow_mode)
+            write_shadow_capture(
+                json_path=output_json,
+                labels_path=output_labels,
+                scene_id=args.v3_shadow_scene_id,
+                seed=args.seed,
+                mode=shadow_mode,
+                git_commit=args.v3_shadow_git_commit,
+                class_names=args.classes,
+                affinity_gate=gates.numpy(),
+                branch_labels=shadow_branch.numpy(),
+                semantic_top1=v3_semantic_top1,
+                semantic_top1_score=v3_semantic_score,
+                semantic_margin=v3_semantic_margin,
+                sam_covered=v3_sam_covered.numpy(),
+                candidates=enriched_candidates,
+                class_diagnostics=shadow_diagnostics,
+            )
     print(
         f"max-contributor cache summary: hits={max_contributor_cache_hits}, "
         f"misses={max_contributor_cache_misses}"

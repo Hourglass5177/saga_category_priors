@@ -46,6 +46,11 @@ legacy_prior_score="unit"
 legacy_prior_semantic_source="gaussian"
 teacher_prior_mode="original"
 teacher_category_params=""
+v3_shadow_mode="off"
+v3_shadow_output=""
+v3_branch_labels_output=""
+v3_shadow_git_commit=""
+v3_shadow_scene_id=""
 
 sam_checkpoint_path="${SCRIPT_DIR}/weights/sam_vit_h_4b8939.pth"
 groundingdino_checkpoint_path="${SCRIPT_DIR}/weights/groundingdino_swint_ogc.pth"
@@ -116,6 +121,13 @@ Class-first postprocess options:
 Teacher-prior postprocess options:
   --teacher-prior-mode MODE      off|original|all-uniform|size|smooth|small|combined
   --teacher-category-params PATH Shared train-only category statistics/parameters
+
+V3 shadow audit options:
+  --v3-shadow-mode MODE          off|exact|exclusive|both
+  --v3-shadow-output PATH
+  --v3-branch-labels-output PATH
+  --v3-shadow-git-commit COMMIT
+  --v3-shadow-scene-id SCENE
 
 Model options:
   --sam-checkpoint-path PATH
@@ -344,6 +356,11 @@ preflight_stage() {
                         require_file "$teacher_category_params" "Teacher category parameters"
                         ;;
                 esac
+                if [[ "$v3_shadow_mode" != "off" ]]; then
+                    require_file "$label_features_path" "Label features file"
+                    ensure_parent_dir "$v3_shadow_output"
+                    ensure_parent_dir "$v3_branch_labels_output"
+                fi
             fi
             ;;
         render)
@@ -441,6 +458,15 @@ run_postprocess() {
             prior_args+=(--teacher-category-params "$teacher_category_params")
             ;;
     esac
+    if [[ "$v3_shadow_mode" != "off" ]]; then
+        prior_args+=(
+            --v3-shadow-mode "$v3_shadow_mode"
+            --v3-shadow-output "$v3_shadow_output"
+            --v3-branch-labels-output "$v3_branch_labels_output"
+            --v3-shadow-git-commit "$v3_shadow_git_commit"
+            --v3-shadow-scene-id "$v3_shadow_scene_id"
+        )
+    fi
     if [[ "$clustering_mode" == "class-first" ]]; then
         prior_args+=(
             --clustering-mode "$clustering_mode"
@@ -648,6 +674,26 @@ while [[ $# -gt 0 ]]; do
             teacher_category_params="$2"
             shift 2
             ;;
+        --v3-shadow-mode)
+            v3_shadow_mode="$2"
+            shift 2
+            ;;
+        --v3-shadow-output)
+            v3_shadow_output="$2"
+            shift 2
+            ;;
+        --v3-branch-labels-output)
+            v3_branch_labels_output="$2"
+            shift 2
+            ;;
+        --v3-shadow-git-commit)
+            v3_shadow_git_commit="$2"
+            shift 2
+            ;;
+        --v3-shadow-scene-id)
+            v3_shadow_scene_id="$2"
+            shift 2
+            ;;
         --sam-checkpoint-path)
             sam_checkpoint_path="$2"
             shift 2
@@ -704,6 +750,10 @@ fi
 case "$teacher_prior_mode" in
     off|original|all-uniform|size|smooth|small|combined) ;;
     *) err "unsupported --teacher-prior-mode: $teacher_prior_mode" ;;
+esac
+case "$v3_shadow_mode" in
+    off|exact|exclusive|both) ;;
+    *) err "unsupported --v3-shadow-mode: $v3_shadow_mode" ;;
 esac
 if [[ -z "$python_bin" ]]; then
     find_python

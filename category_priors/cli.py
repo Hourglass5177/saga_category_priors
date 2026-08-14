@@ -27,6 +27,8 @@ from .teacher_prior_runner import (
     execute_teacher_prior_runs,
 )
 from .v3_stage0 import prepare_v3_stage0
+from .v3_shadow_runner import execute_v3_shadow_runs
+from .v3_shadow_evaluation import evaluate_v3_shadow_runs
 from .download import (
     MINIMAL_FILE_TYPES,
     download_scannet_saga_scenes,
@@ -686,6 +688,39 @@ def command_prepare_v3_stage0(args: argparse.Namespace) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+def command_run_v3_shadow(args: argparse.Namespace) -> None:
+    payload = execute_v3_shadow_runs(
+        scene_manifest=args.scene_manifest,
+        output_root=args.output_root,
+        pipeline=args.pipeline,
+        git_commit=args.git_commit,
+        scene_ids=args.scene,
+        seeds=args.seed or (42,),
+        resume=not args.no_resume,
+        continue_on_error=args.continue_on_error,
+        dry_run=args.dry_run,
+        max_runs=args.max_runs,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def command_evaluate_v3_shadow(args: argparse.Namespace) -> None:
+    payload = evaluate_v3_shadow_runs(
+        scene_manifest_path=args.scene_manifest,
+        gt_dir=args.gt_dir,
+        output_root=args.output_root,
+        taxonomy=load_taxonomy(args.taxonomy),
+        size_bins_path=args.size_bins,
+        scene_ids=args.scene,
+        seed=args.seed,
+        funnel_output=args.funnel_output,
+        input_ceiling_output=args.input_ceiling_output,
+        analysis_output=args.analysis_output,
+        radius_m=args.radius_m,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
 def command_evaluate_seed_audit(args: argparse.Namespace) -> None:
     taxonomy = load_taxonomy(args.taxonomy)
     evaluate_tune_seed_execution(
@@ -1286,6 +1321,39 @@ def build_parser() -> argparse.ArgumentParser:
         help="deployed source commit; inferred from the local Git checkout when omitted",
     )
     prepare_v3_stage0.set_defaults(func=command_prepare_v3_stage0)
+
+    run_v3_shadow = subparsers.add_parser(
+        "run-v3-shadow",
+        help="Run exact and 32-way-exclusive V3 shadows without changing the B1 legacy output",
+    )
+    run_v3_shadow.add_argument("--scene-manifest", required=True)
+    run_v3_shadow.add_argument("--output-root", required=True)
+    run_v3_shadow.add_argument("--pipeline", required=True)
+    run_v3_shadow.add_argument("--git-commit", required=True)
+    run_v3_shadow.add_argument("--scene", action="append", required=True)
+    run_v3_shadow.add_argument("--seed", action="append", type=int)
+    run_v3_shadow.add_argument("--no-resume", action="store_true")
+    run_v3_shadow.add_argument("--continue-on-error", action="store_true")
+    run_v3_shadow.add_argument("--dry-run", action="store_true")
+    run_v3_shadow.add_argument("--max-runs", type=int)
+    run_v3_shadow.set_defaults(func=command_run_v3_shadow)
+
+    evaluate_v3_shadow = subparsers.add_parser(
+        "evaluate-v3-shadow",
+        help="Map V3 shadow candidates to GT and produce the registered Stage 1 oracle funnel",
+    )
+    evaluate_v3_shadow.add_argument("--scene-manifest", required=True)
+    evaluate_v3_shadow.add_argument("--gt-dir", required=True)
+    evaluate_v3_shadow.add_argument("--output-root", required=True)
+    evaluate_v3_shadow.add_argument("--taxonomy")
+    evaluate_v3_shadow.add_argument("--size-bins", required=True)
+    evaluate_v3_shadow.add_argument("--scene", action="append", required=True)
+    evaluate_v3_shadow.add_argument("--seed", type=int, default=42)
+    evaluate_v3_shadow.add_argument("--funnel-output", required=True)
+    evaluate_v3_shadow.add_argument("--input-ceiling-output", required=True)
+    evaluate_v3_shadow.add_argument("--analysis-output", required=True)
+    evaluate_v3_shadow.add_argument("--radius-m", type=float, default=0.05)
+    evaluate_v3_shadow.set_defaults(func=command_evaluate_v3_shadow)
 
     evaluate_seed_audit = subparsers.add_parser(
         "evaluate-seed-audit",
