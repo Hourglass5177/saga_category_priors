@@ -7,7 +7,7 @@
 - 版本：V3.0
 - 冻结日期：2026-08-15
 - V3 起点代码检查点：`f1367fa58c8f50df75f80b86f67bab469af06531`
-- 当前状态：**只完成了审计和计划，V3 尚未实现或运行**
+- 当前状态：**Stage 0 已完成并验收；Stage 1 尚未实现或运行**
 - 适用范围：现有 24 个 tune 场景、原 48 个内部评估场景及现有训练资产
 - 独立实验单位：physical scene
 - 技术重复：seed `42`、`3407`、`20260804`
@@ -525,17 +525,38 @@ viewer/worst
 - [x] 识别候选级 GT 漏斗为最大证据缺口。
 - [x] 结合 SAGA、SoftGroup、HAIS、PBNet 和 HDBSCAN 机制重构实验设计。
 - [x] 将V3计划冻结到本文件。
+- [x] 实现并测试 Stage 0 轻量导出命令（commit `83be51254eff18debe0b1d52e6ca0011e7c449ac`）。
+- [x] 验收 B0/B1 历史锚点、train-only 尺寸边界和 GT-only 诊断8场景。
 
 ### 下一步
 
-- [ ] 实现 Stage 0 的历史锚点/GT尺寸分层导出。
 - [ ] 实现 Stage 1 shadow/oracle 候选漏斗，不改变legacy最终输出。
 - [ ] 本地测试并回读本文件核对每个字段与门槛。
 - [ ] commit/push后部署同一commit到云端。
-- [ ] 运行8个GT支持充分的诊断场景。
+- [ ] 在已冻结的8个诊断场景运行 shadow/oracle 审计。
 - [ ] 根据漏斗事实决定 A 或 B 保护，禁止凭直觉同时实现两套。
 
 当前不得直接进入2×2、2³、24场景或48场景。
+
+### Stage 0 已验收事实
+
+- 云端代码：`/root/autodl-tmp/saga/workspace/teacher-prior-v3-83be512`
+- 云端产物：`/root/autodl-tmp/saga/artifacts/teacher-prior-v3-83be512`
+- Windows副本：`F:\\3DGS_Research\\saga\\artifacts\\teacher-prior-v3-83be512`
+- `v3_history_anchor.parquet`：6行，严格为B0/B1 × seeds
+  `42/3407/20260804` × 48 scenes；复用并校验已有官方 locked evaluator 指标。
+- B0 三seed平均 mAP：`0.0553383453`；B1：`0.0561636026`；
+  B1−B0：`+0.0008252573`。
+- train-only有效实例：10,841；物理尺寸边界：
+  `tiny ≤ 0.871638m`、`small ≤ 1.306831m`、`medium ≤ 1.938700m`、其余为large。
+- 24 tune GT：361个实例；tiny/small/medium/large分别为140/55/70/96；
+  `<100`映射点实例26个。
+- 冻结诊断8场景：
+  `scene0645_00`、`scene0025_01`、`scene0046_00`、`scene0474_01`、
+  `scene0591_02`、`scene0329_02`、`scene0164_03`、`scene0064_01`。
+- 8个场景对应8个不同physical scenes；覆盖全部17个在tune中实际有tiny/small实例的类别。
+- 剩余16场景已在 `v3_diagnostic8_scenes.json` 中冻结，留作Stage 4复核。
+- Stage 0 未运行postprocess、未下载、未训练、未读取任何方法AP来选择场景。
 
 ## 15. 参考依据
 
@@ -559,5 +580,17 @@ viewer/worst
 - 将问题拆为输入上限、候选质量、死亡阶段、保护结构和三类数据先验。
 - 采用 physical-scene block、2×2结构实验和2³完整因子设计。
 - 明确 final48 仍复用原场景，称为内部验证，不重新下载或训练。
+
+### 2026-08-15 — Stage 0 完成
+
+- 实现 `prepare-v3-stage0`，新增4项定向测试；全套
+  `tests/category_priors` 为120 passed。
+- 代码经commit `83be51254eff18debe0b1d52e6ca0011e7c449ac`部署并运行。
+- 第一次云端启动因PowerShell提前展开远端变量而在程序启动前退出；未生成或覆盖产物。
+  修正命令引用后只重试一次并成功。
+- 三项注册产物均可解析；历史锚点条件/seed/scene count、尺寸桶、physical-scene唯一性、
+  tiny/small类别覆盖均通过验收。
+- 完成后磁盘空闲165GB，GPU空闲，cgroup约37.1GiB/90GiB，`oom_kill=0`。
+- 下一允许动作是实现Stage 1 shadow/oracle；禁止跳到保护融合或效果筛选。
 
 后续每次阶段完成均在此处追加日期、commit、产物和门槛判定。
