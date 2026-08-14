@@ -258,6 +258,21 @@ def restore_preserved_branch(labels: Any, preservation: Any) -> np.ndarray:
     return result
 
 
+def restore_surviving_branches(
+    labels: Any, branch_membership: Any
+) -> tuple[np.ndarray, int]:
+    """Restore the extent only for branches accepted by global filtering."""
+    result = np.asarray(labels, dtype=np.int64).copy()
+    membership = np.asarray(branch_membership, dtype=np.int64)
+    restored = 0
+    for branch_id in np.unique(membership[membership >= 0]):
+        branch_mask = membership == branch_id
+        if np.any(result[branch_mask] == branch_id):
+            result[branch_mask] = branch_id
+            restored += 1
+    return result, restored
+
+
 def teacher_spatial_distance(xyz_m: Any, scale_m: float) -> np.ndarray:
     """D_xyz=min(||x_i-x_j||/d,1), with no per-matrix max normalization."""
     xyz = np.asarray(xyz_m, dtype=np.float64)

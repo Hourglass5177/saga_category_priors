@@ -16,6 +16,7 @@ from category_priors.teacher_prior import (
     merge_branch_labels,
     rescue_same_class_noise,
     resolve_teacher_parameters,
+    restore_surviving_branches,
     restore_preserved_branch,
     saga20_branch_classes,
     teacher_spatial_distance,
@@ -219,6 +220,14 @@ def test_missing_category_falls_back_to_global_uniform_parameters() -> None:
     assert unknown["min_cluster_size"] == table["global"]["min_cluster_size"]
     assert unknown["knn_k"] == table["global"]["knn_k"]
     assert unknown["rescue_radius_m"] == table["global"]["rescue_radius_m"]
+
+
+def test_restore_only_branches_that_survive_global_filtering() -> None:
+    filtered = np.asarray([10, -1, 12, -1, 20, 20])
+    membership = np.asarray([10, 10, 11, 11, -1, -1])
+    restored, count = restore_surviving_branches(filtered, membership)
+    assert restored.tolist() == [10, 10, 12, -1, 20, 20]
+    assert count == 1
 
 
 def test_top1_and_preserved_branches_are_independent_of_category_order() -> None:

@@ -913,6 +913,7 @@ def main():
     teacher_merged_classes = {}
     teacher_post_filter = {}
     teacher_after_knn = None
+    teacher_restored_after_filter = 0
     teacher_branch_preservation = bool(
         teacher_prior is not None
         and teacher_prior["table"].get("branch_preservation", False)
@@ -1188,8 +1189,13 @@ def main():
         teacher_after_knn = point_labels.detach().cpu().clone()
         point_labels = filter_num(point_labels, min_num=10)
         if teacher_restore_after_global_filter and teacher_merged_classes:
-            restore_mask = teacher_merged_membership >= 0
-            point_labels[restore_mask] = teacher_merged_membership[restore_mask]
+            from category_priors.teacher_prior import restore_surviving_branches
+            restored_labels, teacher_restored_after_filter = (
+                restore_surviving_branches(
+                    point_labels.numpy(), teacher_merged_membership.numpy()
+                )
+            )
+            point_labels = torch.from_numpy(restored_labels)
         if pending_legacy_branch is not None:
             max_main_instance_id = (
                 point_labels.max().item() if point_labels.max() >= 0 else -1
@@ -1244,6 +1250,7 @@ def main():
             "after_knn_point_survival_rate": (
                 after_knn_points / merged_points if merged_points else None
             ),
+            "restored_surviving_instances": teacher_restored_after_filter,
             "survived_instances": survived_instances,
             "retained_points": retained_points,
             "point_survival_rate": (
