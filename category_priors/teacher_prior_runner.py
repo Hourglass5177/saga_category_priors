@@ -22,6 +22,10 @@ TEACHER_PRIOR_CONDITIONS: dict[str, str] = {
     "D-combined": "combined",
     "U0-multi-anchor": "all-uniform",
     "D-combined-multi-anchor": "combined",
+    # Offline replay condition: it reuses the original B1 output and therefore
+    # is never dispatched through this runner, but the shared evaluator must
+    # recognize its condition identity.
+    "B1-proposal-protected": "original",
 }
 TEACHER_PRIOR_EXPERIMENT_CONDITIONS = (
     "U0-all-uniform",
