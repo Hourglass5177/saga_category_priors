@@ -698,8 +698,8 @@ paired bootstrap。结果不得再用于修改候选、阈值或融合；48场�
 - [x] V3 Stage 2按门槛停止，未进入旧2³。
 - [x] V4实验顺序、因素、融合规则和停止门槛冻结到本文件。
 - [x] 实现并测试Stage A正控和Stage B shadow候选接口。
-- [ ] commit/push并部署相同commit。
-- [ ] 运行两场景10k正控并冻结诊断结论。
+- [x] commit/push并部署相同commit（Stage A/B实现`c62554e`；10k资产路由与resume身份修复`93ab3ee`）。
+- [x] 运行两场景10k正控并冻结诊断结论；未过改善门槛，不扩展10k训练。
 - [ ] 运行8场景候选2×2并按门槛决定是否停止。
 - [ ] 仅在Stage B通过后实现Stage C融合。
 
@@ -721,3 +721,15 @@ paired bootstrap。结果不得再用于修改候选、阈值或融合；48场�
   仅写独立JSON/NPZ。
 - 定向及全部`tests/category_priors`共141项通过；`compileall`与`bash -n`通过。
 - Stage C融合尚未实现，只有Stage B通过才允许落盘。
+
+### 2026-08-15 — V4 Stage A 完成
+
+- `scene0011_00`与`scene0608_00`的10k feature和scale gate均写入独立目录，原2k资产未覆盖。
+- 10k相对2k：semantic top-1 recall平均`+0.00939`，tiny/small候选Recall@0.25
+  `-0.15`，新增IoU≥0.25匹配`0`，`scene0608_00`损失3个原匹配；候选数
+  `174→190`，候选precision@0.25由`0.0977→0.0737`。
+- 未达到预注册明显改善门槛。结论：简单把feature训练从2k增加到10k没有改善这两个场景的
+  候选质量；不得将10k训练扩展到其他场景。
+- 首次10k shadow启动暴露CLI漏传feature-control路径；错误产物已整体移至带说明的诊断目录，
+  未混入正式比较。修复后新增运行命令身份校验，全部143项测试通过（`93ab3ee`）。
+- Stage B的32次旁路候选实验已按冻结8场景启动。
