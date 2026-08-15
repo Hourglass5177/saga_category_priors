@@ -80,14 +80,25 @@ def _valid_output(path: Path) -> bool:
     return isinstance(payload.get("point_labels"), list) and isinstance(payload.get("instances"), Mapping)
 
 
-def _complete(paths: Mapping[str, Path], mode: str) -> bool:
+def _complete(
+    paths: Mapping[str, Path], mode: str, expected_command: Sequence[str] | None = None
+) -> bool:
     if not _valid_output(paths["output"]) or not paths["candidate_labels"].is_file():
         return False
     try:
         payload = load_json(paths["candidate_json"])
     except (FileNotFoundError, OSError, ValueError, TypeError, json.JSONDecodeError):
         return False
-    return payload.get("kind") == "v4_candidate_capture" and payload.get("mode") == mode
+    if payload.get("kind") != "v4_candidate_capture" or payload.get("mode") != mode:
+        return False
+    if expected_command is not None:
+        try:
+            runner = load_json(paths["runner"])
+        except (FileNotFoundError, OSError, ValueError, TypeError, json.JSONDecodeError):
+            return False
+        if runner.get("kind") != "v4_candidate_run" or runner.get("command") != list(expected_command):
+            return False
+    return True
 
 
 def execute_v4_candidate_runs(
@@ -139,7 +150,7 @@ def execute_v4_candidate_runs(
             feature_ply=feature_ply, scale_gate=scale_gate,
         )
         record = {"mode": mode, "scene_id": scene_id, "seed": seed, "run_dir": str(paths["run_dir"])}
-        if resume and _complete(paths, mode):
+        if resume and _complete(paths, mode, command):
             record["status"] = "skipped_complete"
             records.append(record)
             continue
@@ -156,13 +167,18 @@ def execute_v4_candidate_runs(
             paths["pending_output"].replace(paths["output"])
             if paths["pending_metadata"].is_file():
                 paths["pending_metadata"].replace(paths["metadata"])
-        status = "complete" if result.returncode == 0 and _complete(paths, mode) else "failed"
-        write_json(paths["runner"], {
+        status = "complete" if result.returncode == 0 else "failed"
+        runner_payload = {
             "kind": "v4_candidate_run", "git_commit": git_commit,
             "mode": mode, "scene_id": scene_id, "seed": seed,
             "status": status, "runtime_seconds": runtime,
             "return_code": result.returncode, "command": command,
-        })
+        }
+        write_json(paths["runner"], runner_payload)
+        if status == "complete" and not _complete(paths, mode, command):
+            status = "failed"
+            runner_payload["status"] = status
+            write_json(paths["runner"], runner_payload)
         record.update({"status": status, "runtime_seconds": runtime})
         records.append(record)
         if status == "failed" and not continue_on_error:

@@ -12,6 +12,7 @@ from category_priors.v4_candidate import (
     resolve_v4_candidate_parameters,
 )
 from category_priors.v4_candidate_runner import build_v4_candidate_command
+from category_priors.v4_candidate_runner import _complete, v4_candidate_run_paths
 from category_priors.v4_feature_control import (
     CONTROL_SCENES,
     build_v4_feature_control_command,
@@ -110,3 +111,19 @@ def test_v4_cli_forwards_feature_control_root(monkeypatch, capsys) -> None:
     ))
     assert captured["feature_control_root"] == "control-assets"
     assert captured["modes"] == ["uniform"]
+
+
+def test_v4_resume_requires_the_same_asset_command(tmp_path: Path) -> None:
+    paths = v4_candidate_run_paths(tmp_path, "uniform", "scene0011_00", 42)
+    paths["run_dir"].mkdir(parents=True)
+    paths["output"].write_text('{"point_labels": [], "instances": {}}', encoding="utf-8")
+    paths["candidate_json"].write_text(
+        '{"kind": "v4_candidate_capture", "mode": "uniform"}', encoding="utf-8"
+    )
+    np.savez_compressed(paths["candidate_labels"], point_count=np.asarray([0]))
+    paths["runner"].write_text(
+        json.dumps({"kind": "v4_candidate_run", "command": ["2k-feature"]}),
+        encoding="utf-8",
+    )
+    assert _complete(paths, "uniform", ["2k-feature"])
+    assert not _complete(paths, "uniform", ["10k-feature"])
