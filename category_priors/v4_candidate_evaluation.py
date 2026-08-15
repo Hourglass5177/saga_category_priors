@@ -31,6 +31,7 @@ def evaluate_v4_candidate_runs(
     scenes = load_scene_runtime_manifest(scene_manifest_path)
     size_spec = load_json(size_bins_path)
     rows: list[dict[str, Any]] = []
+    resolved_parameters: dict[str, dict[str, Any]] = {}
     commit: str | None = None
     for scene_id in scene_ids:
         scene = scenes[scene_id]
@@ -42,6 +43,12 @@ def evaluate_v4_candidate_runs(
         for mode in MODES:
             paths = v4_candidate_run_paths(output_root, mode, scene_id, seed)
             capture = load_json(paths["candidate_json"])
+            if mode not in resolved_parameters:
+                resolved_parameters[mode] = {
+                    name: dict(details.get("parameters") or {})
+                    for name, details in capture.get("class_diagnostics", {}).items()
+                    if isinstance(details, dict) and not str(name).startswith("__")
+                }
             current_commit = str(capture["git_commit"])
             if commit is None:
                 commit = current_commit
@@ -119,6 +126,7 @@ def evaluate_v4_candidate_runs(
     gt_rows = [row for row in rows if row["row_type"] == "gt_instance"]
     candidate_rows = [row for row in rows if row["row_type"] == "candidate"]
     summaries: dict[str, dict[str, Any]] = {}
+    per_class: dict[str, dict[str, Any]] = {}
     for mode in MODES:
         small = [
             row for row in gt_rows
@@ -145,6 +153,22 @@ def evaluate_v4_candidate_runs(
             "matched_scene_count_025": len({row["scene_id"] for row in matched}),
             "matched_class_count_025": len({row["canonical_class"] for row in matched}),
         }
+        per_class[mode] = {}
+        for class_name in taxonomy.canonical_classes:
+            class_gt = [row for row in small if row["canonical_class"] == class_name]
+            class_candidates = [
+                row for row in mode_candidates if row["canonical_class"] == class_name
+            ]
+            per_class[mode][class_name] = {
+                "official_tiny_small_gt": len(class_gt),
+                "recall_025": float(np.mean([
+                    float(row["candidate_best_iou"]) >= 0.25 for row in class_gt
+                ])) if class_gt else None,
+                "candidate_count": len(class_candidates),
+                "candidate_precision_025": float(np.mean([
+                    float(row["candidate_best_iou"]) >= 0.25 for row in class_candidates
+                ])) if class_candidates else None,
+            }
     uniform = summaries["uniform"]
     decisions = {}
     for mode in MODES[1:]:
@@ -168,7 +192,11 @@ def evaluate_v4_candidate_runs(
         added = mode_matches - uniform_matches
         per_scene_delta = defaultdict(float)
         for row in gt_rows:
-            if row["mode"] in {"uniform", mode} and row["physical_size_bin"] in {"tiny", "small"}:
+            if (
+                row["mode"] in {"uniform", mode}
+                and row["physical_size_bin"] in {"tiny", "small"}
+                and not row["below_official_min_region_size"]
+            ):
                 sign = 1.0 if row["mode"] == mode else -1.0
                 per_scene_delta[row["scene_id"]] += sign * float(row["candidate_best_iou"] >= 0.25)
         positive_scenes = sum(value > 0 for value in per_scene_delta.values())
@@ -199,6 +227,8 @@ def evaluate_v4_candidate_runs(
         "kind": "v4_candidate_analysis", "schema_version": "1.0",
         "git_commit": commit, "scene_count": len(scene_ids), "seed": int(seed),
         "summaries": summaries, "decisions": decisions,
+        "per_class": per_class,
+        "resolved_class_parameters": resolved_parameters,
         "best_candidate": passing[0] if passing else None,
         "stage_b_passed": bool(passing),
     }
