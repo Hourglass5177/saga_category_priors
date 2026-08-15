@@ -34,6 +34,12 @@ from .v4_candidate_runner import execute_v4_candidate_runs
 from .v4_feature_control import execute_v4_feature_controls
 from .v4_candidate_evaluation import evaluate_v4_candidate_runs
 from .v4_feature_control_evaluation import evaluate_v4_feature_control
+from .v5_candidate import CONDITIONS as V5_CONDITIONS, SOURCES as V5_SOURCES
+from .v5_candidate_runner import execute_v5_candidate_runs
+from .v5_candidate_evaluation import evaluate_v5_candidates
+from .v5_replay import materialize_v5_b1_baseline, replay_v5_proposals
+from .v5_calibrator import fit_v5_calibrator
+from .v5_evaluation import evaluate_v5_runs
 from .download import (
     MINIMAL_FILE_TYPES,
     download_scannet_saga_scenes,
@@ -598,6 +604,67 @@ def command_evaluate_teacher_prior(args: argparse.Namespace) -> None:
         minimum_mapped_fraction=args.minimum_mapped_fraction,
         min_region_size=args.min_region_size,
         split=args.split,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def command_run_v5_candidates(args: argparse.Namespace) -> None:
+    payload = execute_v5_candidate_runs(
+        scene_manifest=args.scene_manifest, output_root=args.output_root,
+        pipeline=args.pipeline, git_commit=args.git_commit, scene_ids=args.scene,
+        sources=args.source or V5_SOURCES, seeds=args.seed or (42,),
+        resume=not args.no_resume, continue_on_error=args.continue_on_error,
+        dry_run=args.dry_run, max_runs=args.max_runs,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def command_evaluate_v5_candidates(args: argparse.Namespace) -> None:
+    payload = evaluate_v5_candidates(
+        scene_manifest=args.scene_manifest, gt_dir=args.gt_dir, output_root=args.output_root,
+        category_priors=args.category_priors, taxonomy=load_taxonomy(args.taxonomy),
+        size_bins=args.size_bins, scene_ids=args.scene, seed=args.seed,
+        table_output=args.table_output, analysis_output=args.analysis_output,
+        radius_m=args.radius_m,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def command_replay_v5_proposals(args: argparse.Namespace) -> None:
+    materialized = materialize_v5_b1_baseline(
+        candidate_root=args.candidate_root, output_root=args.output_root, source=args.source,
+        scene_ids=args.scene, seeds=args.seed or (42,),
+    )
+    payload = replay_v5_proposals(
+        candidate_root=args.candidate_root, output_root=args.output_root, source=args.source,
+        conditions=args.condition or V5_CONDITIONS, scene_ids=args.scene, seeds=args.seed or (42,),
+        category_priors=args.category_priors,
+    )
+    payload["baseline"] = materialized
+    if args.output:
+        write_json(args.output, payload)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def command_fit_v5_calibrator(args: argparse.Namespace) -> None:
+    payload = fit_v5_calibrator(
+        args.candidate_table, args.output, source=args.source, development_scenes=args.scene,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def command_evaluate_v5(args: argparse.Namespace) -> None:
+    output_root = Path(args.output_root).resolve()
+    payload = evaluate_v5_runs(
+        scene_manifest=args.scene_manifest, gt_dir=args.gt_dir, output_root=output_root,
+        taxonomy=load_taxonomy(args.taxonomy),
+        metrics_output=args.metrics_output or output_root / "v5_metrics.parquet",
+        analysis_output=args.analysis_output or output_root / "v5_analysis.json",
+        conditions=args.condition, seeds=args.seed or (42,), scene_ids=args.scene,
+        reference=args.reference, treatment=args.treatment,
+        bootstrap_samples=args.bootstrap_samples, bootstrap_seed=args.bootstrap_seed,
+        radius_m=args.radius_m, minimum_mapped_fraction=args.minimum_mapped_fraction,
+        min_region_size=args.min_region_size, split=args.split,
     )
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
@@ -1483,6 +1550,86 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_v4_control.add_argument("--output", required=True)
     evaluate_v4_control.add_argument("--radius-m", type=float, default=0.05)
     evaluate_v4_control.set_defaults(func=command_evaluate_v4_feature_control)
+
+    run_v5 = subparsers.add_parser(
+        "run-v5-candidates",
+        help="Build one immutable V5 proposal bank per source without changing B1 output",
+    )
+    run_v5.add_argument("--scene-manifest", required=True)
+    run_v5.add_argument("--output-root", required=True)
+    run_v5.add_argument("--pipeline", required=True)
+    run_v5.add_argument("--git-commit", required=True)
+    run_v5.add_argument("--scene", action="append", required=True)
+    run_v5.add_argument("--source", action="append", choices=V5_SOURCES)
+    run_v5.add_argument("--seed", action="append", type=int)
+    run_v5.add_argument("--no-resume", action="store_true")
+    run_v5.add_argument("--continue-on-error", action="store_true")
+    run_v5.add_argument("--dry-run", action="store_true")
+    run_v5.add_argument("--max-runs", type=int)
+    run_v5.set_defaults(func=command_run_v5_candidates)
+
+    evaluate_v5_candidates_parser = subparsers.add_parser(
+        "evaluate-v5-candidates",
+        help="Evaluate V5 proposal-source recall and absolute candidate gates",
+    )
+    evaluate_v5_candidates_parser.add_argument("--scene-manifest", required=True)
+    evaluate_v5_candidates_parser.add_argument("--gt-dir", required=True)
+    evaluate_v5_candidates_parser.add_argument("--output-root", required=True)
+    evaluate_v5_candidates_parser.add_argument("--category-priors", required=True)
+    evaluate_v5_candidates_parser.add_argument("--taxonomy")
+    evaluate_v5_candidates_parser.add_argument("--size-bins", required=True)
+    evaluate_v5_candidates_parser.add_argument("--scene", action="append", required=True)
+    evaluate_v5_candidates_parser.add_argument("--seed", type=int, default=42)
+    evaluate_v5_candidates_parser.add_argument("--table-output", required=True)
+    evaluate_v5_candidates_parser.add_argument("--analysis-output", required=True)
+    evaluate_v5_candidates_parser.add_argument("--radius-m", type=float, default=0.05)
+    evaluate_v5_candidates_parser.set_defaults(func=command_evaluate_v5_candidates)
+
+    replay_v5 = subparsers.add_parser(
+        "replay-v5-proposals",
+        help="CPU replay V5 U/D acceptance scores over frozen B1 proposal banks",
+    )
+    replay_v5.add_argument("--candidate-root", required=True)
+    replay_v5.add_argument("--output-root", required=True)
+    replay_v5.add_argument("--category-priors", required=True)
+    replay_v5.add_argument("--source", choices=V5_SOURCES, required=True)
+    replay_v5.add_argument("--condition", action="append", choices=V5_CONDITIONS)
+    replay_v5.add_argument("--scene", action="append", required=True)
+    replay_v5.add_argument("--seed", action="append", type=int)
+    replay_v5.add_argument("--output")
+    replay_v5.set_defaults(func=command_replay_v5_proposals)
+
+    fit_v5 = subparsers.add_parser(
+        "fit-v5-calibrator",
+        help="Fit the fixed L2 V5 dev8 logistic calibrators from candidate rows",
+    )
+    fit_v5.add_argument("--candidate-table", required=True)
+    fit_v5.add_argument("--source", choices=V5_SOURCES, required=True)
+    fit_v5.add_argument("--scene", action="append", required=True)
+    fit_v5.add_argument("--output", required=True)
+    fit_v5.set_defaults(func=command_fit_v5_calibrator)
+
+    evaluate_v5 = subparsers.add_parser(
+        "evaluate-v5", help="Official ScanNet evaluation of V5 CPU replay outputs",
+    )
+    evaluate_v5.add_argument("--scene-manifest", required=True)
+    evaluate_v5.add_argument("--gt-dir", required=True)
+    evaluate_v5.add_argument("--output-root", required=True)
+    evaluate_v5.add_argument("--taxonomy")
+    evaluate_v5.add_argument("--scene", action="append", required=True)
+    evaluate_v5.add_argument("--condition", action="append", required=True)
+    evaluate_v5.add_argument("--seed", action="append", type=int)
+    evaluate_v5.add_argument("--reference")
+    evaluate_v5.add_argument("--treatment")
+    evaluate_v5.add_argument("--metrics-output")
+    evaluate_v5.add_argument("--analysis-output")
+    evaluate_v5.add_argument("--bootstrap-samples", type=int, default=10000)
+    evaluate_v5.add_argument("--bootstrap-seed", type=int, default=20260804)
+    evaluate_v5.add_argument("--radius-m", type=float, default=0.05)
+    evaluate_v5.add_argument("--minimum-mapped-fraction", type=float, default=0.90)
+    evaluate_v5.add_argument("--min-region-size", type=int, default=100)
+    evaluate_v5.add_argument("--split", default="v5")
+    evaluate_v5.set_defaults(func=command_evaluate_v5)
 
     evaluate_seed_audit = subparsers.add_parser(
         "evaluate-seed-audit",

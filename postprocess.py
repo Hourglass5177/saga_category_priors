@@ -70,7 +70,7 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
                           mask_scales=(), surface_density=1.0,
                           semantic_vote_scores=None, teacher_prior=None,
                           exclusive_masks=None, diagnostics_attribute=None,
-                          v4_candidate=None):
+                          v4_candidate=None, v5_candidate=None):
     """
     Perform semantic-guided clustering for 'other_classes' (small objects).
 
@@ -102,6 +102,8 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
     branch_diagnostics = {}
     candidate_records = []
     candidate_memberships = torch.zeros(N, dtype=torch.int32, device=device)
+    v5_core_labels = torch.full((N,), -1, dtype=torch.long, device=device)
+    v5_assignment_confidence = torch.zeros(N, dtype=torch.float32, device=device)
     preserve_teacher_branch = bool(
         teacher_prior is not None
         and teacher_prior["table"].get("branch_preservation", False)
@@ -113,6 +115,7 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
     std_point_xyz = (point_xyz - min_val) / (max_val - min_val)
 
     for class_name in other_classes:
+        class_started = datetime.now()
         if class_name not in class_to_idx:
             print(f"Warning: Class '{class_name}' not in label_features, skipping")
             continue
@@ -125,6 +128,7 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
         parameters = None
         teacher_parameters = None
         v4_parameters = None
+        v5_parameters = None
         if teacher_prior is not None:
             from category_priors.teacher_prior import resolve_teacher_parameters
             teacher_parameters = resolve_teacher_parameters(
@@ -160,6 +164,15 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
                 v4_candidate["config"],
             )
             semantic_threshold = float(v4_parameters["semantic_threshold"])
+        elif v5_candidate is not None:
+            from category_priors.v5_candidate import resolve_v5_candidate_parameters
+            preliminary_mask = torch.as_tensor(
+                exclusive_masks[class_idx], dtype=torch.bool, device=device
+            )
+            v5_parameters = resolve_v5_candidate_parameters(
+                int(preliminary_mask.sum()), v5_candidate["config"]
+            )
+            semantic_threshold = float(v5_parameters["semantic_threshold"])
         if exclusive_masks is not None:
             similarity_scores = torch.einsum(
                 'nc,c->n', point_semantic_features, label_features[class_idx]
@@ -186,7 +199,10 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
                 int(parameters["min_cluster_size"])
                 if parameters is not None else (
                     int(v4_parameters["min_cluster_size"])
-                    if v4_parameters is not None else args.other_classes_min_cluster_size
+                    if v4_parameters is not None else (
+                        int(v5_parameters["min_cluster_size"])
+                        if v5_parameters is not None else args.other_classes_min_cluster_size
+                    )
                 )
             )
         )
@@ -196,7 +212,10 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
                 int(parameters["min_samples"])
                 if parameters is not None else (
                     int(v4_parameters["min_samples"])
-                    if v4_parameters is not None else min_cluster_size
+                    if v4_parameters is not None else (
+                        int(v5_parameters["min_samples"])
+                        if v5_parameters is not None else min_cluster_size
+                    )
                 )
             )
         )
@@ -205,7 +224,9 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
             branch_diagnostics[class_name] = {
                 "candidate_points": int(num_selected), "status": "insufficient_points",
                 "parameters": teacher_parameters if teacher_parameters is not None else (
-                    parameters if parameters is not None else v4_parameters
+                    parameters if parameters is not None else (
+                        v4_parameters if v4_parameters is not None else v5_parameters
+                    )
                 ),
             }
             continue
@@ -254,12 +275,21 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
                 int(parameters["sample_count"])
                 if parameters is not None else (
                     int(v4_parameters["sample_count"])
-                    if v4_parameters is not None else min(num_selected, args.other_classes_sample_num)
+                    if v4_parameters is not None else (
+                        int(v5_parameters["sample_count"])
+                        if v5_parameters is not None else min(num_selected, args.other_classes_sample_num)
+                    )
                 )
             )
         )
         if v4_parameters is not None:
             from category_priors.v4_candidate import nested_permutation
+            sampled_indices = torch.as_tensor(
+                nested_permutation(num_selected, args.seed, class_name)[:sample_size],
+                dtype=torch.long, device=device,
+            )
+        elif v5_parameters is not None:
+            from category_priors.v5_candidate import nested_permutation
             sampled_indices = torch.as_tensor(
                 nested_permutation(num_selected, args.seed, class_name)[:sample_size],
                 dtype=torch.long, device=device,
@@ -350,7 +380,9 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
                 "hdbscan_noise_points": int((cluster_labels < 0).sum()),
                 "status": "no_clusters",
                 "parameters": teacher_parameters if teacher_parameters is not None else (
-                    parameters if parameters is not None else v4_parameters
+                    parameters if parameters is not None else (
+                        v4_parameters if v4_parameters is not None else v5_parameters
+                    )
                 ),
             }
             continue
@@ -387,7 +419,10 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
             float(teacher_parameters["assignment_threshold"])
             if teacher_parameters is not None else (
                 float(parameters["assignment_threshold"])
-                if parameters is not None else args.instance_threshold
+                if parameters is not None else (
+                    float(v5_parameters["assignment_threshold"])
+                    if v5_parameters is not None else args.instance_threshold
+                )
             )
         )
         below_threshold = selected_mask < assignment_threshold
@@ -441,6 +476,9 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
 
             # Get original point indices
             original_indices = selected_indices_original[points_in_cluster]
+            candidate_core_mask = points_in_cluster & (
+                selected_mask >= float(v5_parameters["core_assignment_threshold"])
+            ) if v5_candidate is not None else None
 
             candidate_semantic = torch.einsum(
                 'nc,mc->nm', point_semantic_features[original_indices], label_features
@@ -471,11 +509,33 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
                 float(np.asarray(membership_values)[sample_core_mask].mean())
                 if membership_values is not None and np.any(sample_core_mask) else None
             )
+            metric_extents_m = np.sort(
+                candidate_extent_m.detach().cpu().numpy()
+            ).tolist()
+            local_surface_density = None
+            if v5_candidate is not None and int(candidate_core_mask.sum()) >= 17:
+                from scipy.spatial import cKDTree
+                core_xyz_np = (
+                    point_xyz[selected_indices_original[candidate_core_mask]]
+                    * float(args.scene_scale_m_per_unit)
+                ).detach().cpu().numpy()
+                distances, _ = cKDTree(core_xyz_np).query(
+                    core_xyz_np, k=17, workers=-1
+                )
+                radius16 = np.maximum(np.asarray(distances)[:, -1], 1e-12)
+                local_surface_density = float(np.median(
+                    16.0 / (np.pi * radius16 * radius16)
+                ))
 
             # Assign instance ID (starts from 0)
             instance_id = current_instance_id
             other_point_labels[original_indices] = instance_id
             other_instance_to_class[instance_id] = class_name
+            if v5_candidate is not None:
+                v5_assignment_confidence[original_indices] = (
+                    selected_mask[points_in_cluster].to(torch.float32)
+                )
+                v5_core_labels[selected_indices_original[candidate_core_mask]] = instance_id
 
             candidate_records.append({
                 "candidate_id": int(instance_id),
@@ -491,6 +551,12 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
                 "semantic_top1_purity": semantic_purity,
                 "semantic_margin_mean": semantic_margin,
                 "bbox_diag_m": float(torch.linalg.norm(candidate_extent_m)),
+                "metric_extents_m": metric_extents_m,
+                "local_surface_density": local_surface_density,
+                "core_assignment_points": int((
+                    candidate_core_mask.sum()
+                )) if v5_candidate is not None else None,
+                "class_runtime_seconds": float((datetime.now() - class_started).total_seconds()) if v5_candidate is not None else None,
             })
 
             current_instance_id += 1
@@ -504,7 +570,9 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
             "final_instances": int(sum(1 for value in other_instance_to_class.values() if value == class_name)),
             "status": "complete",
             "parameters": teacher_parameters if teacher_parameters is not None else (
-                parameters if parameters is not None else v4_parameters
+                parameters if parameters is not None else (
+                    v4_parameters if v4_parameters is not None else v5_parameters
+                )
             ),
         }
 
@@ -521,6 +589,9 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
             if teacher_prior is not None else "_legacy_prior_diagnostics"
         )
     setattr(args, diagnostics_attribute, branch_diagnostics)
+    if v5_candidate is not None:
+        setattr(args, "_v5_core_labels", v5_core_labels.detach().cpu())
+        setattr(args, "_v5_assignment_confidence", v5_assignment_confidence.detach().cpu())
     return other_point_labels, other_instance_to_class
 
 
@@ -711,6 +782,11 @@ def main():
     parser.add_argument("--v4-candidate-labels-output", type=str, default=None)
     parser.add_argument("--v4-git-commit", type=str, default=None)
     parser.add_argument("--v4-scene-id", type=str, default=None)
+    parser.add_argument("--v5-candidate-source", choices=['off', 'codebook', 'multiview'], default='off')
+    parser.add_argument("--v5-candidate-output", type=str, default=None)
+    parser.add_argument("--v5-candidate-labels-output", type=str, default=None)
+    parser.add_argument("--v5-git-commit", type=str, default=None)
+    parser.add_argument("--v5-scene-id", type=str, default=None)
     args = parser.parse_args(sys.argv[1:])
     if args.v3_shadow_mode != 'off':
         if not args.v3_shadow_output or not args.v3_branch_labels_output:
@@ -735,6 +811,15 @@ def main():
             parser.error("V4 candidate shadow requires the unchanged legacy main path")
         if args.scene_scale_m_per_unit <= 0:
             parser.error("V4 candidate shadow requires positive --scene_scale_m_per_unit")
+    if args.v5_candidate_source != 'off':
+        if not args.v5_candidate_output or not args.v5_candidate_labels_output:
+            parser.error("V5 candidate source requires proposal JSON and labels outputs")
+        if not args.v5_git_commit or not args.v5_scene_id:
+            parser.error("V5 candidate source requires commit and scene identifiers")
+        if args.clustering_mode != 'legacy' or args.prior_mode != 'off':
+            parser.error("V5 candidate shadow requires the unchanged legacy main path")
+        if args.scene_scale_m_per_unit <= 0:
+            parser.error("V5 candidate shadow requires positive --scene_scale_m_per_unit")
     prior_resolver = None
     if args.prior_mode != 'off':
         if not args.prior_config or not args.prior_mapping_config:
@@ -1579,6 +1664,151 @@ def main():
     # point_labels = torch.load(os.path.join(args.model_path, 'point_labels.pth'))
 
     instance_ratio = compute_instance_ratios(point_labels, update_progress=True)
+    if args.v5_candidate_source != 'off':
+        from category_priors.teacher_prior import saga20_branch_classes
+        from category_priors.v3_shadow import target_top1_masks, vote_summary
+        from category_priors.v5_candidate import (
+            V5CandidateConfig, source_masks, write_v5_proposal_capture,
+        )
+
+        v5_config = V5CandidateConfig()
+        v5_classes = list(saga20_branch_classes(class_to_idx))
+        normalized_label_features = F.normalize(
+            label_features.detach().cpu(), dim=-1, p=2
+        )
+        all_class_indices = list(range(len(args.classes)))
+        codebook_masks, codebook_top1, codebook_score, codebook_margin = (
+            target_top1_masks(
+                normed_point_semantic_features.numpy(),
+                normalized_label_features.numpy(), all_class_indices,
+                threshold=v5_config.semantic_threshold,
+            )
+        )
+        source_views = np.zeros(len(point_xyz), dtype=np.int16)
+        source_ratio = np.zeros(len(point_xyz), dtype=np.float32)
+        source_margin = np.zeros(len(point_xyz), dtype=np.float32)
+        source_top1 = codebook_top1.copy()
+        source_score = codebook_score.copy()
+        source_semantic_margin = codebook_margin.copy()
+        if args.v5_candidate_source == 'multiview':
+            pixel_votes = np.zeros((len(point_xyz), len(args.classes)), dtype=np.int32)
+            for camera in tqdm(camera_list, desc='V5 multiview semantic source'):
+                mask_file = os.path.join(args.masks_path, f'{camera.image_name}.pt')
+                label_file = os.path.join(args.labels_path, f'{camera.image_name}.pt')
+                if not os.path.isfile(mask_file) or not os.path.isfile(label_file):
+                    continue
+                masks = torch.load(mask_file, map_location='cpu')
+                if masks.shape[-2:] != (camera.image_height, camera.image_width):
+                    masks = torch.nn.functional.interpolate(
+                        masks.float().unsqueeze(1), mode='bilinear',
+                        size=(camera.image_height, camera.image_width),
+                        align_corners=False,
+                    ).squeeze(1) > 0.5
+                else:
+                    masks = masks.bool()
+                labels_2d = torch.load(label_file, map_location='cpu')
+                contributors = get_max_contributor(camera, 'cpu').detach().cpu().numpy()
+                valid_seen = []
+                for label_2d, mask_2d in zip(labels_2d, masks):
+                    class_index = int(label_2d)
+                    if class_index < 0 or class_index >= len(args.classes):
+                        continue
+                    gaussian_ids = contributors[mask_2d.detach().cpu().numpy()]
+                    if gaussian_ids.size == 0:
+                        continue
+                    values, counts = np.unique(gaussian_ids, return_counts=True)
+                    pixel_votes[values, class_index] += counts.astype(np.int32)
+                    valid_seen.append(values)
+                if valid_seen:
+                    source_views[np.unique(np.concatenate(valid_seen))] += 1
+            totals = pixel_votes.sum(axis=1)
+            source_top1 = pixel_votes.argmax(axis=1).astype(np.int16)
+            source_score = np.divide(
+                pixel_votes[np.arange(len(point_xyz)), source_top1], totals,
+                out=np.zeros(len(point_xyz), dtype=np.float32), where=totals > 0,
+            ).astype(np.float32)
+            if pixel_votes.shape[1] > 1:
+                two = np.partition(pixel_votes, -2, axis=1)[:, -2:]
+                source_margin = np.divide(
+                    two[:, 1] - two[:, 0], totals,
+                    out=np.zeros(len(point_xyz), dtype=np.float32), where=totals > 0,
+                ).astype(np.float32)
+            source_semantic_margin = source_margin.copy()
+            v5_masks = source_masks(
+                source='multiview', winner=source_top1, score=source_score,
+                class_indices=class_to_idx, multiview_views=source_views,
+                multiview_ratio=source_score, multiview_margin=source_margin,
+                config=v5_config,
+            )
+        else:
+            v5_masks = source_masks(
+                source='codebook', winner=codebook_top1, score=codebook_score,
+                class_indices=class_to_idx, config=v5_config,
+            )
+        v5_branch, v5_instance_classes = cluster_other_classes(
+            normed_point_features.clone(), normed_point_semantic_features.clone(),
+            point_xyz.clone(), normalized_label_features, class_to_idx, v5_classes, args,
+            device='cpu', exclusive_masks=v5_masks,
+            diagnostics_attribute='_v5_candidate_diagnostics',
+            v5_candidate={'source': args.v5_candidate_source, 'config': v5_config},
+        )
+        v5_ratios = compute_instance_ratios(v5_branch, update_progress=False)
+        v5_diagnostics = dict(getattr(args, '_v5_candidate_diagnostics', {}))
+        v5_rows = list(v5_diagnostics.pop('__candidates__', []))
+        v5_final_labels = point_labels.detach().cpu().numpy()
+        for row in v5_rows:
+            candidate_id = int(row['candidate_id'])
+            candidate_mask = (v5_branch == candidate_id).numpy()
+            candidate_count = int(candidate_mask.sum())
+            overlaps = []
+            for b1_instance_id in np.unique(v5_final_labels[candidate_mask]):
+                if int(b1_instance_id) < 0:
+                    continue
+                b1_mask = v5_final_labels == int(b1_instance_id)
+                intersection = int((candidate_mask & b1_mask).sum())
+                union = int((candidate_mask | b1_mask).sum())
+                ratio = instance_ratio.get(int(b1_instance_id))
+                b1_class = 'background'
+                if ratio is not None and ratio.size and ratio.max() >= args.label_threshold:
+                    b1_class = args.classes[int(np.argmax(ratio))]
+                overlaps.append({
+                    'instance_id': int(b1_instance_id), 'class': b1_class,
+                    'iou': intersection / union if union else 0.0,
+                    'intersection_points': intersection,
+                })
+            overlaps.sort(key=lambda item: (-item['iou'], item['instance_id']))
+            row['b1_instance_iou'] = overlaps
+            row['background_points_against_b1'] = int(
+                candidate_count - int((v5_final_labels[candidate_mask] >= 0).sum())
+            )
+            row['vote'] = vote_summary(
+                v5_ratios.get(candidate_id, np.zeros(len(args.classes), dtype=np.float64)),
+                args.classes, row['branch_class'],
+            )
+        write_v5_proposal_capture(
+            json_path=args.v5_candidate_output,
+            labels_path=args.v5_candidate_labels_output,
+            scene_id=args.v5_scene_id,
+            seed=args.seed,
+            source=args.v5_candidate_source,
+            git_commit=args.v5_git_commit,
+            class_names=args.classes,
+            branch_labels=v5_branch.numpy(),
+            core_labels=getattr(args, '_v5_core_labels').numpy(),
+            assignment_confidence=getattr(args, '_v5_assignment_confidence').numpy(),
+            semantic_winner=source_top1,
+            semantic_score=source_score,
+            semantic_margin=source_semantic_margin,
+            source_view_count=source_views,
+            source_vote_ratio=source_score,
+            source_vote_margin=source_margin,
+            candidates=v5_rows,
+            class_diagnostics=v5_diagnostics,
+        )
+        print(
+            f"V5 {args.v5_candidate_source} captured {len(v5_instance_classes)} "
+            "proposal-bank candidates without modifying B1 labels"
+        )
     if v3_shadow_captures:
         from category_priors.v3_shadow import (
             candidate_survival,
