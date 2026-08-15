@@ -700,8 +700,8 @@ paired bootstrap。结果不得再用于修改候选、阈值或融合；48场�
 - [x] 实现并测试Stage A正控和Stage B shadow候选接口。
 - [x] commit/push并部署相同commit（Stage A/B实现`c62554e`；10k资产路由与resume身份修复`93ab3ee`）。
 - [x] 运行两场景10k正控并冻结诊断结论；未过改善门槛，不扩展10k训练。
-- [ ] 运行8场景候选2×2并按门槛决定是否停止。
-- [ ] 仅在Stage B通过后实现Stage C融合。
+- [x] 运行8场景候选2×2并按门槛决定是否停止：Stage B未通过，V4按预注册规则停止。
+- [x] 未实现Stage C融合，也未运行24或48场景。
 
 ### 2026-08-15 — V4.0 冻结
 
@@ -733,3 +733,20 @@ paired bootstrap。结果不得再用于修改候选、阈值或融合；48场�
 - 首次10k shadow启动暴露CLI漏传feature-control路径；错误产物已整体移至带说明的诊断目录，
   未混入正式比较。修复后新增运行命令身份校验，全部143项测试通过（`93ab3ee`）。
 - Stage B的32次旁路候选实验已按冻结8场景启动。
+
+### 2026-08-16 — V4 Stage B 完成并停止
+
+- 冻结8场景、4条件、seed42的32次shadow均完成且可解析；B1最终输出始终保持旁路不变。
+- `uniform`：79个官方有效tiny/small GT，Recall@0.25=`0.15190`、Recall@0.50=`0.05063`，
+  599个候选，precision@0.25=`0.03339`。
+- `class-scale`与uniform的两项Recall完全相同；新增IoU≥0.25匹配为0，正向场景为0。
+- `class-core`：Recall@0.25=`0.12658`、Recall@0.50=`0.03797`，448个候选，
+  precision@0.25=`0.04018`；相对uniform无新增匹配，2个场景退化。
+- `combined`：Recall@0.25=`0.12658`、Recall@0.50=`0.03797`，450个候选，
+  precision@0.25=`0.04000`；相对uniform无新增匹配，2个场景退化。
+- 三个数据臂均未达到预注册联合门槛，`best_candidate=null`、`stage_b_passed=false`。
+  因此不实现pointwise-evidence融合，不运行24/48场景，也不放宽阈值。
+- 结论边界：两场景10k正控未改善，8场景class-scale/class-core映射也未改善pre-fusion候选；
+  这否定当前输入表示下这两种具体映射的继续计算价值，不等价于证伪所有类别先验或老师未留存的人工配置。
+- 验收产物：`v4_candidate_factorial8.parquet`（2638行）与
+  `v4_candidate_analysis8.json`；运行结束后GPU空闲，磁盘空闲158GB，cgroup无OOM事件。
