@@ -14,6 +14,7 @@ from category_priors.teacher_prior import (
     exclusive_top1_masks,
     materialize_teacher_prior,
     merge_branch_labels,
+    protect_multi_anchor_halo,
     rescue_same_class_noise,
     resolve_teacher_parameters,
     restore_surviving_branches,
@@ -228,6 +229,53 @@ def test_restore_only_branches_that_survive_global_filtering() -> None:
     restored, count = restore_surviving_branches(filtered, membership)
     assert restored.tolist() == [10, 10, 12, -1, 20, 20]
     assert count == 1
+
+
+def test_multi_anchor_protection_restores_only_near_vote_confirmed_halo() -> None:
+    labels = np.asarray([10, 10, 10, 99, -1, 20, -1])
+    membership = np.asarray([10, 10, 10, 10, 10, 20, 20])
+    xyz = np.asarray([
+        [0.00, 0.0, 0.0],
+        [0.02, 0.0, 0.0],
+        [0.04, 0.0, 0.0],
+        [0.03, 0.0, 0.0],
+        [1.00, 0.0, 0.0],
+        [2.00, 0.0, 0.0],
+        [2.01, 0.0, 0.0],
+    ])
+    protected, diagnostics = protect_multi_anchor_halo(
+        labels,
+        membership,
+        xyz,
+        {10: "chair", 20: "cup"},
+        {
+            10: {"min_cluster_size": 3, "protection_radius_m": 0.10},
+            20: {"min_cluster_size": 3, "protection_radius_m": 0.10},
+        },
+        {10: np.asarray([0.8, 0.1]), 20: np.asarray([0.1, 0.8])},
+        {"chair": 0, "cup": 1},
+        0.3,
+    )
+
+    assert protected.tolist() == [10, 10, 10, 10, -1, 20, -1]
+    assert diagnostics["accepted_branches"] == 1
+    assert diagnostics["restored_points"] == 1
+    assert diagnostics["rejection_reasons"] == {"insufficient_anchors": 1}
+
+
+def test_multi_anchor_protection_rejects_wrong_class_or_background_vote() -> None:
+    labels = np.asarray([4, 4, 4, -1])
+    membership = np.asarray([4, 4, 4, 4])
+    xyz = np.asarray([[0.0, 0.0, 0.0], [0.01, 0.0, 0.0],
+                      [0.02, 0.0, 0.0], [0.015, 0.0, 0.0]])
+    for ratio in (np.asarray([0.2, 0.7]), np.asarray([0.2, 0.1])):
+        protected, diagnostics = protect_multi_anchor_halo(
+            labels, membership, xyz, {4: "chair"},
+            {4: {"min_cluster_size": 3, "protection_radius_m": 0.1}},
+            {4: ratio}, {"chair": 0, "cup": 1}, 0.3,
+        )
+        assert protected.tolist() == labels.tolist()
+        assert diagnostics["rejection_reasons"] == {"vote_rejected": 1}
 
 
 def test_top1_and_preserved_branches_are_independent_of_category_order() -> None:

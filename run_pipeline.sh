@@ -46,6 +46,7 @@ legacy_prior_score="unit"
 legacy_prior_semantic_source="gaussian"
 teacher_prior_mode="original"
 teacher_category_params=""
+teacher_evidence_protection="off"
 v3_shadow_mode="off"
 v3_shadow_output=""
 v3_branch_labels_output=""
@@ -121,6 +122,7 @@ Class-first postprocess options:
 Teacher-prior postprocess options:
   --teacher-prior-mode MODE      off|original|all-uniform|size|smooth|small|combined
   --teacher-category-params PATH Shared train-only category statistics/parameters
+  --teacher-evidence-protection MODE  off|multi-anchor
 
 V3 shadow audit options:
   --v3-shadow-mode MODE          off|exact|exclusive|both
@@ -437,6 +439,7 @@ run_postprocess() {
         --seed "$seed"
         --prior_metadata_path "$prior_metadata_path"
         --teacher-prior-mode "$teacher_prior_mode"
+        --teacher-evidence-protection "$teacher_evidence_protection"
     )
     if [[ "$prior_mode" != "off" ]]; then
         prior_args+=(
@@ -674,6 +677,10 @@ while [[ $# -gt 0 ]]; do
             teacher_category_params="$2"
             shift 2
             ;;
+        --teacher-evidence-protection)
+            teacher_evidence_protection="$2"
+            shift 2
+            ;;
         --v3-shadow-mode)
             v3_shadow_mode="$2"
             shift 2
@@ -750,6 +757,10 @@ fi
 case "$teacher_prior_mode" in
     off|original|all-uniform|size|smooth|small|combined) ;;
     *) err "unsupported --teacher-prior-mode: $teacher_prior_mode" ;;
+esac
+case "$teacher_evidence_protection" in
+    off|multi-anchor) ;;
+    *) err "unsupported --teacher-evidence-protection: $teacher_evidence_protection" ;;
 esac
 case "$v3_shadow_mode" in
     off|exact|exclusive|both) ;;

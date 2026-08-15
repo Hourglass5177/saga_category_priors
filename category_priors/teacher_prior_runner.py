@@ -20,6 +20,8 @@ TEACHER_PRIOR_CONDITIONS: dict[str, str] = {
     "D-smooth": "smooth",
     "D-small": "small",
     "D-combined": "combined",
+    "U0-multi-anchor": "all-uniform",
+    "D-combined-multi-anchor": "combined",
 }
 TEACHER_PRIOR_EXPERIMENT_CONDITIONS = (
     "U0-all-uniform",
@@ -32,6 +34,13 @@ TEACHER_PRIOR_EXPERIMENT_CONDITIONS = (
 _PARAMETERIZED_MODES = frozenset(
     {"all-uniform", "size", "smooth", "small", "combined"}
 )
+
+TEACHER_PRIOR_PROTECTION: dict[str, str] = {
+    condition: (
+        "multi-anchor" if condition.endswith("-multi-anchor") else "off"
+    )
+    for condition in TEACHER_PRIOR_CONDITIONS
+}
 
 
 def teacher_prior_run_paths(
@@ -97,6 +106,9 @@ def build_teacher_prior_command(
         command.extend(
             ["--teacher-category-params", str(Path(category_params).resolve())]
         )
+    protection = TEACHER_PRIOR_PROTECTION[condition]
+    if protection != "off":
+        command.extend(["--teacher-evidence-protection", protection])
     return command, paths
 
 
@@ -146,6 +158,7 @@ def _write_diagnostics(
         "physical_scene_id": str(scene.get("physical_scene_id", scene_id)),
         "condition": condition,
         "teacher_prior_mode": TEACHER_PRIOR_CONDITIONS[condition],
+        "teacher_evidence_protection": TEACHER_PRIOR_PROTECTION[condition],
         "seed": int(seed),
         "output_json": str(paths["output"]),
     }
@@ -247,6 +260,7 @@ def execute_teacher_prior_runs(
             "scene_id": scene_id,
             "condition": condition,
             "teacher_prior_mode": TEACHER_PRIOR_CONDITIONS[condition],
+            "teacher_evidence_protection": TEACHER_PRIOR_PROTECTION[condition],
             "seed": seed,
             "run_dir": str(paths["run_dir"]),
         }

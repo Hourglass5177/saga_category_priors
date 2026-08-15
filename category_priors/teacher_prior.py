@@ -181,6 +181,11 @@ def resolve_teacher_parameters(
         "rescue_radius_m": (
             float(class_row["rescue_radius_m"]) if use_small else None
         ),
+        # Evidence protection is a shared structural factor.  Uniform uses the
+        # global train-only radius; small/combined use the class radius.
+        "protection_radius_m": float(
+            class_row["rescue_radius_m"] if use_small else global_row["rescue_radius_m"]
+        ),
         "typical_diag_m": float(class_row["typical_diag_m"]),
         "surface_area_m2": float(class_row["surface_area_m2"]),
         "boundary_ratio_5cm": float(class_row["boundary_ratio_5cm"]),
@@ -271,6 +276,113 @@ def restore_surviving_branches(
             result[branch_mask] = branch_id
             restored += 1
     return result, restored
+
+
+def protect_multi_anchor_halo(
+    labels: Any,
+    branch_membership: Any,
+    xyz_m: Any,
+    branch_classes: Mapping[int, str],
+    branch_parameters: Mapping[int, Mapping[str, Any]],
+    vote_ratios: Mapping[int, Any],
+    class_to_idx: Mapping[str, int],
+    label_threshold: float,
+    anchor_neighbors: int = 3,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Restore only same-candidate halo supported by several surviving anchors.
+
+    The global legacy KNN/filter remains authoritative.  A lost candidate point
+    is restored only when its branch retains at least ``min_cluster_size``
+    anchors, the 2D vote winner (including background) agrees with the branch
+    class, and the point has ``anchor_neighbors`` anchors within the registered
+    physical radius.  One surviving point can therefore never restore a whole
+    proposal.
+    """
+    from scipy.spatial import cKDTree
+
+    result = np.asarray(labels, dtype=np.int64).copy()
+    membership = np.asarray(branch_membership, dtype=np.int64)
+    xyz = np.asarray(xyz_m, dtype=np.float64)
+    if result.shape != membership.shape or xyz.shape != (len(result), 3):
+        raise ValueError("labels, branch membership and xyz must describe the same points")
+    neighbor_count = max(int(anchor_neighbors), 2)
+    reasons: dict[str, int] = {}
+    branches: dict[str, Any] = {}
+    restored_points = 0
+    accepted_branches = 0
+
+    def reject(branch_id: int, reason: str, anchors: int, candidates: int) -> None:
+        reasons[reason] = reasons.get(reason, 0) + 1
+        branches[str(branch_id)] = {
+            "status": reason,
+            "anchor_points": int(anchors),
+            "candidate_points": int(candidates),
+            "restored_points": 0,
+        }
+
+    for branch_id, branch_class in sorted(branch_classes.items()):
+        branch_id = int(branch_id)
+        candidate_mask = membership == branch_id
+        candidate_count = int(candidate_mask.sum())
+        anchor_indices = np.flatnonzero(candidate_mask & (result == branch_id))
+        parameters = branch_parameters.get(branch_id, {})
+        core = int(parameters.get("min_cluster_size", 0))
+        if len(anchor_indices) < max(core, neighbor_count):
+            reject(branch_id, "insufficient_anchors", len(anchor_indices), candidate_count)
+            continue
+        ratio = np.asarray(vote_ratios.get(branch_id, ()), dtype=np.float64)
+        class_index = class_to_idx.get(str(branch_class))
+        if class_index is None or ratio.shape != (len(class_to_idx),):
+            reject(branch_id, "missing_vote", len(anchor_indices), candidate_count)
+            continue
+        class_ratio = float(ratio[class_index])
+        background_ratio = max(0.0, 1.0 - float(ratio.sum()))
+        foreground_winner = int(np.argmax(ratio)) if ratio.size else -1
+        if (
+            foreground_winner != int(class_index)
+            or class_ratio < float(label_threshold)
+            or class_ratio < background_ratio
+        ):
+            reject(branch_id, "vote_rejected", len(anchor_indices), candidate_count)
+            continue
+        radius_m = float(parameters.get("protection_radius_m", 0.0))
+        if not np.isfinite(radius_m) or radius_m <= 0:
+            reject(branch_id, "invalid_radius", len(anchor_indices), candidate_count)
+            continue
+        halo_indices = np.flatnonzero(candidate_mask & (result != branch_id))
+        if len(halo_indices):
+            distances, _ = cKDTree(xyz[anchor_indices]).query(
+                xyz[halo_indices], k=neighbor_count, workers=-1
+            )
+            distances = np.asarray(distances).reshape(len(halo_indices), neighbor_count)
+            accepted = distances[:, -1] <= radius_m
+            restored = halo_indices[accepted]
+            result[restored] = branch_id
+        else:
+            restored = np.empty(0, dtype=np.int64)
+        restored_count = int(len(restored))
+        restored_points += restored_count
+        accepted_branches += 1
+        branches[str(branch_id)] = {
+            "status": "accepted",
+            "class": str(branch_class),
+            "anchor_points": int(len(anchor_indices)),
+            "candidate_points": candidate_count,
+            "restored_points": restored_count,
+            "vote_ratio": class_ratio,
+            "background_vote_ratio": background_ratio,
+            "radius_m": radius_m,
+            "min_cluster_size": core,
+        }
+    return result, {
+        "mode": "multi-anchor",
+        "anchor_neighbors": neighbor_count,
+        "candidate_branches": len(branch_classes),
+        "accepted_branches": accepted_branches,
+        "restored_points": restored_points,
+        "rejection_reasons": reasons,
+        "branches": branches,
+    }
 
 
 def teacher_spatial_distance(xyz_m: Any, scale_m: float) -> np.ndarray:

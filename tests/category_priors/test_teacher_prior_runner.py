@@ -93,6 +93,27 @@ def test_command_uses_shared_params_and_exact_mode(tmp_path) -> None:
     assert not any("schedule" in value or "cache" in value for value in command)
 
 
+def test_multi_anchor_conditions_select_same_modes_with_one_structure_flag(tmp_path) -> None:
+    scene = {
+        "base_path": str(tmp_path / "scene"),
+        "scene_scale_m_per_unit": 1.0,
+        "python_bin": str(tmp_path / "python"),
+    }
+    expected = {
+        "U0-multi-anchor": "all-uniform",
+        "D-combined-multi-anchor": "combined",
+    }
+    for condition, mode in expected.items():
+        command, paths = build_teacher_prior_command(
+            tmp_path / "run_pipeline.sh", scene, tmp_path / "runs",
+            condition, "scene0000_00", 42,
+            tmp_path / "teacher_category_params.json",
+        )
+        assert command[command.index("--teacher-prior-mode") + 1] == mode
+        assert command[command.index("--teacher-evidence-protection") + 1] == "multi-anchor"
+        assert paths["run_dir"].parts[-3:] == (condition, "scene0000_00", "seed-42")
+
+
 def test_off_and_original_never_receive_category_params(tmp_path) -> None:
     scene = {
         "base_path": str(tmp_path / "scene"),

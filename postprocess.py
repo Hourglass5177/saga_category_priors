@@ -656,6 +656,11 @@ def main():
         'off', 'original', 'all-uniform', 'size', 'smooth', 'small', 'combined'
     ], default='original')
     parser.add_argument("--teacher-category-params", type=str, default=None)
+    parser.add_argument(
+        "--teacher-evidence-protection",
+        choices=["off", "multi-anchor"],
+        default="off",
+    )
     parser.add_argument("--v3-shadow-mode", choices=['off', 'exact', 'exclusive', 'both'], default='off')
     parser.add_argument("--v3-shadow-output", type=str, default=None)
     parser.add_argument("--v3-branch-labels-output", type=str, default=None)
@@ -745,6 +750,16 @@ def main():
             "table": load_teacher_category_params(args.teacher_category_params),
             "mode": args.teacher_prior_mode,
         }
+        if args.teacher_evidence_protection != 'off' and (
+            teacher_prior["table"].get("branch_preservation", False)
+            or teacher_prior["table"].get("restore_after_global_filter", False)
+        ):
+            parser.error(
+                "multi-anchor evidence protection requires the original merge table "
+                "(branch_preservation=false, restore_after_global_filter=false)"
+            )
+    elif args.teacher_evidence_protection != 'off':
+        parser.error("teacher evidence protection requires a data teacher-prior mode")
     bg_color = torch.tensor([1,1,1] if args.white_background else [0, 0, 0], dtype=torch.float32, device="cuda")
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -983,6 +998,12 @@ def main():
     teacher_post_filter = {}
     teacher_after_knn = None
     teacher_restored_after_filter = 0
+    teacher_protection_diagnostics = {
+        "mode": args.teacher_evidence_protection,
+        "candidate_branches": 0,
+        "accepted_branches": 0,
+        "restored_points": 0,
+    }
     v3_shadow_captures = {}
     v3_semantic_top1 = None
     v3_semantic_score = None
@@ -1053,7 +1074,15 @@ def main():
             normalized_label_features = F.normalize(
                 label_features.detach().cpu(), dim=-1, p=2
             )
-            if teacher_branch_preservation:
+            if args.teacher_evidence_protection == 'multi-anchor':
+                from category_priors.v3_shadow import target_top1_masks
+                teacher_exclusive_masks, _, _, _ = target_top1_masks(
+                    normed_point_semantic_features.numpy(),
+                    normalized_label_features.numpy(),
+                    [class_to_idx[name] for name in branch_classes],
+                    threshold=0.7,
+                )
+            elif teacher_branch_preservation:
                 from category_priors.teacher_prior import exclusive_top1_masks
                 teacher_exclusive_masks = exclusive_top1_masks(
                     normed_point_semantic_features.numpy(),
@@ -1349,6 +1378,37 @@ def main():
             point_labels = filter3d(point_xyz, point_labels, args.k)
         teacher_after_knn = point_labels.detach().cpu().clone()
         point_labels = filter_num(point_labels, min_num=10)
+        if (
+            args.teacher_evidence_protection == 'multi-anchor'
+            and teacher_merged_classes
+        ):
+            from category_priors.teacher_prior import (
+                protect_multi_anchor_halo,
+                resolve_teacher_parameters,
+            )
+            preliminary_teacher_ratio = compute_instance_ratios(
+                point_labels, update_progress=False
+            )
+            branch_parameters = {
+                int(branch_id): resolve_teacher_parameters(
+                    teacher_prior["table"], branch_class, teacher_prior["mode"]
+                )
+                for branch_id, branch_class in teacher_merged_classes.items()
+            }
+            protected_labels, teacher_protection_diagnostics = (
+                protect_multi_anchor_halo(
+                    point_labels.detach().cpu().numpy(),
+                    teacher_merged_membership.numpy(),
+                    point_xyz.detach().cpu().numpy()
+                    * float(args.scene_scale_m_per_unit),
+                    teacher_merged_classes,
+                    branch_parameters,
+                    preliminary_teacher_ratio,
+                    class_to_idx,
+                    args.label_threshold,
+                )
+            )
+            point_labels = torch.from_numpy(protected_labels)
         if teacher_restore_after_global_filter and teacher_merged_classes:
             from category_priors.teacher_prior import restore_surviving_branches
             restored_labels, teacher_restored_after_filter = (
@@ -1715,6 +1775,7 @@ def main():
                 "restore_after_global_filter": (
                     teacher_restore_after_global_filter
                 ),
+                "evidence_protection": teacher_protection_diagnostics,
                 "classes": (
                     getattr(args, '_teacher_prior_diagnostics', {})
                     if teacher_prior is not None

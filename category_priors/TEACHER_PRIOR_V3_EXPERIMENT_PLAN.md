@@ -7,7 +7,7 @@
 - 版本：V3.0
 - 冻结日期：2026-08-15
 - V3 起点代码检查点：`f1367fa58c8f50df75f80b86f67bab469af06531`
-- 当前状态：**Stage 0 已完成并验收；Stage 1 尚未实现或运行**
+- 当前状态：**Stage 1 已完成并验收；Stage 2 已按死亡类型唯一选择多-anchor局部保护**
 - 适用范围：现有 24 个 tune 场景、原 48 个内部评估场景及现有训练资产
 - 独立实验单位：physical scene
 - 技术重复：seed `42`、`3407`、`20260804`
@@ -527,16 +527,25 @@ viewer/worst
 - [x] 将V3计划冻结到本文件。
 - [x] 实现并测试 Stage 0 轻量导出命令（commit `83be51254eff18debe0b1d52e6ca0011e7c449ac`）。
 - [x] 验收 B0/B1 历史锚点、train-only 尺寸边界和 GT-only 诊断8场景。
+- [x] commit `a11a138b5f4c494fa25a5c649e9cdb423c622c17` 实现 Stage 1 shadow/oracle；legacy最终输出保持旁路不变。
+- [x] 冻结8场景审计：1916个候选；small GT=90；global/candidate Recall@0.25为0.1556/0.1111；新增small match=2，未过8场景门槛。
+- [x] 自动扩展剩余16场景并冻结24场景审计：6391个候选；small GT=195；global/candidate Recall@0.25为0.1846/0.1897；新增small match=14，覆盖6个场景、4类，通过预注册第二门槛。
+- [x] 核验所有20个全尺寸bin的oracle-positive新增候选：均保留多个global KNN/filter survivor anchors且2D vote winner等于branch class；据第7节唯一选择A“多-anchor局部保护”，不实现proposal级准入B。
 
 ### 下一步
 
-- [ ] 实现 Stage 1 shadow/oracle 候选漏斗，不改变legacy最终输出。
-- [ ] 本地测试并回读本文件核对每个字段与门槛。
-- [ ] commit/push后部署同一commit到云端。
-- [ ] 在已冻结的8个诊断场景运行 shadow/oracle 审计。
-- [ ] 根据漏斗事实决定 A 或 B 保护，禁止凭直觉同时实现两套。
+- [ ] 完成Stage 2多-anchor局部保护实现：同候选/同类、anchor数达到core、2D vote确认、物理半径内才恢复halo；禁止整簇恢复。
+- [ ] 全套测试、commit/push并部署同一commit。
+- [ ] 在冻结8场景运行`shared uniform/data combined × 原合并/多-anchor保护`共32次。
+- [ ] 生成`v3_structure_2x2_metrics.parquet`并按第7节门槛决定是否进入Stage 3。
 
-当前不得直接进入2×2、2³、24场景或48场景。
+当前不得直接进入2³、24场景或48场景；只允许完成Stage 2的2×2。
+
+### Stage 1 冻结产物
+
+- 8场景：`v3_proposal_funnel.parquet`、`v3_input_ceiling.json`、`v3_proposal_oracle_analysis.json`
+- 24场景：`v3_proposal_funnel_24.parquet`、`v3_input_ceiling_24.json`、`v3_proposal_oracle_analysis_24.json`
+- 云端目录：`/root/autodl-tmp/saga/artifacts/teacher-prior-v3-a11a138`
 
 ### Stage 0 已验收事实
 
