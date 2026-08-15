@@ -625,3 +625,99 @@ viewer/worst
   core支持与core-halo），并先用oracle recall验证，不再直接修改最终B1输出。
 
 后续每次阶段完成均在此处追加日期、commit、产物和门槛判定。
+
+## 17. V4：输入优先的最小重验证（当前权威计划）
+
+### 17.1 状态与研究边界
+
+V3已经按预注册门槛停止。V4不再放宽保护阈值，也不直接进入旧2³实验；顺序固定为：
+
+> 两场景10k特征正控 → 8场景类别候选2×2 → 单一保守融合 → 24场景复核 → 48场景内部验证。
+
+全程复用已有3DGS、GT、相机、masks、labels和scale gate，不下载数据、不训练3DGS。
+10k affinity/semantic feature训练只限 `scene0011_00` 与 `scene0608_00`，输出到独立目录，
+不得覆盖2k资产，也不得把10k正控结果混入正式uniform/data比较。
+
+### 17.2 Stage A：2k与10k正控
+
+- 相同30k 3DGS、masks、labels、相机和seed，从头训练10k轮feature。
+- 比较SAM覆盖、semantic top-1 recall、同/异实例affinity margin、tiny/small候选
+  Recall@0.25/0.50、IoU≥0.25匹配数和候选精度。
+- 明显改善门槛：平均semantic recall提高≥0.05，或tiny/small Recall@0.25提高≥0.10；
+  同时新增≥2个IoU≥0.25实例匹配，任一场景不损失超过1个原匹配，候选数≤2k的1.5倍。
+- 无论是否通过，未经额外授权不得扩展10k训练。
+
+### 17.3 Stage B：8场景候选2×2
+
+候选模式固定为 `uniform`、`class-scale`、`class-core`、`combined`。四臂共享32类top-1
+竞争、SAGA20赢家过滤、semantic阈值、距离权重、assignment阈值、sample cap和显式
+`min_samples=3`；同scene/seed使用同一随机排列，采样数变化只取嵌套前缀。shadow只生成
+候选，不改变B1输出。
+
+- `class-scale`：以train-only `log_bbox_diag_m.q50`得到 `d_c`，用场景mask-scale经验CDF
+  得到 `g_c`，仅通过 `scale_gate(g_c)`重算该类affinity feature，不改XYZ归一化。
+- `class-core`：由当前场景Gaussian表面密度、train-only典型表面积和实际采样率估计
+  `m_c`，限制到[3,20]；只改变`min_cluster_size`。
+- `combined`：同时启用以上两项。
+
+进入融合的候选臂必须同时满足：tiny/small Recall@0.25相对uniform提高≥0.02；新增≥5个
+IoU≥0.25匹配且覆盖≥2类、≥4场景；候选精度≥uniform的80%；候选数≤uniform的1.5倍；
+正向场景多于负向。只选一个best，依次按tiny/small Recall@0.25、Recall@0.50、候选精度、
+更简单单因素破并列。无臂通过则停止V4。
+
+### 17.4 Stage C：唯一允许的融合
+
+只有Stage B通过后才实现并运行pointwise-evidence融合。B1始终为基线；候选须满足2D vote
+赢家为branch class、比例≥0.60且高于背景、至少100个pointwise同意的core点、HDBSCAN
+persistence≥0.05。与同类B1实例IoU≥0.25时仅合并core；与全部B1实例IoU≤0.25时core
+可新建实例；与异类实例IoU>0.25时拒绝。halo只能恢复B1背景点，且须同候选、同类别、
+半径≤0.1d_c、至少3个同候选core anchor，不得覆盖任何B1实例。
+
+8场景比较B1、uniform+融合、best+融合。uniform结构门槛：相对B1 mAP下降≤0.002、
+实例数≤1.5倍、覆盖不下降、AP50下降≤0.005。best进入24场景门槛：相对uniform
+ΔmAP≥0.002，或tiny/small Recall@0.50提高≥0.01且总体mAP不下降；正向场景更多，
+FP/TP恶化≤20%。失败后不得放宽融合阈值。
+
+### 17.5 Stage D/E：扩展与停止
+
+Stage D先在剩余16个tune场景运行uniform/best seed42；剩余16 ΔmAP>0、全24
+ΔmAP≥0.002、正向场景更多且tiny/small Recall@0.50为正后，才补seed 3407与20260804。
+进入48场景要求三seed平均ΔmAP≥0.002、至少2/3 seed为正、小物指标为正且结构指标仍合格。
+
+Stage E只运行48×{uniform,best}×3 seeds。每个physical scene先平均seed，再做10,000次
+paired bootstrap。结果不得再用于修改候选、阈值或融合；48场景仍称内部验证。
+
+### 17.6 V4验收产物
+
+`v4_feature_10k_control.json`、`v4_candidate_factorial8.parquet`、
+`v4_candidate_analysis8.json`、`v4_fusion8_metrics.parquet`、
+`v4_tune24_metrics.parquet`、`v4_final_metrics.parquet`、`v4_analysis.json`和`viewer/`。
+
+### 17.7 当前执行检查点
+
+- [x] V3 Stage 2按门槛停止，未进入旧2³。
+- [x] V4实验顺序、因素、融合规则和停止门槛冻结到本文件。
+- [x] 实现并测试Stage A正控和Stage B shadow候选接口。
+- [ ] commit/push并部署相同commit。
+- [ ] 运行两场景10k正控并冻结诊断结论。
+- [ ] 运行8场景候选2×2并按门槛决定是否停止。
+- [ ] 仅在Stage B通过后实现Stage C融合。
+
+### 2026-08-15 — V4.0 冻结
+
+- 将输入/候选质量置于最终实例融合之前。
+- 10k只作两场景诊断正控，不改变正式比较资产。
+- 将类别先验收缩为两个可归因因素：SAGA原生class-scale gate和density-calibrated core支持。
+- 明确只有候选门槛通过后才允许实现唯一融合结构。
+
+### 2026-08-15 — V4 Stage A/B 实现完成
+
+- 新增隔离的两场景10k训练入口；输出feature PLY、scale gate、日志和记录均位于
+  `feature-10k-control/<scene>/`，不写入原2k资产目录。
+- 新增四臂V4 shadow入口。四臂共用32类top-1/SAGA20过滤、距离、阈值和按类确定性
+  随机排列；`class-scale`只改变SAGA scale gate，`class-core`只改变显式
+  `min_cluster_size`，`min_samples`固定为3。
+- 新增2k/10k正控比较器与8场景候选门槛评估器；shadow路径继续输出原始B1结果，候选
+  仅写独立JSON/NPZ。
+- 定向及全部`tests/category_priors`共141项通过；`compileall`与`bash -n`通过。
+- Stage C融合尚未实现，只有Stage B通过才允许落盘。

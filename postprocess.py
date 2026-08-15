@@ -69,7 +69,8 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
                           raw_point_features=None, scale_gate=None,
                           mask_scales=(), surface_density=1.0,
                           semantic_vote_scores=None, teacher_prior=None,
-                          exclusive_masks=None, diagnostics_attribute=None):
+                          exclusive_masks=None, diagnostics_attribute=None,
+                          v4_candidate=None):
     """
     Perform semantic-guided clustering for 'other_classes' (small objects).
 
@@ -123,6 +124,7 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
         semantic_threshold = args.other_classes_similarity_threshold
         parameters = None
         teacher_parameters = None
+        v4_parameters = None
         if teacher_prior is not None:
             from category_priors.teacher_prior import resolve_teacher_parameters
             teacher_parameters = resolve_teacher_parameters(
@@ -147,6 +149,17 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
                 surface_density, mask_scales,
             )
             semantic_threshold = float(parameters["semantic_threshold"])
+        elif v4_candidate is not None:
+            from category_priors.v4_candidate import resolve_v4_candidate_parameters
+            preliminary_mask = torch.as_tensor(
+                exclusive_masks[class_idx], dtype=torch.bool, device=device
+            )
+            v4_parameters = resolve_v4_candidate_parameters(
+                v4_candidate["priors"], v4_candidate["mode"], class_name,
+                int(preliminary_mask.sum()), surface_density, mask_scales,
+                v4_candidate["config"],
+            )
+            semantic_threshold = float(v4_parameters["semantic_threshold"])
         if exclusive_masks is not None:
             similarity_scores = torch.einsum(
                 'nc,c->n', point_semantic_features, label_features[class_idx]
@@ -171,31 +184,43 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
             int(teacher_parameters["min_cluster_size"])
             if teacher_parameters is not None else (
                 int(parameters["min_cluster_size"])
-                if parameters is not None else args.other_classes_min_cluster_size
+                if parameters is not None else (
+                    int(v4_parameters["min_cluster_size"])
+                    if v4_parameters is not None else args.other_classes_min_cluster_size
+                )
             )
         )
         min_samples = (
             int(teacher_parameters["min_samples"])
             if teacher_parameters is not None else (
                 int(parameters["min_samples"])
-                if parameters is not None else min_cluster_size
+                if parameters is not None else (
+                    int(v4_parameters["min_samples"])
+                    if v4_parameters is not None else min_cluster_size
+                )
             )
         )
         if num_selected < min_cluster_size:
             print(f"  Skipping: insufficient points")
             branch_diagnostics[class_name] = {
                 "candidate_points": int(num_selected), "status": "insufficient_points",
-                "parameters": teacher_parameters if teacher_parameters is not None else parameters,
+                "parameters": teacher_parameters if teacher_parameters is not None else (
+                    parameters if parameters is not None else v4_parameters
+                ),
             }
             continue
 
         # Step 2: Sample selected points for efficiency
         selected_features = point_features[selection_mask]
         if (
-            parameters is not None and raw_point_features is not None
+            (parameters is not None or v4_parameters is not None)
+            and raw_point_features is not None
             and scale_gate is not None
         ):
-            gate_input = float(parameters["scale_gate_input"])
+            gate_input = float(
+                parameters["scale_gate_input"]
+                if parameters is not None else v4_parameters["scale_gate_input"]
+            )
             with torch.no_grad():
                 gate = scale_gate(
                     torch.tensor([gate_input], dtype=torch.float32, device="cuda")
@@ -227,10 +252,19 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
             min(num_selected, int(teacher_parameters["sample_num"]))
             if teacher_parameters is not None else (
                 int(parameters["sample_count"])
-                if parameters is not None else min(num_selected, args.other_classes_sample_num)
+                if parameters is not None else (
+                    int(v4_parameters["sample_count"])
+                    if v4_parameters is not None else min(num_selected, args.other_classes_sample_num)
+                )
             )
         )
-        if teacher_parameters is not None and exclusive_masks is not None:
+        if v4_parameters is not None:
+            from category_priors.v4_candidate import nested_permutation
+            sampled_indices = torch.as_tensor(
+                nested_permutation(num_selected, args.seed, class_name)[:sample_size],
+                dtype=torch.long, device=device,
+            )
+        elif teacher_parameters is not None and exclusive_masks is not None:
             class_seed = int(args.seed) + sum(
                 (index + 1) * ord(character)
                 for index, character in enumerate(class_name)
@@ -315,7 +349,9 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
                 "sampled_points": int(sample_size),
                 "hdbscan_noise_points": int((cluster_labels < 0).sum()),
                 "status": "no_clusters",
-                "parameters": teacher_parameters if teacher_parameters is not None else parameters,
+                "parameters": teacher_parameters if teacher_parameters is not None else (
+                    parameters if parameters is not None else v4_parameters
+                ),
             }
             continue
 
@@ -467,7 +503,9 @@ def cluster_other_classes(point_features, point_semantic_features, point_xyz, la
             "rescued_points": int(rescued),
             "final_instances": int(sum(1 for value in other_instance_to_class.values() if value == class_name)),
             "status": "complete",
-            "parameters": teacher_parameters if teacher_parameters is not None else parameters,
+            "parameters": teacher_parameters if teacher_parameters is not None else (
+                parameters if parameters is not None else v4_parameters
+            ),
         }
 
     print(f"\nSemantic-guided clustering complete: {current_instance_id} instances created")
@@ -666,6 +704,13 @@ def main():
     parser.add_argument("--v3-branch-labels-output", type=str, default=None)
     parser.add_argument("--v3-shadow-git-commit", type=str, default=None)
     parser.add_argument("--v3-shadow-scene-id", type=str, default=None)
+    parser.add_argument("--v4-candidate-mode", choices=[
+        'off', 'uniform', 'class-scale', 'class-core', 'combined'
+    ], default='off')
+    parser.add_argument("--v4-candidate-output", type=str, default=None)
+    parser.add_argument("--v4-candidate-labels-output", type=str, default=None)
+    parser.add_argument("--v4-git-commit", type=str, default=None)
+    parser.add_argument("--v4-scene-id", type=str, default=None)
     args = parser.parse_args(sys.argv[1:])
     if args.v3_shadow_mode != 'off':
         if not args.v3_shadow_output or not args.v3_branch_labels_output:
@@ -681,6 +726,15 @@ def main():
             parser.error("V3 shadow audit requires the unchanged legacy main path")
         if args.scene_scale_m_per_unit <= 0:
             parser.error("V3 shadow audit requires positive --scene_scale_m_per_unit")
+    if args.v4_candidate_mode != 'off':
+        if not args.v4_candidate_output or not args.v4_candidate_labels_output:
+            parser.error("V4 candidate mode requires candidate JSON and labels outputs")
+        if not args.v4_git_commit or not args.v4_scene_id or not args.category_priors:
+            parser.error("V4 candidate mode requires priors, commit, and scene identifiers")
+        if args.clustering_mode != 'legacy' or args.prior_mode != 'off':
+            parser.error("V4 candidate shadow requires the unchanged legacy main path")
+        if args.scene_scale_m_per_unit <= 0:
+            parser.error("V4 candidate shadow requires positive --scene_scale_m_per_unit")
     prior_resolver = None
     if args.prior_mode != 'off':
         if not args.prior_config or not args.prior_mapping_config:
@@ -887,7 +941,7 @@ def main():
 
     legacy_mask_scales = []
     legacy_surface_density = 1.0
-    if legacy_prior is not None:
+    if legacy_prior is not None or args.v4_candidate_mode != 'off':
         from category_priors.legacy_prior import estimate_surface_density
         if os.path.isdir(args.mask_scales_path):
             for filename in sorted(os.listdir(args.mask_scales_path)):
@@ -1009,6 +1063,7 @@ def main():
     v3_semantic_score = None
     v3_semantic_margin = None
     v3_sam_covered = torch.zeros(len(point_xyz), dtype=torch.bool)
+    v4_candidate_capture = None
     teacher_branch_preservation = bool(
         teacher_prior is not None
         and teacher_prior["table"].get("branch_preservation", False)
@@ -1199,6 +1254,44 @@ def main():
                 f"{len(shadow_instance_classes)} candidates without modifying legacy labels"
             )
 
+    if args.v4_candidate_mode != 'off':
+        from category_priors.io import load_json
+        from category_priors.teacher_prior import saga20_branch_classes
+        from category_priors.v3_shadow import target_top1_masks
+        from category_priors.v4_candidate import V4CandidateConfig
+
+        v4_classes = list(saga20_branch_classes(class_to_idx))
+        v4_label_features = F.normalize(label_features.detach().cpu(), dim=-1, p=2)
+        v4_masks, v4_top1, v4_score, v4_margin = target_top1_masks(
+            normed_point_semantic_features.numpy(),
+            v4_label_features.numpy(),
+            [class_to_idx[name] for name in v4_classes],
+            threshold=args.other_classes_similarity_threshold,
+        )
+        v4_branch, v4_instance_classes = cluster_other_classes(
+            normed_point_features.clone(), normed_point_semantic_features.clone(),
+            point_xyz.clone(), v4_label_features, class_to_idx, v4_classes, args,
+            device='cpu', raw_point_features=point_features, scale_gate=scale_gate,
+            mask_scales=legacy_mask_scales, surface_density=legacy_surface_density,
+            exclusive_masks=v4_masks, diagnostics_attribute='_v4_candidate_diagnostics',
+            v4_candidate={
+                'priors': load_json(args.category_priors),
+                'mode': args.v4_candidate_mode,
+                'config': V4CandidateConfig(),
+            },
+        )
+        v4_candidate_capture = {
+            'branch_labels': v4_branch,
+            'classes': v4_instance_classes,
+            'semantic_top1': v4_top1,
+            'semantic_score': v4_score,
+            'semantic_margin': v4_margin,
+        }
+        print(
+            f"V4 {args.v4_candidate_mode} captured {len(v4_instance_classes)} "
+            "shadow candidates without modifying B1 labels"
+        )
+
     def filter3d(pos, label, k):
         print('begin filter3d')
         assert pos.shape[0] == label.shape[0]
@@ -1262,7 +1355,7 @@ def main():
                 masks = masks.bool()
             labels_2d = torch.load(os.path.join(args.labels_path, f'{camera.image_name}.pt'))
             max_contributor = get_max_contributor(camera, labels_for_vote.device)
-            if args.v3_shadow_mode != 'off' and masks.numel() > 0:
+            if (args.v3_shadow_mode != 'off' or args.v4_candidate_mode != 'off') and masks.numel() > 0:
                 foreground = masks.any(dim=0)
                 covered_indices = max_contributor[foreground].detach().cpu().long()
                 if covered_indices.numel():
@@ -1560,6 +1653,44 @@ def main():
                 candidates=enriched_candidates,
                 class_diagnostics=shadow_diagnostics,
             )
+    if v4_candidate_capture is not None:
+        from category_priors.v3_shadow import label_overlap, vote_summary
+        from category_priors.v4_candidate import write_v4_candidate_capture
+
+        branch = v4_candidate_capture['branch_labels']
+        ratios = compute_instance_ratios(branch, update_progress=False)
+        diagnostics = dict(getattr(args, '_v4_candidate_diagnostics', {}))
+        candidate_rows = list(diagnostics.pop('__candidates__', []))
+        enriched = []
+        final_labels = point_labels.detach().cpu().numpy()
+        for candidate in candidate_rows:
+            row = dict(candidate)
+            candidate_id = int(row['candidate_id'])
+            mask = (branch == candidate_id).numpy()
+            row['active_branch_points'] = int(mask.sum())
+            row['global_final_overlap'] = label_overlap(final_labels, mask)
+            row['vote'] = vote_summary(
+                ratios.get(candidate_id, np.zeros(len(args.classes), dtype=np.float64)),
+                args.classes, row['branch_class'],
+            )
+            enriched.append(row)
+        write_v4_candidate_capture(
+            json_path=args.v4_candidate_output,
+            labels_path=args.v4_candidate_labels_output,
+            scene_id=args.v4_scene_id,
+            seed=args.seed,
+            mode=args.v4_candidate_mode,
+            git_commit=args.v4_git_commit,
+            class_names=args.classes,
+            affinity_gate=gates.numpy(),
+            branch_labels=branch.numpy(),
+            semantic_top1=v4_candidate_capture['semantic_top1'],
+            semantic_top1_score=v4_candidate_capture['semantic_score'],
+            semantic_margin=v4_candidate_capture['semantic_margin'],
+            sam_covered=v3_sam_covered.numpy(),
+            candidates=enriched,
+            class_diagnostics=diagnostics,
+        )
     print(
         f"max-contributor cache summary: hits={max_contributor_cache_hits}, "
         f"misses={max_contributor_cache_misses}"

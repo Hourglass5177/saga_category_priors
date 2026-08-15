@@ -52,6 +52,11 @@ v3_shadow_output=""
 v3_branch_labels_output=""
 v3_shadow_git_commit=""
 v3_shadow_scene_id=""
+v4_candidate_mode="off"
+v4_candidate_output=""
+v4_candidate_labels_output=""
+v4_git_commit=""
+v4_scene_id=""
 
 sam_checkpoint_path="${SCRIPT_DIR}/weights/sam_vit_h_4b8939.pth"
 groundingdino_checkpoint_path="${SCRIPT_DIR}/weights/groundingdino_swint_ogc.pth"
@@ -130,6 +135,13 @@ V3 shadow audit options:
   --v3-branch-labels-output PATH
   --v3-shadow-git-commit COMMIT
   --v3-shadow-scene-id SCENE
+
+V4 candidate shadow options:
+  --v4-candidate-mode MODE       off|uniform|class-scale|class-core|combined
+  --v4-candidate-output PATH
+  --v4-candidate-labels-output PATH
+  --v4-git-commit COMMIT
+  --v4-scene-id SCENE
 
 Model options:
   --sam-checkpoint-path PATH
@@ -363,6 +375,12 @@ preflight_stage() {
                     ensure_parent_dir "$v3_shadow_output"
                     ensure_parent_dir "$v3_branch_labels_output"
                 fi
+                if [[ "$v4_candidate_mode" != "off" ]]; then
+                    require_file "$label_features_path" "Label features file"
+                    require_file "$category_priors" "Category priors"
+                    ensure_parent_dir "$v4_candidate_output"
+                    ensure_parent_dir "$v4_candidate_labels_output"
+                fi
             fi
             ;;
         render)
@@ -468,6 +486,16 @@ run_postprocess() {
             --v3-branch-labels-output "$v3_branch_labels_output"
             --v3-shadow-git-commit "$v3_shadow_git_commit"
             --v3-shadow-scene-id "$v3_shadow_scene_id"
+        )
+    fi
+    if [[ "$v4_candidate_mode" != "off" ]]; then
+        prior_args+=(
+            --v4-candidate-mode "$v4_candidate_mode"
+            --category-priors "$category_priors"
+            --v4-candidate-output "$v4_candidate_output"
+            --v4-candidate-labels-output "$v4_candidate_labels_output"
+            --v4-git-commit "$v4_git_commit"
+            --v4-scene-id "$v4_scene_id"
         )
     fi
     if [[ "$clustering_mode" == "class-first" ]]; then
@@ -701,6 +729,26 @@ while [[ $# -gt 0 ]]; do
             v3_shadow_scene_id="$2"
             shift 2
             ;;
+        --v4-candidate-mode)
+            v4_candidate_mode="$2"
+            shift 2
+            ;;
+        --v4-candidate-output)
+            v4_candidate_output="$2"
+            shift 2
+            ;;
+        --v4-candidate-labels-output)
+            v4_candidate_labels_output="$2"
+            shift 2
+            ;;
+        --v4-git-commit)
+            v4_git_commit="$2"
+            shift 2
+            ;;
+        --v4-scene-id)
+            v4_scene_id="$2"
+            shift 2
+            ;;
         --sam-checkpoint-path)
             sam_checkpoint_path="$2"
             shift 2
@@ -765,6 +813,10 @@ esac
 case "$v3_shadow_mode" in
     off|exact|exclusive|both) ;;
     *) err "unsupported --v3-shadow-mode: $v3_shadow_mode" ;;
+esac
+case "$v4_candidate_mode" in
+    off|uniform|class-scale|class-core|combined) ;;
+    *) err "unsupported --v4-candidate-mode: $v4_candidate_mode" ;;
 esac
 if [[ -z "$python_bin" ]]; then
     find_python

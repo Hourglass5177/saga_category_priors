@@ -29,6 +29,11 @@ from .teacher_prior_runner import (
 from .v3_stage0 import prepare_v3_stage0
 from .v3_shadow_runner import execute_v3_shadow_runs
 from .v3_shadow_evaluation import evaluate_v3_shadow_runs
+from .v4_candidate import MODES as V4_CANDIDATE_MODES
+from .v4_candidate_runner import execute_v4_candidate_runs
+from .v4_feature_control import execute_v4_feature_controls
+from .v4_candidate_evaluation import evaluate_v4_candidate_runs
+from .v4_feature_control_evaluation import evaluate_v4_feature_control
 from .download import (
     MINIMAL_FILE_TYPES,
     download_scannet_saga_scenes,
@@ -498,6 +503,7 @@ def command_run_class_first(args: argparse.Namespace) -> None:
         continue_on_error=args.continue_on_error,
         dry_run=args.dry_run,
         max_runs=args.max_runs,
+        feature_control_root=args.feature_control_root,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
@@ -717,6 +723,61 @@ def command_evaluate_v3_shadow(args: argparse.Namespace) -> None:
         input_ceiling_output=args.input_ceiling_output,
         analysis_output=args.analysis_output,
         radius_m=args.radius_m,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def command_run_v4_candidates(args: argparse.Namespace) -> None:
+    payload = execute_v4_candidate_runs(
+        scene_manifest=args.scene_manifest,
+        output_root=args.output_root,
+        pipeline=args.pipeline,
+        git_commit=args.git_commit,
+        category_priors=args.category_priors,
+        scene_ids=args.scene,
+        modes=args.mode or V4_CANDIDATE_MODES,
+        seeds=args.seed or (42,),
+        resume=not args.no_resume,
+        continue_on_error=args.continue_on_error,
+        dry_run=args.dry_run,
+        max_runs=args.max_runs,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def command_run_v4_feature_control(args: argparse.Namespace) -> None:
+    payload = execute_v4_feature_controls(
+        scene_manifest=args.scene_manifest,
+        output_root=args.output_root,
+        pipeline=args.pipeline,
+        git_commit=args.git_commit,
+        scene_ids=args.scene or None,
+        resume=not args.no_resume,
+        dry_run=args.dry_run,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def command_evaluate_v4_candidates(args: argparse.Namespace) -> None:
+    payload = evaluate_v4_candidate_runs(
+        scene_manifest_path=args.scene_manifest, gt_dir=args.gt_dir,
+        output_root=args.output_root, taxonomy=load_taxonomy(args.taxonomy),
+        size_bins_path=args.size_bins, scene_ids=args.scene, seed=args.seed,
+        table_output=args.table_output, analysis_output=args.analysis_output,
+        radius_m=args.radius_m,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def command_evaluate_v4_feature_control(args: argparse.Namespace) -> None:
+    payload = evaluate_v4_feature_control(
+        scene_manifest_path=args.scene_manifest, gt_dir=args.gt_dir,
+        taxonomy=load_taxonomy(args.taxonomy), size_bins_path=args.size_bins,
+        scene_ids=args.scene, seed=args.seed,
+        candidate_root_2k=args.candidate_root_2k,
+        candidate_root_10k=args.candidate_root_10k,
+        feature_control_root=args.feature_control_root,
+        output=args.output, radius_m=args.radius_m,
     )
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
@@ -1354,6 +1415,74 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_v3_shadow.add_argument("--analysis-output", required=True)
     evaluate_v3_shadow.add_argument("--radius-m", type=float, default=0.05)
     evaluate_v3_shadow.set_defaults(func=command_evaluate_v3_shadow)
+
+    run_v4_candidates = subparsers.add_parser(
+        "run-v4-candidates",
+        help="Run the four V4 shadow candidate arms without changing B1 output",
+    )
+    run_v4_candidates.add_argument("--scene-manifest", required=True)
+    run_v4_candidates.add_argument("--output-root", required=True)
+    run_v4_candidates.add_argument("--pipeline", required=True)
+    run_v4_candidates.add_argument("--git-commit", required=True)
+    run_v4_candidates.add_argument("--category-priors", required=True)
+    run_v4_candidates.add_argument("--scene", action="append", required=True)
+    run_v4_candidates.add_argument("--mode", action="append", choices=V4_CANDIDATE_MODES)
+    run_v4_candidates.add_argument("--seed", action="append", type=int)
+    run_v4_candidates.add_argument("--no-resume", action="store_true")
+    run_v4_candidates.add_argument("--continue-on-error", action="store_true")
+    run_v4_candidates.add_argument("--dry-run", action="store_true")
+    run_v4_candidates.add_argument("--max-runs", type=int)
+    run_v4_candidates.add_argument(
+        "--feature-control-root",
+        help="Use isolated 10k feature/scale-gate assets; restricts the run to uniform",
+    )
+    run_v4_candidates.set_defaults(func=command_run_v4_candidates)
+
+    run_v4_control = subparsers.add_parser(
+        "run-v4-feature-control",
+        help="Train isolated 10k feature controls for the two registered scenes",
+    )
+    run_v4_control.add_argument("--scene-manifest", required=True)
+    run_v4_control.add_argument("--output-root", required=True)
+    run_v4_control.add_argument("--pipeline", required=True)
+    run_v4_control.add_argument("--git-commit", required=True)
+    run_v4_control.add_argument("--scene", action="append")
+    run_v4_control.add_argument("--no-resume", action="store_true")
+    run_v4_control.add_argument("--dry-run", action="store_true")
+    run_v4_control.set_defaults(func=command_run_v4_feature_control)
+
+    evaluate_v4 = subparsers.add_parser(
+        "evaluate-v4-candidates",
+        help="Evaluate the registered V4 2x2 shadow candidate gate",
+    )
+    evaluate_v4.add_argument("--scene-manifest", required=True)
+    evaluate_v4.add_argument("--gt-dir", required=True)
+    evaluate_v4.add_argument("--output-root", required=True)
+    evaluate_v4.add_argument("--taxonomy")
+    evaluate_v4.add_argument("--size-bins", required=True)
+    evaluate_v4.add_argument("--scene", action="append", required=True)
+    evaluate_v4.add_argument("--seed", type=int, default=42)
+    evaluate_v4.add_argument("--table-output", required=True)
+    evaluate_v4.add_argument("--analysis-output", required=True)
+    evaluate_v4.add_argument("--radius-m", type=float, default=0.05)
+    evaluate_v4.set_defaults(func=command_evaluate_v4_candidates)
+
+    evaluate_v4_control = subparsers.add_parser(
+        "evaluate-v4-feature-control",
+        help="Compare the registered two-scene 2k and isolated 10k controls",
+    )
+    evaluate_v4_control.add_argument("--scene-manifest", required=True)
+    evaluate_v4_control.add_argument("--gt-dir", required=True)
+    evaluate_v4_control.add_argument("--taxonomy")
+    evaluate_v4_control.add_argument("--size-bins", required=True)
+    evaluate_v4_control.add_argument("--scene", action="append", required=True)
+    evaluate_v4_control.add_argument("--seed", type=int, default=42)
+    evaluate_v4_control.add_argument("--candidate-root-2k", required=True)
+    evaluate_v4_control.add_argument("--candidate-root-10k", required=True)
+    evaluate_v4_control.add_argument("--feature-control-root", required=True)
+    evaluate_v4_control.add_argument("--output", required=True)
+    evaluate_v4_control.add_argument("--radius-m", type=float, default=0.05)
+    evaluate_v4_control.set_defaults(func=command_evaluate_v4_feature_control)
 
     evaluate_seed_audit = subparsers.add_parser(
         "evaluate-seed-audit",
