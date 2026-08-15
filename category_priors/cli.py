@@ -503,7 +503,6 @@ def command_run_class_first(args: argparse.Namespace) -> None:
         continue_on_error=args.continue_on_error,
         dry_run=args.dry_run,
         max_runs=args.max_runs,
-        feature_control_root=args.feature_control_root,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
@@ -741,6 +740,7 @@ def command_run_v4_candidates(args: argparse.Namespace) -> None:
         continue_on_error=args.continue_on_error,
         dry_run=args.dry_run,
         max_runs=args.max_runs,
+        feature_control_root=args.feature_control_root,
     )
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 

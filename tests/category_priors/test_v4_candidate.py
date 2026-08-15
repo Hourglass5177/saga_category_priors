@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from argparse import Namespace
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +16,7 @@ from category_priors.v4_feature_control import (
     CONTROL_SCENES,
     build_v4_feature_control_command,
 )
+from category_priors import cli
 
 
 def _priors() -> dict:
@@ -92,3 +94,19 @@ def test_v4_10k_control_paths_cannot_overwrite_scene_assets(tmp_path: Path) -> N
     assert str(paths["feature_ply"]) in command
     assert str(paths["scale_gate"]) in command
     assert "/data/scene/saga/contrastive_feature_point_cloud.ply" not in command
+
+
+def test_v4_cli_forwards_feature_control_root(monkeypatch, capsys) -> None:
+    captured = {}
+    monkeypatch.setattr(
+        cli, "execute_v4_candidate_runs",
+        lambda **kwargs: captured.update(kwargs) or {"kind": "ok"},
+    )
+    cli.command_run_v4_candidates(Namespace(
+        scene_manifest="manifest.json", output_root="runs", pipeline="pipeline.sh",
+        git_commit="abc", category_priors="priors.json", scene=["scene0011_00"],
+        mode=["uniform"], seed=[42], no_resume=False, continue_on_error=False,
+        dry_run=True, max_runs=None, feature_control_root="control-assets",
+    ))
+    assert captured["feature_control_root"] == "control-assets"
+    assert captured["modes"] == ["uniform"]
