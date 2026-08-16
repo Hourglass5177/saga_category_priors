@@ -750,3 +750,22 @@ paired bootstrap。结果不得再用于修改候选、阈值或融合；48场�
   这否定当前输入表示下这两种具体映射的继续计算价值，不等价于证伪所有类别先验或老师未留存的人工配置。
 - 验收产物：`v4_candidate_factorial8.parquet`（2638行）与
   `v4_candidate_analysis8.json`；运行结束后GPU空闲，磁盘空闲158GB，cgroup无OOM事件。
+
+## 18. V6 执行检查点：Affinity-first 候选质量重验证
+
+> 2026-08-16 用户以 V6 计划取代 V4/V5 的后续执行路径；完整的冻结设计见
+> [`AFFINITY_FIRST_V6_EXPERIMENT_PLAN.md`](./AFFINITY_FIRST_V6_EXPERIMENT_PLAN.md)。
+
+- [x] V5 两场景旁路证明没有意外修改 B1 输出；V5 八场来源候选绝对门槛失败，因此
+  未进入其融合、校准、24 或 48 场景阶段。
+- [x] V5 失败定位在候选供给：codebook 只有 5 个同类 IoU≥.50 候选，multiview 为 0；
+  不得把它解释为类别先验失败。
+- [ ] V6 Stage 0：固定公开上游与本仓历史差异，复用 B0/B1，并在 V3 诊断八场生成
+  SAM/语义/affinity 输入漏斗与 affinity-first graph candidate bank。
+- [ ] 仅由 Stage 0 判定是否进入八场 SAM 输入修复或三场 10k feature 正控；两者都不
+  自动扩展。
+- [ ] V6 候选绝对门槛通过后，才实现唯一保守 B1 replay；融合安全后，才比较 U00/D10/D01/D11。
+
+V6 的候选形成不再预先按语义类路由：全体 Gaussian 先建立物理 24-NN 中 mutual-top4
+affinity 图，再由多视角 32 类投票确认 SAGA20 类别。B1 输出始终旁路保留；GT 只用于离线
+审计和评估。不得恢复 V5 或继续放宽已停止方案的阈值。

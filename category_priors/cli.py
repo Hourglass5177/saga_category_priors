@@ -40,6 +40,9 @@ from .v5_candidate_evaluation import evaluate_v5_candidates
 from .v5_replay import materialize_v5_b1_baseline, replay_v5_proposals
 from .v5_calibrator import fit_v5_calibrator
 from .v5_evaluation import evaluate_v5_runs
+from .v6_candidate_runner import execute_v6_candidate_runs
+from .v6_candidate_evaluation import evaluate_v6_candidate_banks
+from .v6_provenance import audit_v6_provenance
 from .download import (
     MINIMAL_FILE_TYPES,
     download_scannet_saga_scenes,
@@ -665,6 +668,36 @@ def command_evaluate_v5(args: argparse.Namespace) -> None:
         bootstrap_samples=args.bootstrap_samples, bootstrap_seed=args.bootstrap_seed,
         radius_m=args.radius_m, minimum_mapped_fraction=args.minimum_mapped_fraction,
         min_region_size=args.min_region_size, split=args.split,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def command_run_v6_candidates(args: argparse.Namespace) -> None:
+    payload = execute_v6_candidate_runs(
+        scene_manifest=args.scene_manifest, output_root=args.output_root,
+        pipeline=args.pipeline, git_commit=args.git_commit, scene_ids=args.scene,
+        seeds=args.seed or (42,), resume=not args.no_resume,
+        continue_on_error=args.continue_on_error, dry_run=args.dry_run,
+        max_runs=args.max_runs,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def command_evaluate_v6_candidates(args: argparse.Namespace) -> None:
+    payload = evaluate_v6_candidate_banks(
+        scene_manifest=args.scene_manifest, gt_dir=args.gt_dir,
+        output_root=args.output_root, taxonomy=load_taxonomy(args.taxonomy),
+        size_bins=args.size_bins, scene_ids=args.scene, seed=args.seed,
+        table_output=args.table_output, analysis_output=args.analysis_output,
+        radius_m=args.radius_m,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def command_audit_v6_provenance(args: argparse.Namespace) -> None:
+    payload = audit_v6_provenance(
+        repository=args.repository, output=args.output,
+        public_repository=args.public_repository,
     )
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
@@ -1630,6 +1663,47 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_v5.add_argument("--min-region-size", type=int, default=100)
     evaluate_v5.add_argument("--split", default="v5")
     evaluate_v5.set_defaults(func=command_evaluate_v5)
+
+    run_v6 = subparsers.add_parser(
+        "run-v6-candidates",
+        help="Build immutable V6 affinity-first proposal banks without changing B1 output",
+    )
+    run_v6.add_argument("--scene-manifest", required=True)
+    run_v6.add_argument("--output-root", required=True)
+    run_v6.add_argument("--pipeline", required=True)
+    run_v6.add_argument("--git-commit", required=True)
+    run_v6.add_argument("--scene", action="append", required=True)
+    run_v6.add_argument("--seed", action="append", type=int)
+    run_v6.add_argument("--no-resume", action="store_true")
+    run_v6.add_argument("--continue-on-error", action="store_true")
+    run_v6.add_argument("--dry-run", action="store_true")
+    run_v6.add_argument("--max-runs", type=int)
+    run_v6.set_defaults(func=command_run_v6_candidates)
+
+    evaluate_v6 = subparsers.add_parser(
+        "evaluate-v6-candidates",
+        help="Audit V6 input funnel and affinity-first candidate gates using GT offline",
+    )
+    evaluate_v6.add_argument("--scene-manifest", required=True)
+    evaluate_v6.add_argument("--gt-dir", required=True)
+    evaluate_v6.add_argument("--output-root", required=True)
+    evaluate_v6.add_argument("--taxonomy")
+    evaluate_v6.add_argument("--size-bins", required=True)
+    evaluate_v6.add_argument("--scene", action="append", required=True)
+    evaluate_v6.add_argument("--seed", type=int, default=42)
+    evaluate_v6.add_argument("--table-output", required=True)
+    evaluate_v6.add_argument("--analysis-output", required=True)
+    evaluate_v6.add_argument("--radius-m", type=float, default=0.05)
+    evaluate_v6.set_defaults(func=command_evaluate_v6_candidates)
+
+    audit_v6 = subparsers.add_parser(
+        "audit-v6-provenance",
+        help="Write the read-only public/local SAGA provenance chain for V6",
+    )
+    audit_v6.add_argument("--repository", default=".")
+    audit_v6.add_argument("--output", required=True)
+    audit_v6.add_argument("--public-repository", default="https://github.com/Jumpat/SegAnyGAussians.git")
+    audit_v6.set_defaults(func=command_audit_v6_provenance)
 
     evaluate_seed_audit = subparsers.add_parser(
         "evaluate-seed-audit",

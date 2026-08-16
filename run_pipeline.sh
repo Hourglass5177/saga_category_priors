@@ -62,6 +62,11 @@ v5_candidate_output=""
 v5_candidate_labels_output=""
 v5_git_commit=""
 v5_scene_id=""
+v6_candidate_mode="off"
+v6_candidate_output=""
+v6_candidate_labels_output=""
+v6_git_commit=""
+v6_scene_id=""
 
 sam_checkpoint_path="${SCRIPT_DIR}/weights/sam_vit_h_4b8939.pth"
 groundingdino_checkpoint_path="${SCRIPT_DIR}/weights/groundingdino_swint_ogc.pth"
@@ -154,6 +159,13 @@ V5 proposal-bank options:
   --v5-candidate-labels-output PATH
   --v5-git-commit COMMIT
   --v5-scene-id SCENE
+
+V6 affinity-first proposal-bank options:
+  --v6-candidate-mode MODE      off|affinity-first
+  --v6-candidate-output PATH
+  --v6-candidate-labels-output PATH
+  --v6-git-commit COMMIT
+  --v6-scene-id SCENE
 
 Model options:
   --sam-checkpoint-path PATH
@@ -398,6 +410,11 @@ preflight_stage() {
                     ensure_parent_dir "$v5_candidate_output"
                     ensure_parent_dir "$v5_candidate_labels_output"
                 fi
+                if [[ "$v6_candidate_mode" != "off" ]]; then
+                    require_file "$label_features_path" "Label features file"
+                    ensure_parent_dir "$v6_candidate_output"
+                    ensure_parent_dir "$v6_candidate_labels_output"
+                fi
             fi
             ;;
         render)
@@ -522,6 +539,15 @@ run_postprocess() {
             --v5-candidate-labels-output "$v5_candidate_labels_output"
             --v5-git-commit "$v5_git_commit"
             --v5-scene-id "$v5_scene_id"
+        )
+    fi
+    if [[ "$v6_candidate_mode" != "off" ]]; then
+        prior_args+=(
+            --v6-candidate-mode "$v6_candidate_mode"
+            --v6-candidate-output "$v6_candidate_output"
+            --v6-candidate-labels-output "$v6_candidate_labels_output"
+            --v6-git-commit "$v6_git_commit"
+            --v6-scene-id "$v6_scene_id"
         )
     fi
     if [[ "$clustering_mode" == "class-first" ]]; then
@@ -795,6 +821,26 @@ while [[ $# -gt 0 ]]; do
             v5_scene_id="$2"
             shift 2
             ;;
+        --v6-candidate-mode)
+            v6_candidate_mode="$2"
+            shift 2
+            ;;
+        --v6-candidate-output)
+            v6_candidate_output="$2"
+            shift 2
+            ;;
+        --v6-candidate-labels-output)
+            v6_candidate_labels_output="$2"
+            shift 2
+            ;;
+        --v6-git-commit)
+            v6_git_commit="$2"
+            shift 2
+            ;;
+        --v6-scene-id)
+            v6_scene_id="$2"
+            shift 2
+            ;;
         --sam-checkpoint-path)
             sam_checkpoint_path="$2"
             shift 2
@@ -867,6 +913,10 @@ esac
 case "$v5_candidate_source" in
     off|codebook|multiview) ;;
     *) err "unsupported --v5-candidate-source: $v5_candidate_source" ;;
+esac
+case "$v6_candidate_mode" in
+    off|affinity-first) ;;
+    *) err "unsupported --v6-candidate-mode: $v6_candidate_mode" ;;
 esac
 if [[ -z "$python_bin" ]]; then
     find_python

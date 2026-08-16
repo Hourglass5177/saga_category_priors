@@ -787,6 +787,11 @@ def main():
     parser.add_argument("--v5-candidate-labels-output", type=str, default=None)
     parser.add_argument("--v5-git-commit", type=str, default=None)
     parser.add_argument("--v5-scene-id", type=str, default=None)
+    parser.add_argument("--v6-candidate-mode", choices=['off', 'affinity-first'], default='off')
+    parser.add_argument("--v6-candidate-output", type=str, default=None)
+    parser.add_argument("--v6-candidate-labels-output", type=str, default=None)
+    parser.add_argument("--v6-git-commit", type=str, default=None)
+    parser.add_argument("--v6-scene-id", type=str, default=None)
     args = parser.parse_args(sys.argv[1:])
     if args.v3_shadow_mode != 'off':
         if not args.v3_shadow_output or not args.v3_branch_labels_output:
@@ -820,6 +825,15 @@ def main():
             parser.error("V5 candidate shadow requires the unchanged legacy main path")
         if args.scene_scale_m_per_unit <= 0:
             parser.error("V5 candidate shadow requires positive --scene_scale_m_per_unit")
+    if args.v6_candidate_mode != 'off':
+        if not args.v6_candidate_output or not args.v6_candidate_labels_output:
+            parser.error("V6 candidate mode requires proposal JSON and labels outputs")
+        if not args.v6_git_commit or not args.v6_scene_id:
+            parser.error("V6 candidate mode requires commit and scene identifiers")
+        if args.clustering_mode != 'legacy' or args.prior_mode != 'off':
+            parser.error("V6 candidate bank requires the unchanged legacy main path")
+        if args.scene_scale_m_per_unit <= 0:
+            parser.error("V6 candidate bank requires positive --scene_scale_m_per_unit")
     prior_resolver = None
     if args.prior_mode != 'off':
         if not args.prior_config or not args.prior_mapping_config:
@@ -1807,6 +1821,126 @@ def main():
         )
         print(
             f"V5 {args.v5_candidate_source} captured {len(v5_instance_classes)} "
+            "proposal-bank candidates without modifying B1 labels"
+        )
+    if args.v6_candidate_mode != 'off':
+        from category_priors.v6_candidate import (
+            V6GraphConfig, build_affinity_components, finalise_multiview_candidates,
+            normalized_top1 as v6_normalized_top1, write_v6_proposal_bank,
+        )
+
+        v6_config = V6GraphConfig()
+        v6_gate = scale_gate(torch.tensor([1.0]).cuda()).unsqueeze(0).detach().cpu()
+        v6_affinity = F.normalize(
+            F.normalize(point_features, dim=-1, p=2) * v6_gate, dim=-1, p=2
+        ).numpy()
+        v6_metric_xyz = point_xyz.numpy() * float(args.scene_scale_m_per_unit)
+        v6_components = build_affinity_components(v6_metric_xyz, v6_affinity, v6_config)
+        v6_full_provisional = np.asarray(v6_components['full_labels'], dtype=np.int32)
+        v6_candidate_votes = np.zeros(
+            (len(v6_components['candidates']), len(args.classes)), dtype=np.int16
+        )
+        v6_point_views = np.zeros(len(point_xyz), dtype=np.int16)
+        v6_point_votes = np.zeros((len(point_xyz), len(args.classes)), dtype=np.int16)
+        for camera in tqdm(camera_list, desc='V6 multiview candidate semantics'):
+            mask_file = os.path.join(args.masks_path, f'{camera.image_name}.pt')
+            label_file = os.path.join(args.labels_path, f'{camera.image_name}.pt')
+            if not os.path.isfile(mask_file) or not os.path.isfile(label_file):
+                continue
+            masks = torch.load(mask_file, map_location='cpu')
+            if masks.shape[-2:] != (camera.image_height, camera.image_width):
+                masks = torch.nn.functional.interpolate(
+                    masks.float().unsqueeze(1), mode='bilinear',
+                    size=(camera.image_height, camera.image_width), align_corners=False,
+                ).squeeze(1) > 0.5
+            else:
+                masks = masks.bool()
+            labels_2d = torch.load(label_file, map_location='cpu')
+            contributors = get_max_contributor(camera, 'cpu').detach().cpu().numpy()
+            point_pixels = np.zeros((len(point_xyz), len(args.classes)), dtype=np.int32)
+            candidate_pixels = np.zeros(v6_candidate_votes.shape, dtype=np.int32)
+            for label_2d, mask_2d in zip(labels_2d, masks):
+                class_index = int(label_2d)
+                if class_index < 0 or class_index >= len(args.classes):
+                    continue
+                gaussian_ids = contributors[mask_2d.detach().cpu().numpy()]
+                gaussian_ids = gaussian_ids[(gaussian_ids >= 0) & (gaussian_ids < len(point_xyz))]
+                if not gaussian_ids.size:
+                    continue
+                values, counts = np.unique(gaussian_ids, return_counts=True)
+                point_pixels[values, class_index] += counts.astype(np.int32)
+                candidate_ids = v6_full_provisional[values]
+                valid = candidate_ids >= 0
+                if np.any(valid):
+                    candidate_pixels[candidate_ids[valid], class_index] += counts[valid].astype(np.int32)
+            visible_points = np.flatnonzero(point_pixels.sum(axis=1) > 0)
+            if len(visible_points):
+                point_winners = point_pixels[visible_points].argmax(axis=1)
+                v6_point_views[visible_points] += 1
+                v6_point_votes[visible_points, point_winners] += 1
+            visible_candidates = np.flatnonzero(candidate_pixels.sum(axis=1) > 0)
+            if len(visible_candidates):
+                candidate_winners = candidate_pixels[visible_candidates].argmax(axis=1)
+                v6_candidate_votes[visible_candidates, candidate_winners] += 1
+        v6_finalised = finalise_multiview_candidates(
+            v6_components, v6_candidate_votes, args.classes, v6_config
+        )
+        v6_final_labels = np.asarray(v6_finalised['full_labels'], dtype=np.int32)
+        v6_core_labels = np.asarray(v6_finalised['core_labels'], dtype=np.int32)
+        v6_b1_labels = point_labels.detach().cpu().numpy()
+        for row in v6_finalised['candidates']:
+            candidate_id = int(row['candidate_id'])
+            candidate_mask = v6_final_labels == candidate_id
+            overlaps = []
+            for b1_instance_id in np.unique(v6_b1_labels[candidate_mask]):
+                if int(b1_instance_id) < 0:
+                    continue
+                b1_mask = v6_b1_labels == int(b1_instance_id)
+                intersection = int((candidate_mask & b1_mask).sum())
+                union = int((candidate_mask | b1_mask).sum())
+                ratio = instance_ratio.get(int(b1_instance_id))
+                b1_class = 'background'
+                if ratio is not None and ratio.size and ratio.max() >= args.label_threshold:
+                    b1_class = args.classes[int(np.argmax(ratio))]
+                overlaps.append({
+                    'instance_id': int(b1_instance_id), 'class': b1_class,
+                    'iou': intersection / union if union else 0.0,
+                    'intersection_points': intersection,
+                })
+            overlaps.sort(key=lambda item: (-item['iou'], item['instance_id']))
+            row['b1_instance_iou'] = overlaps
+            row['background_points_against_b1'] = int(
+                candidate_mask.sum() - (v6_b1_labels[candidate_mask] >= 0).sum()
+            )
+            row['core_background_points_against_b1'] = int(
+                ((v6_core_labels == candidate_id) & (v6_b1_labels < 0)).sum()
+            )
+        v6_codebook_winner, v6_codebook_score, v6_codebook_margin = v6_normalized_top1(
+            normed_point_semantic_features.numpy(),
+            F.normalize(label_features.detach().cpu(), dim=-1, p=2).numpy(),
+        )
+        point_totals = v6_point_votes.sum(axis=1)
+        v6_point_winner = v6_point_votes.argmax(axis=1).astype(np.int16)
+        v6_point_ratio = np.divide(
+            v6_point_votes[np.arange(len(point_xyz)), v6_point_winner], point_totals,
+            out=np.zeros(len(point_xyz), dtype=np.float32), where=point_totals > 0,
+        ).astype(np.float32)
+        v6_two = np.partition(v6_point_votes, -2, axis=1)[:, -2:]
+        v6_point_margin = np.divide(
+            v6_two[:, 1] - v6_two[:, 0], point_totals,
+            out=np.zeros(len(point_xyz), dtype=np.float32), where=point_totals > 0,
+        ).astype(np.float32)
+        write_v6_proposal_bank(
+            json_path=args.v6_candidate_output, labels_path=args.v6_candidate_labels_output,
+            scene_id=args.v6_scene_id, seed=args.seed, git_commit=args.v6_git_commit,
+            class_names=args.classes, finalised=v6_finalised,
+            codebook_winner=v6_codebook_winner, codebook_score=v6_codebook_score,
+            codebook_margin=v6_codebook_margin, point_view_count=v6_point_views,
+            point_vote_winner=v6_point_winner, point_vote_ratio=v6_point_ratio,
+            point_vote_margin=v6_point_margin,
+        )
+        print(
+            f"V6 affinity-first captured {len(v6_finalised['candidates'])} "
             "proposal-bank candidates without modifying B1 labels"
         )
     if v3_shadow_captures:
