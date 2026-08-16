@@ -1888,33 +1888,51 @@ def main():
         v6_final_labels = np.asarray(v6_finalised['full_labels'], dtype=np.int32)
         v6_core_labels = np.asarray(v6_finalised['core_labels'], dtype=np.int32)
         v6_b1_labels = point_labels.detach().cpu().numpy()
-        for row in v6_finalised['candidates']:
-            candidate_id = int(row['candidate_id'])
-            candidate_mask = v6_final_labels == candidate_id
-            overlaps = []
-            for b1_instance_id in np.unique(v6_b1_labels[candidate_mask]):
-                if int(b1_instance_id) < 0:
-                    continue
-                b1_mask = v6_b1_labels == int(b1_instance_id)
-                intersection = int((candidate_mask & b1_mask).sum())
-                union = int((candidate_mask | b1_mask).sum())
+        v6_candidate_count = len(v6_finalised['candidates'])
+        v6_candidate_sizes = np.bincount(
+            v6_final_labels[v6_final_labels >= 0], minlength=v6_candidate_count,
+        )
+        v6_core_background_sizes = np.bincount(
+            v6_core_labels[(v6_core_labels >= 0) & (v6_b1_labels < 0)],
+            minlength=v6_candidate_count,
+        )
+        v6_overlaps: list[list[dict]] = [[] for _ in range(v6_candidate_count)]
+        v6_pair_mask = (v6_final_labels >= 0) & (v6_b1_labels >= 0)
+        if np.any(v6_pair_mask):
+            v6_pairs, v6_intersections = np.unique(
+                np.column_stack((
+                    v6_final_labels[v6_pair_mask], v6_b1_labels[v6_pair_mask],
+                )), axis=0, return_counts=True,
+            )
+            v6_b1_ids, v6_b1_sizes = np.unique(
+                v6_b1_labels[v6_b1_labels >= 0], return_counts=True,
+            )
+            v6_b1_size_by_id = dict(zip(v6_b1_ids.tolist(), v6_b1_sizes.tolist()))
+            for (candidate_id, b1_instance_id), intersection in zip(
+                v6_pairs.tolist(), v6_intersections.tolist(),
+            ):
+                candidate_size = int(v6_candidate_sizes[candidate_id])
+                b1_size = int(v6_b1_size_by_id[b1_instance_id])
+                union = candidate_size + b1_size - int(intersection)
                 ratio = instance_ratio.get(int(b1_instance_id))
                 b1_class = 'background'
                 if ratio is not None and ratio.size and ratio.max() >= args.label_threshold:
                     b1_class = args.classes[int(np.argmax(ratio))]
-                overlaps.append({
+                v6_overlaps[candidate_id].append({
                     'instance_id': int(b1_instance_id), 'class': b1_class,
-                    'iou': intersection / union if union else 0.0,
-                    'intersection_points': intersection,
+                    'iou': int(intersection) / union if union else 0.0,
+                    'intersection_points': int(intersection),
                 })
-            overlaps.sort(key=lambda item: (-item['iou'], item['instance_id']))
-            row['b1_instance_iou'] = overlaps
+        for row in v6_finalised['candidates']:
+            candidate_id = int(row['candidate_id'])
+            row['b1_instance_iou'] = sorted(
+                v6_overlaps[candidate_id], key=lambda item: (-item['iou'], item['instance_id'])
+            )
             row['background_points_against_b1'] = int(
-                candidate_mask.sum() - (v6_b1_labels[candidate_mask] >= 0).sum()
+                v6_candidate_sizes[candidate_id]
+                - sum(item['intersection_points'] for item in v6_overlaps[candidate_id])
             )
-            row['core_background_points_against_b1'] = int(
-                ((v6_core_labels == candidate_id) & (v6_b1_labels < 0)).sum()
-            )
+            row['core_background_points_against_b1'] = int(v6_core_background_sizes[candidate_id])
         v6_codebook_winner, v6_codebook_score, v6_codebook_margin = v6_normalized_top1(
             normed_point_semantic_features.numpy(),
             F.normalize(label_features.detach().cpu(), dim=-1, p=2).numpy(),

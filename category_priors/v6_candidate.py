@@ -172,7 +172,11 @@ def finalise_multiview_candidates(
     if votes.shape != (len(candidates), len(class_names)):
         raise ValueError("candidate-frame vote matrix has incompatible shape")
     retained: list[dict[str, Any]] = []
-    remap: dict[int, int] = {}
+    # Candidate IDs are dense indices into ``candidates``.  Keep their
+    # remapping in an array so labels can be remapped in one indexed pass.
+    # Repeated ``full == old_id`` scans are quadratic when the affinity graph
+    # yields thousands of small components.
+    remap = np.full(len(candidates), -1, dtype=np.int32)
     for row in candidates:
         old_id = int(row["candidate_id"])
         counts = votes[old_id]
@@ -202,14 +206,16 @@ def finalise_multiview_candidates(
             "accepted_semantic": bool(accepted),
         })
         if accepted:
-            remap[old_id] = len(retained)
-            row["candidate_id"] = len(retained)
+            new_id = len(retained)
+            remap[old_id] = new_id
+            row["candidate_id"] = new_id
             retained.append(row)
     new_full = np.full_like(full, -1)
     new_core = np.full_like(core, -1)
-    for old_id, new_id in remap.items():
-        new_full[full == old_id] = new_id
-        new_core[core == old_id] = new_id
+    valid_full = full >= 0
+    valid_core = core >= 0
+    new_full[valid_full] = remap[full[valid_full]]
+    new_core[valid_core] = remap[core[valid_core]]
     return {
         "full_labels": new_full,
         "core_labels": new_core,
