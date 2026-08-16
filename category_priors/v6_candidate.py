@@ -112,9 +112,21 @@ def build_affinity_components(
         return {"full_labels": full_labels, "core_labels": core_labels, "degree": degree, "candidates": candidates, "edge_left": left.astype(np.int32), "edge_right": right.astype(np.int32), "edge_affinity": np.einsum("nd,nd->n", features[left], features[right]).astype(np.float32)}
     graph = coo_matrix((np.ones(len(left) * 2, dtype=np.uint8), (np.concatenate((left, right)), np.concatenate((right, left)))), shape=(n_points, n_points)).tocsr()
     _, components = connected_components(graph, directed=False, return_labels=True)
+    # ``connected_components`` can legitimately return thousands of tiny
+    # components.  Re-scanning the complete label vector for every component
+    # turns this otherwise sparse graph operation into O(N * components).
+    # Group the labels once instead, while retaining the exact same members
+    # for every connected component.
+    component_order = np.argsort(components, kind="stable")
+    ordered_components = components[component_order]
+    component_starts = np.r_[
+        0,
+        np.flatnonzero(np.diff(ordered_components)) + 1,
+        n_points,
+    ]
     candidate_id = 0
-    for component in np.unique(components):
-        members = np.flatnonzero(components == component)
+    for start, end in zip(component_starts[:-1], component_starts[1:]):
+        members = component_order[start:end]
         core = members[degree[members] >= int(config.core_degree)]
         if len(core) < int(config.min_core_points):
             continue
