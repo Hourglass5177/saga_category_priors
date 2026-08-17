@@ -49,6 +49,7 @@ from .download import (
     download_scannet_subset,
 )
 from .evaluator import evaluate_manifest
+from .gaussian_object_audit import audit_gaussian_object_runs
 from .io import hash_json, load_json, read_rows, sha256_file, write_json, write_rows
 from .locked import assess_seed_sensitivity, build_locked_plan
 from .locked_evaluation import evaluate_locked_plan, evaluate_tune_seed_execution
@@ -917,6 +918,26 @@ def command_evaluate(args: argparse.Namespace) -> None:
     )
 
 
+def command_audit_gaussian_objects(args: argparse.Namespace) -> None:
+    taxonomy = load_taxonomy(args.taxonomy)
+    payload = audit_gaussian_object_runs(
+        scene_manifest=args.scene_manifest,
+        gt_dir=args.gt_dir,
+        runs_root=args.runs_root,
+        taxonomy=taxonomy,
+        scene_ids=args.scene,
+        conditions=args.condition or ["B0-legacy", "B1-other-classes"],
+        seed=args.seed,
+        table_output=args.table_output,
+        audit_output=args.audit_output,
+        comparison_output=args.comparison_output,
+        viewer_output=args.viewer_output,
+        radius_m=args.radius_m,
+        min_region_size=args.min_region_size,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
 def command_evaluate_search(args: argparse.Namespace) -> None:
     taxonomy = load_taxonomy(args.taxonomy)
     evaluate_search_execution(
@@ -1742,6 +1763,30 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--radius-m", type=float, default=0.05)
     evaluate.add_argument("--min-region-size", type=int, default=100)
     evaluate.set_defaults(func=command_evaluate)
+
+    audit_objects = subparsers.add_parser(
+        "audit-gaussian-objects",
+        help="Measure Gaussian-to-GT object precision and export 3D viewer cases",
+    )
+    audit_objects.add_argument("--scene-manifest", required=True)
+    audit_objects.add_argument("--gt-dir", required=True)
+    audit_objects.add_argument("--runs-root", required=True)
+    audit_objects.add_argument("--taxonomy")
+    audit_objects.add_argument("--scene", action="append", required=True)
+    audit_objects.add_argument(
+        "--condition",
+        action="append",
+        default=None,
+        help="repeat for B0/B1; defaults to both historical anchors",
+    )
+    audit_objects.add_argument("--seed", type=int, default=42)
+    audit_objects.add_argument("--table-output", required=True)
+    audit_objects.add_argument("--audit-output", required=True)
+    audit_objects.add_argument("--comparison-output", required=True)
+    audit_objects.add_argument("--viewer-output", required=True)
+    audit_objects.add_argument("--radius-m", type=float, default=0.05)
+    audit_objects.add_argument("--min-region-size", type=int, default=100)
+    audit_objects.set_defaults(func=command_audit_gaussian_objects)
 
     evaluate_search = subparsers.add_parser(
         "evaluate-search",
