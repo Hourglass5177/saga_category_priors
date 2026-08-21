@@ -304,7 +304,7 @@ renderCUDA(
 	uint32_t last_contributor = 0;
 	float C[CHANNELS] = { 0 };
 	float max_weight = 0.0f;
-	int max_id = 0;
+	int max_id = -1;
 
 	// Iterate over batches until all done or range is complete
 	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
@@ -354,15 +354,19 @@ renderCUDA(
 				continue;
 			}
 
-			// Eq. (3) from 3D Gaussian splatting paper.
+			// Eq. (3) from 3D Gaussian splatting paper.  The alpha-blending
+			// contribution belongs to the transmittance *before* this Gaussian
+			// updates T.  Use that same contribution for both colour and the
+			// max-contributor diagnostic.
+			const float weight = alpha * T;
 			for (int ch = 0; ch < CHANNELS; ch++)
-				C[ch] += features[collected_id[j] * CHANNELS + ch] * alpha * T;
+				C[ch] += features[collected_id[j] * CHANNELS + ch] * weight;
 
-			T = test_T;
-			if(alpha * T > max_weight){
-				max_weight = alpha * T;
+			if(weight > max_weight){
+				max_weight = weight;
 				max_id = collected_id[j];
 			}
+			T = test_T;
 			// Keep track of last range entry to update this
 			// pixel.
 			last_contributor = contributor;

@@ -28,7 +28,6 @@ from .io import load_json, write_json, write_rows
 from .locked import SMALL_CATEGORIES
 from .runner import load_scene_runtime_manifest
 from .taxonomy import Taxonomy
-from .v3_shadow_evaluation import _gaussian_ply, _transform
 from .viewer_materials import _condition_slug, _write_colored_ply
 
 
@@ -37,6 +36,23 @@ SAME_CLASS_WRONG_INSTANCE_COLOR = np.asarray((255, 203, 64), dtype=np.uint8)
 WRONG_CLASS_COLOR = np.asarray((230, 68, 68), dtype=np.uint8)
 UNSUPPORTED_COLOR = np.asarray((112, 112, 112), dtype=np.uint8)
 GT_COLOR = np.asarray((56, 132, 255), dtype=np.uint8)
+
+
+def _gaussian_ply(scene: Mapping[str, Any]) -> Path:
+    if scene.get("gaussian_ply"):
+        path = Path(str(scene["gaussian_ply"]))
+        return path if path.is_absolute() else Path(str(scene["base_path"])) / path
+    root = Path(str(scene["base_path"])) / "output_models/point_cloud/iteration_30000"
+    primary = root / "point_cloud.ply"
+    return primary if primary.is_file() else root / "scene_point_cloud.ply"
+
+
+def _transform(scene: Mapping[str, Any]) -> Sequence[Sequence[float]]:
+    return scene.get(
+        "gaussian_to_gt_transform",
+        ((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0),
+         (0.0, 0.0, 1.0, 0.0), (0.0, 0.0, 0.0, 1.0)),
+    )
 
 
 def _nearest_indices(

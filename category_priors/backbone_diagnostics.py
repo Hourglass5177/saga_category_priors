@@ -6,7 +6,6 @@ from typing import Any
 
 import numpy as np
 
-from .class_first_evaluation import _scene_gaussian_path
 from .evaluator import (
     apply_transform,
     load_ground_truth_npz,
@@ -16,6 +15,16 @@ from .evaluator import (
 from .io import load_json, write_json, write_rows
 from .runner import load_scene_runtime_manifest
 from .taxonomy import Taxonomy
+
+
+def _scene_gaussian_path(scene: Mapping[str, Any]) -> Path:
+    explicit = scene.get("gaussian_ply")
+    if explicit:
+        path = Path(str(explicit))
+        return path if path.is_absolute() else Path(str(scene["base_path"])) / path
+    root = Path(str(scene["base_path"])) / "output_models/point_cloud/iteration_30000"
+    primary = root / "point_cloud.ply"
+    return primary if primary.is_file() else root / "scene_point_cloud.ply"
 
 
 def diagnose_mapped_instances(

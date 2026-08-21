@@ -67,6 +67,7 @@ v6_candidate_output=""
 v6_candidate_labels_output=""
 v6_git_commit=""
 v6_scene_id=""
+v7_causal_ablation="L0"
 
 sam_checkpoint_path="${SCRIPT_DIR}/weights/sam_vit_h_4b8939.pth"
 groundingdino_checkpoint_path="${SCRIPT_DIR}/weights/groundingdino_swint_ogc.pth"
@@ -492,6 +493,7 @@ run_postprocess() {
         --prior_metadata_path "$prior_metadata_path"
         --teacher-prior-mode "$teacher_prior_mode"
         --teacher-evidence-protection "$teacher_evidence_protection"
+        --v7-causal-ablation "$v7_causal_ablation"
     )
     if [[ "$prior_mode" != "off" ]]; then
         prior_args+=(
@@ -759,6 +761,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --teacher-evidence-protection)
             teacher_evidence_protection="$2"
+            shift 2
+            ;;
+        --v7-causal-ablation)
+            v7_causal_ablation="$2"
             shift 2
             ;;
         --v3-shadow-mode)

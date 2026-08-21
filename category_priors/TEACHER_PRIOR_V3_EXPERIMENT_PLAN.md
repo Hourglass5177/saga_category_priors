@@ -1,13 +1,13 @@
-# SAGA 类别先验与小物体保护 V3 实验计划
+# SAGA 类别先验与小物体保护实验计划（当前权威：V7）
 
-> **权威状态：本文件是下一阶段唯一实验事实源。** 旧 B2、class-first、
+> **权威状态：第 19 节 V7 是当前执行的唯一实验事实源。** 旧 B2、class-first、
 > prior-v2、teacher-preservation 和 selective-restore 文档与代码只作为失败审计记录，
 > 不得覆盖本文件的研究问题、条件定义、阶段门槛或结论边界。
 
-- 版本：V3.0
+- 版本：V7.0
 - 冻结日期：2026-08-15
 - V3 起点代码检查点：`f1367fa58c8f50df75f80b86f67bab469af06531`
-- 当前状态：**Stage 1 已完成并验收；Stage 2 已按死亡类型唯一选择多-anchor局部保护**
+- 当前状态：**V7 本地实现与测试中；尚未启动云端 Stage 0**
 - 适用范围：现有 24 个 tune 场景、原 48 个内部评估场景及现有训练资产
 - 独立实验单位：physical scene
 - 技术重复：seed `42`、`3407`、`20260804`
@@ -769,3 +769,84 @@ paired bootstrap。结果不得再用于修改候选、阈值或融合；48场�
 V6 的候选形成不再预先按语义类路由：全体 Gaussian 先建立物理 24-NN 中 mutual-top4
 affinity 图，再由多视角 32 类投票确认 SAGA20 类别。B1 输出始终旁路保留；GT 只用于离线
 审计和评估。不得恢复 V5 或继续放宽已停止方案的阈值。
+
+## 19. V7 当前权威计划：正确 lifting、跨视角 track 与终局先验检验
+
+### 19.1 已确认的 P0 根因
+
+- max-contributor CUDA 过去用 `alpha*T_new` 选赢家，但颜色实际使用 `alpha*T_prev`；
+  无贡献像素又默认返回 Gaussian 0。V5/V6 未同时过滤零贡献和非法 ID。
+- 该错误至少从 `source/v2` 已存在，不是 a800 类别分支或近期实验新增。
+- 修复后统一使用 `weight=alpha*T_prev`，空像素返回 `id=-1, weight=0`，Python 只接受
+  `id>=0 && weight>0`。旧结果只作 `B1-historical`，不得冒充修复后基线。
+- 旧自动主干缺少跨视角 object ID，且单帧语义路由、中心吸附、全局 256-NN 和最终 vote
+  会连续改写实例。旧实验因此不能证伪类别先验。
+
+### 19.2 唯一 V7 对象主干
+
+每帧用修正后的 contributor ID/weight 将已有 mask 提升为 Gaussian fragment。每个
+Gaussian 至少有 2 个 mask 像素且其可见像素至少 50% 在 mask 内才属于 core；fragment
+至少 5 core、10 full。语义只随 fragment 保存，不参与 track 关联。
+
+fragment 按固定帧序关联：core overlap coefficient≥0.25、共享 core≥3、最佳相对第二名
+margin≥0.10；同一 track 每帧最多一个 fragment，模糊桥接必须新建 track。有效 track
+至少 2 帧；最终唯一 core 要求 positive views≥2、positive/visible≥0.60、
+conflict/visible≤0.25 且至少 10 点。
+
+是否启用一次性局部 halo 只由两场因果消融决定。halo 限定 fragment union、5 cm、3 个
+同 track anchor、affinity cosine≥0.95、最佳 track margin≥0.02；不迭代、不跨 track。
+
+track 完成后才进行 32 类逐帧投票：SAGA20 winner、有效语义视角≥2、winner ratio≥0.60、
+margin≥0.10。候选基础分数 Q 按用户冻结公式计算。
+
+### 19.3 类别先验的唯一作用位置
+
+fragment、track、core、halo 和类别全部先冻结。CPU replay 只比较：
+
+- `U00-uniform`：global size × global support；
+- `D10-size`：class size × global support；
+- `D01-core`：global size × class support；
+- `D11-combined`：class size × class support。
+
+四臂均使用 `S=QGC`、接受阈值 0.20；类别统计只读 ScanNet-train
+`category_priors.json`，缺失类别回退 global。prior 不得改变候选构造。
+
+### 19.4 冻结阶段与停止门槛
+
+1. **Stage 0（scene0645_00、scene0025_01）**：P0历史 B1、L0 contributor-fixed、
+   L1去全局KNN、L2只留HDBSCAN core、L3加一次性局部attach；同时计算单mask、完美关联、
+   score oracle。association oracle须有≥6个同类IoU≥.50匹配，且有效tiny/small
+   Recall@.25≥.20，否则停止。
+2. **Stage 1（冻结8个physical scenes）**：确定性uniform bank须有≥12个同类IoU≥.50
+   候选、覆盖≥4场景、precision@.25≥10%、tiny/small Recall@.25≥.20；Gaussian micro
+   precision相对B1-fixed提高≥5个百分点或unsupported实例比例下降≥10个百分点；GT recall
+   下降≤5个百分点；U00的mAP/AP50/实例数和score-IoU相关性须满足用户冻结门槛。
+3. **Stage 2**：同一bank replay四臂；数据臂相对U须ΔmAP≥.002（或冻结的小物条件）、
+   正向场景更多且FP/TP恶化≤20%。机械上不改变分数/接受集合只能判为未生效。
+4. **Stage 3**：先在5个未开发physical scenes验证 U/best-D，要求mean ΔmAP>0且至少3/5
+   为正；再把其余11个重复扫描按physical scene内平均，13个physical scenes宏平均
+   ΔmAP≥.002才进入final。
+5. **Stage 4**：48个不同physical scenes各建一个确定性bank，只replay U/best-D；
+   10,000次paired bootstrap，ΔmAP≥.002且95% CI下界>0才支持稳定有效。final不得调参。
+
+主比较严格拆为 `V7-U − B1-fixed`（对象主干）和 `V7-D − V7-U`（类别先验）。
+
+### 19.5 工程边界和验收产物
+
+- 独立 `v7_objects.py/v7_worker.py/v7_runner.py/v7_replay.py/v7_evaluation.py`；不向巨型
+  postprocess继续添加正式 V7 路径。B1只用于只读历史/因果对照。
+- 不下载、不训练、不覆盖旧结果；单GPU单进程；磁盘≥80GB；内存只看90GiB cgroup。
+- 不生成SHA文件、lock、schedule hash或contributor cache；完整bank复用，损坏/缺失才重跑。
+- 产物：`v7_contributor_audit2.json`、`v7_causal_ablation2.parquet`、`v7_oracle2.json`、
+  `v7_bank8.parquet`、`v7_prior_replay8.parquet`、`v7_tune24_metrics.parquet`、
+  `v7_final_metrics.parquet`、`v7_analysis.json`和viewer。
+
+### 19.6 当前执行检查点（2026-08-22）
+
+- [x] P0 CUDA根因静态确认并修正源码；Python legacy vote过滤非法 contributor。
+- [x] V7 fragment/track/core/halo与prior replay纯算法实现并建立定向测试。
+- [x] V7 worker、顺序runner、bank/replay评估和阶段controller初版完成。
+- [ ] 本地/云端编译修正后的CUDA扩展并跑全部定向测试。
+- [ ] commit/push `origin/a800`，部署同commit到固定云端目录。
+- [ ] 云端启动Stage 0并验证runner健康。
+- [ ] runner健康后创建并核验绑定当前主任务ID的每小时Codex自动化。

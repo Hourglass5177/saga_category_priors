@@ -698,6 +698,9 @@ def main():
     parser.add_argument("--scale_threshold", type=float, default=0.8)
     parser.add_argument("--opcity_threshold", type=float, default=0.005)
     parser.add_argument("--sample_num", type=int, default=10000)
+    parser.add_argument(
+        "--v7-causal-ablation", choices=("L0", "L1", "L2", "L3"), default="L0"
+    )
     parser.add_argument("--classes", nargs="+", type=str, default=[
         'chair', 'table', 'plant', 'flower', 'foliage', 'tv', 'painting', 'sofa',
         'cabinet', 'bed', 'wall', 'floor', 'ceiling', 'person', 'socket', 'remote',
@@ -998,7 +1001,7 @@ def main():
                         isinstance(candidate, torch.Tensor)
                         and candidate.shape == (camera.image_height, camera.image_width)
                         and candidate.numel() > 0
-                        and int(candidate.min()) >= 0
+                        and int(candidate.min()) >= -1
                         and int(candidate.max()) < int(gs_model.get_xyz.shape[0])
                     ):
                         max_contributor = candidate.long().contiguous()
@@ -1094,22 +1097,32 @@ def main():
     end_time = datetime.now()
     elapsed_time = end_time - start_time
 
-    feature_cluster_centers = torch.zeros(len(np.unique(cluster_labels)) - 1, point_features.shape[-1])
-    xyz_cluster_centers = torch.zeros(len(np.unique(cluster_labels)) - 1, point_xyz.shape[-1])
-    for i in np.unique(cluster_labels):
-        if i<0:
-            continue
-        feature_cluster_centers[i] = F.normalize(sampled_normed_point_features[cluster_labels == i].mean(dim = 0), dim = -1)
-        xyz_cluster_centers[i] = sampled_std_point_xyz[cluster_labels == i].mean(dim = 0)
+    if args.v7_causal_ablation in {"L2", "L3"}:
+        point_labels = torch.full((len(point_xyz),), -1, dtype=torch.long)
+        point_assignment_confidence = torch.zeros(len(point_xyz), dtype=torch.float32)
+        sampled_indices = torch.nonzero(sampled_mask, as_tuple=False).flatten()
+        sampled_cluster_labels = torch.as_tensor(cluster_labels, dtype=torch.long)
+        sampled_core = sampled_cluster_labels >= 0
+        point_labels[sampled_indices[sampled_core]] = sampled_cluster_labels[sampled_core]
+        point_assignment_confidence[sampled_indices[sampled_core]] = 1.0
+        assigned_mask = point_labels >= 0
+    else:
+        feature_cluster_centers = torch.zeros(len(np.unique(cluster_labels)) - 1, point_features.shape[-1])
+        xyz_cluster_centers = torch.zeros(len(np.unique(cluster_labels)) - 1, point_xyz.shape[-1])
+        for i in np.unique(cluster_labels):
+            if i<0:
+                continue
+            feature_cluster_centers[i] = F.normalize(sampled_normed_point_features[cluster_labels == i].mean(dim = 0), dim = -1)
+            xyz_cluster_centers[i] = sampled_std_point_xyz[cluster_labels == i].mean(dim = 0)
 
-    normed_point_features_sim = torch.clamp(torch.einsum('ac,bc->ab', normed_point_features, feature_cluster_centers), -1, 1)
-    std_point_xyz_sim = torch.clamp(torch.exp(-torch.norm(std_point_xyz[:,None,:] - xyz_cluster_centers[None,:,:], dim=-1)), 0, 1)
-    hybird_sim = args.feature_ratio*normed_point_features_sim + (1-args.feature_ratio)*std_point_xyz_sim
-    confidence = torch.softmax(hybird_sim*10, dim=-1)
-    point_assignment_confidence, point_labels = confidence.max(dim=-1)
-    assigned_mask = point_assignment_confidence>args.instance_threshold
+        normed_point_features_sim = torch.clamp(torch.einsum('ac,bc->ab', normed_point_features, feature_cluster_centers), -1, 1)
+        std_point_xyz_sim = torch.clamp(torch.exp(-torch.norm(std_point_xyz[:,None,:] - xyz_cluster_centers[None,:,:], dim=-1)), 0, 1)
+        hybird_sim = args.feature_ratio*normed_point_features_sim + (1-args.feature_ratio)*std_point_xyz_sim
+        confidence = torch.softmax(hybird_sim*10, dim=-1)
+        point_assignment_confidence, point_labels = confidence.max(dim=-1)
+        assigned_mask = point_assignment_confidence>args.instance_threshold
+        point_labels[~assigned_mask] = -1
     print(f'{assigned_mask.sum()=}, {(~assigned_mask).sum()=}')
-    point_labels[~assigned_mask] = -1
     fallback_point_labels = point_labels.detach().cpu().clone()
     fallback_assignment_confidence = point_assignment_confidence.detach().cpu().clone()
     prior_overlay = None
@@ -1196,9 +1209,15 @@ def main():
                 class_index = int(label_2d)
                 if class_index < 0 or class_index >= len(args.classes):
                     continue
-                gaussian_votes[:, class_index] += torch.bincount(
-                    contributors[mask_2d].long(), minlength=len(point_xyz)
-                ).double()
+                selected_contributors = contributors[mask_2d].long()
+                selected_contributors = selected_contributors[
+                    (selected_contributors >= 0)
+                    & (selected_contributors < len(point_xyz))
+                ]
+                if selected_contributors.numel():
+                    gaussian_votes[:, class_index] += torch.bincount(
+                        selected_contributors, minlength=len(point_xyz)
+                    ).double()
         vote_sum = gaussian_votes.sum(dim=1, keepdim=True)
         legacy_semantic_vote_scores = torch.where(
             vote_sum > 0, gaussian_votes / vote_sum.clamp_min(1), gaussian_votes
@@ -1454,12 +1473,18 @@ def main():
                 masks = masks.bool()
             labels_2d = torch.load(os.path.join(args.labels_path, f'{camera.image_name}.pt'))
             max_contributor = get_max_contributor(camera, labels_for_vote.device)
+            valid_contributor = (
+                (max_contributor >= 0) & (max_contributor < len(labels_for_vote))
+            )
             if (args.v3_shadow_mode != 'off' or args.v4_candidate_mode != 'off') and masks.numel() > 0:
                 foreground = masks.any(dim=0)
-                covered_indices = max_contributor[foreground].detach().cpu().long()
+                covered_indices = max_contributor[foreground & valid_contributor].detach().cpu().long()
                 if covered_indices.numel():
                     v3_sam_covered[covered_indices.unique()] = True
-            max_instance_contributor = labels_for_vote[max_contributor]
+            safe_contributor = max_contributor.clamp(min=0)
+            max_instance_contributor = labels_for_vote[safe_contributor]
+            max_instance_contributor = max_instance_contributor.clone()
+            max_instance_contributor[~valid_contributor] = -1
             background_label = len(args.classes)
             background = torch.ones(
                 (camera.image_height, camera.image_width),
@@ -1566,10 +1591,17 @@ def main():
                 'after_filter': shadow_after_filter,
                 'merged_ids': merged_ids,
             }
-        if args.k>0:
+        if args.k>0 and args.v7_causal_ablation == "L0":
             point_labels = filter3d(point_xyz, point_labels, args.k)
         teacher_after_knn = point_labels.detach().cpu().clone()
         point_labels = filter_num(point_labels, min_num=10)
+        if args.v7_causal_ablation == "L3":
+            from category_priors.v7_objects import attach_local_labels
+            point_labels = torch.from_numpy(attach_local_labels(
+                point_xyz.detach().cpu().numpy() * float(args.scene_scale_m_per_unit),
+                normed_point_features.detach().cpu().numpy(),
+                point_labels.detach().cpu().numpy(),
+            ))
         if (
             args.teacher_evidence_protection == 'multi-anchor'
             and teacher_merged_classes
