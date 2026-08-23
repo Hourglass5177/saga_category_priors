@@ -378,7 +378,7 @@ def render_with_max_contributor(viewpoint_camera, pc : GaussianModel, pipe, bg_c
         colors_precomp = override_color
 
     # Rasterize visible Gaussians to image, obtain their radii (on screen). 
-    rendered_image, max_contributor, max_contribute, radii = rasterizer(
+    rendered_image, max_contributor, max_contribute, historical_max_contributor, historical_max_contribute, radii = rasterizer(
         means3D = means3D,
         means2D = means2D,
         shs = shs,
@@ -393,6 +393,8 @@ def render_with_max_contributor(viewpoint_camera, pc : GaussianModel, pipe, bg_c
     return {"render": rendered_image,
             'max_contributor': max_contributor,
             'max_contribute': max_contribute,
+            'historical_max_contributor': historical_max_contributor,
+            'historical_max_contribute': historical_max_contribute,
             "viewspace_points": screenspace_points,
             "visibility_filter" : radii > 0,
             "radii": radii}

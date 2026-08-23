@@ -1,13 +1,13 @@
-# SAGA 类别先验与小物体保护实验计划（当前权威：V7）
+# SAGA 类别先验与小物体保护实验计划（当前权威：V8）
 
-> **权威状态：第 19 节 V7 是当前执行的唯一实验事实源。** 旧 B2、class-first、
+> **权威状态：第 20 节 V8 是当前执行的唯一实验事实源。** 旧 B2、class-first、
 > prior-v2、teacher-preservation 和 selective-restore 文档与代码只作为失败审计记录，
 > 不得覆盖本文件的研究问题、条件定义、阶段门槛或结论边界。
 
-- 版本：V7.0
-- 冻结日期：2026-08-15
+- 版本：V8.0
+- 冻结日期：2026-08-23
 - V3 起点代码检查点：`f1367fa58c8f50df75f80b86f67bab469af06531`
-- 当前状态：**V7 本地实现与测试中；尚未启动云端 Stage 0**
+- 当前状态：**V7 已按 Stage 0 oracle 门槛停止；V8 本地实现与终审通过，待部署运行**
 - 适用范围：现有 24 个 tune 场景、原 48 个内部评估场景及现有训练资产
 - 独立实验单位：physical scene
 - 技术重复：seed `42`、`3407`、`20260804`
@@ -850,3 +850,118 @@ fragment、track、core、halo 和类别全部先冻结。CPU replay 只比较�
 - [ ] commit/push `origin/a800`，部署同commit到固定云端目录。
 - [ ] 云端启动Stage 0并验证runner健康。
 - [ ] runner健康后创建并核验绑定当前主任务ID的每小时Codex自动化。
+
+### 19.7 V7 实际闭环（2026-08-23）
+
+- V7 代码以 commit `8820c0a5dc27125e36d1fef94421541e505c7990` 部署到
+  `/root/autodl-tmp/saga/workspace/v7-object-tracks`，本地/云端定向测试和 CUDA 扩展验收完成。
+- Stage 0 两场景已完成；`v7_status.json` 为 `stopped`。P0 historical 与 L0
+  contributor-fixed 最终点标签逐点一致。L0 两场 mAP=`0.0544444`、AP50=`0.1833333`、
+  Gaussian micro precision=`0.238188`、matched-GT recall=`0.621284`。
+- L1 去 global KNN、L2 core-only、L3 local attach 均未满足注册的 precision/recall 因果门槛；
+  因此 global KNN 污染和中心吸附污染未被确认，halo 判定为关闭。
+- V7 bank 共 56 个候选，same-class IoU≥.25 仅 1 个、IoU≥.50 为 0；tiny/small
+  Recall@.25=`0.047619`。原 V7 association oracle 的 IoU≥.50 为 0，tiny/small
+  Recall@.25=`0.142857`，未过门槛，未进入 8/24/48 场景。
+- 后续只读复核发现原 oracle 同时混入类别，并无条件 union fragment，不是纯几何且不是单调上界；
+  但改成 class-agnostic、只接受 IoU 改善的组合后，IoU≥.50 仍为 0。5 cm GT→Gaussian
+  覆盖为 `98.56%`，10 cm 为 `99.94%`，排除坐标和映射半径为主因。
+- 对所有现有 fragment 做 perfect-trim 支持上界时，忽略类别也只有 2/38 个 GT 具备
+  IoU≥.50 的覆盖；最佳候选表现为局部 precision 高而 recall 很低。V7 停止证明当前
+  Grounded-SAM + max-one lifting 的候选支持不足，**没有检验、更没有证伪类别先验**。
+
+## 20. V8 当前权威计划：Mask × Alpha 因果审计与对象 bank
+
+### 20.1 唯一研究顺序
+
+V8 先区分 Grounded-SAM mask 覆盖与 max-one lifting 两个根因，再建立不依赖语义路由的
+对象 bank，最后只在冻结 bank 上比较类别先验。公开 LBG 的 max contributor 与 Trace3D
+式全 alpha attribution 都作为有效假设，不预判哪一种正确。
+
+Stage 0/1 固定 `scene0645_00`、`scene0025_01`，运行：
+
+```text
+G-M1  G-AM
+S-M1  S-AM
+```
+
+- `G` 为现有 Grounded-SAM mask；`S` 使用现有 checkpoint 按固定官方参数生成
+  segment-everything mask，写独立目录。
+- `M1` 使用修正后的最大 `alpha*T_prev` contributor，并把该像素归一化为赢家的
+  单位 one-hot mass；`AM` 使用每像素对全部实际
+  contributor 归一化的 alpha mass，不保存逐像素 contributor cache。
+- 两种 lifting 共用：full `inside_mass>=0.5`；core `inside_mass>=2` 且
+  `inside_mass/visible_mass>=0.50`；fragment 至少 5 core、10 full。
+- oracle 拆为 geometric/semantic single、单调 greedy upper bound 与 perfect-trim
+  support ceiling。GT 只进入离线 evaluator。
+
+进入 8 场景的组合须有 geometric greedy IoU≥.50 匹配至少 6 个，且 official-valid
+tiny/small Recall@.25≥.20。因素实质作用定义为相对对照新增至少 2 个 IoU≥.50 匹配，
+或 tiny/small Recall@.25 提高至少 .05。四臂均失败则停止纯后处理。
+
+### 20.2 V8 确定性对象 bank
+
+- fragment 关联不读取类别；weighted core overlap≥.25、共享 core≥3、best-second
+  margin≥.10。同帧不合并，模糊 fragment 新建 track，不允许桥接已有 track。
+- consensus 只累计 `core_ids`；positive/conflict 每物理视角最多一次。core 要求≥2个
+  positive views、positive/visible≥.60、conflict/visible≤.25、至少10点；full只来自
+  成员 fragment union 且 positive mass ratio≥.40。不做全局 KNN、中心吸附或迭代 halo。
+- 类别在 track 冻结后确定。开发 8 场景比较 MV-label 与完整32类 codebook，按几何
+  IoU≥.25 候选的类别准确率选一个；差≤2个百分点时选 MV-label。非 SAGA20 不输出。
+- 8 场景固定为 V7 `DEV8`。geometry IoU≥.50 候选须≥16/4场景；选定晚分类器的
+  same-class IoU≥.50 须≥12/4场景；precision@.25≥10%、tiny/small Recall@.25≥.20，
+  并通过相对 B1-fixed 的 Gaussian precision、recall、mAP/AP50、实例数和 score-IoU 门槛。
+- 若 oracle 通过但 bank 失败，则停止在对象关联主干，不把失败归因到类别先验。
+  affinity edge AUROC 仅作为输入表示诊断记录，不触发训练。
+
+### 20.3 冻结 bank 上的类别先验
+
+四臂固定为 `U00/D10/D01/D11`，候选、track、core、full、类别和输出规则完全相同；
+prior 只替换 global/class size 与 support 统计，统一 `S=QGC`、阈值 .20。size 只惩罚
+异常过大的 sorted extent；support 使用16-NN局部密度与 train-only典型表面积。缺失类回退
+global。同类 core IoU≥.50 时按分数NMS；重叠Gaussian归最高分候选；最终少于10点的实例删除。
+
+机械生效要求至少10%候选的D−U分数绝对差≥.01，或接受/所有权实际改变。best-D 进入
+holdout须 ΔmAP≥.002，或 tiny/small Recall@.50≥.01 且 ΔmAP≥−.0005；正向场景更多且
+FP/TP恶化≤20%。不通过时停止，不增加学习式校准或阈值搜索。
+
+### 20.4 独立复核与 final
+
+先运行 `scene0231_00/scene0608_00/scene0356_00/scene0011_00/scene0593_00`；要求平均
+ΔmAP>0、至少3/5为正、tiny/small Recall@.50为正。之后才运行 tune24 其余重复扫描，
+先在同一 physical scene 内平均，再对13个physical scenes等权；宏平均 ΔmAP≥.002 才进入
+final48。
+
+final48 每场只生成一次确定性 bank，再 CPU replay U/best-D；不制造多 seed。主检验为
+10,000次 physical-scene paired bootstrap，ΔmAP≥.002 且95% CI下界>0。final不得调参。
+
+### 20.5 工程边界、产物和当前检查点
+
+- 新增独立 V8 lifting/object/worker/runner/replay/evaluation，不恢复 V3–V7 旧实验运行时，
+  不写兼容 adapter。
+- 不下载新权重、不重训3DGS；SAM-everything只用已有checkpoint。单GPU单进程，磁盘≥80GB，
+  内存只按90GiB cgroup。
+- 不生成SHA文件、lock、schedule hash或 contributor cache；只保存 compact fragment/bank。
+- 产物：`v8_provenance_and_v7_closeout.json`、`v8_lifting_factorial2.parquet`、
+  `v8_lifting_analysis2.json`、`v8_bank8.parquet`、`v8_bank8_analysis.json`、
+  `v8_prior_replay8.parquet`、`v8_tune24_metrics.parquet`、
+  `v8_final_metrics.parquet`、`v8_analysis.json`和viewer。
+
+### 20.6 结果采集前的静态因果纠错（2026-08-23）
+
+实现审查发现，20.2 冻结的 V8 bank 只读取 mask lifting、跨视角 weighted overlap 和
+late semantics，**完全不读取 affinity feature**。因此原草案中“bank 失败后把2k feature
+换成10k，并要求自动几何候选新增”的正控在数学上不可能生效；若通过，只能来自同时改变
+semantic/classifier 的混杂。该分支在任何 V8 结果产生前删除，不属于结果驱动调参。
+
+V8 仍记录 selected-mask 局部 affinity edge AUROC，但它只解释输入表示，不作为 bank 失败的
+升级门。若 Stage 1 oracle 通过而 Stage 2 bank 失败，结论固定为 mask-overlap 跨视角对象主干
+未达到健康门槛；停止，不训练10k，不把失败外推为类别先验无效。
+
+当前检查点：
+
+- [x] V7 云端停止结果和只读根因复核完成。
+- [x] V8 条件、公式、场景、门槛和升级边界在收集 V8 结果前冻结。
+- [x] 实现并测试 V8 oracle、M1/AM lifting、对象 bank、晚分类和 replay（本地 `157 passed, 1 skipped`；skip 为本机无 Torch，待云端补测）。
+- [ ] commit/push，部署相同 commit，启动 Stage 0/1。
+- [ ] runner 健康后创建并核验绑定当前任务的每小时自动检查。

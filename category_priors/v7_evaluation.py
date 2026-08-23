@@ -43,8 +43,12 @@ def _gaussian_ply(scene: Mapping[str, Any]) -> Path:
         result = Path(str(explicit))
         return result if result.is_absolute() else Path(str(scene["base_path"])) / result
     root = Path(str(scene["base_path"])) / "output_models/point_cloud/iteration_30000"
-    primary = root / "point_cloud.ply"
-    return primary if primary.is_file() else root / "scene_point_cloud.ply"
+    # Registered automatic-evaluation assets use scene_point_cloud.ply; its
+    # row order is the one checked against the SAGA feature PLY by V8 worker.
+    # Falling back to point_cloud.ply is only for older assets that do not
+    # contain the registered scene file.
+    primary = root / "scene_point_cloud.ply"
+    return primary if primary.is_file() else root / "point_cloud.ply"
 
 
 def _transform(scene: Mapping[str, Any]) -> Sequence[Sequence[float]]:
@@ -337,6 +341,8 @@ def evaluate_v7_replays(
         tiny_small_total = 0
         tiny_small_hit_025 = 0
         tiny_small_hit_050 = 0
+        official_gt_total = 0
+        official_gt_hit_025 = 0
         per_scene: list[dict[str, Any]] = []
         for scene_id in scene_ids:
             scene = scenes[scene_id]
@@ -371,6 +377,8 @@ def evaluate_v7_replays(
             scene_tiny_total = 0
             scene_tiny_hit_025 = 0
             scene_tiny_hit_050 = 0
+            scene_official_total = 0
+            scene_official_hit_025 = 0
             valid_gt = (gt.semantic >= 0) & (gt.instance >= 0)
             for class_id, instance_id in sorted(set(zip(
                 gt.semantic[valid_gt].tolist(), gt.instance[valid_gt].tolist()
@@ -378,21 +386,35 @@ def evaluate_v7_replays(
                 gt_mask = valid_gt & (gt.semantic == class_id) & (gt.instance == instance_id)
                 if int(gt_mask.sum()) < min_region_size:
                     continue
+                same_class = [
+                    item.mask for item in predictions
+                    if item.class_id == int(class_id)
+                ]
+                best_iou = max(
+                    (_iou(gt_mask, mask) for mask in same_class), default=0.0
+                )
+                scene_official_total += 1
+                scene_official_hit_025 += int(best_iou >= 0.25)
                 if _size_bin(_bbox_diagonal(gt_coords[gt_mask]), size_spec) not in {"tiny", "small"}:
                     continue
-                same_class = [item.mask for item in predictions if item.class_id == int(class_id)]
-                best_iou = max((_iou(gt_mask, mask) for mask in same_class), default=0.0)
                 scene_tiny_total += 1
                 scene_tiny_hit_025 += int(best_iou >= 0.25)
                 scene_tiny_hit_050 += int(best_iou >= 0.50)
             tiny_small_total += scene_tiny_total
             tiny_small_hit_025 += scene_tiny_hit_025
             tiny_small_hit_050 += scene_tiny_hit_050
+            official_gt_total += scene_official_total
+            official_gt_hit_025 += scene_official_hit_025
             per_scene.append({
                 "scene_id": scene_id, **scene_result["aggregate"],
                 "tiny_small_official_gt_count": scene_tiny_total,
                 "tiny_small_recall_025": scene_tiny_hit_025 / scene_tiny_total if scene_tiny_total else 0.0,
                 "tiny_small_recall_050": scene_tiny_hit_050 / scene_tiny_total if scene_tiny_total else 0.0,
+                "official_gt_count": scene_official_total,
+                "official_gt_recall_025": (
+                    scene_official_hit_025 / scene_official_total
+                    if scene_official_total else 0.0
+                ),
             })
             audit = evaluate_gaussian_object_precision(
                 gaussian_coords, gaussian_labels, output.get("instances", {}),
@@ -442,6 +464,10 @@ def evaluate_v7_replays(
             "mean_matched_gt_recall": float(np.mean([
                 item["mean_matched_gt_recall"] for item in precision_aggregates
             ])) if precision_aggregates else 0.0,
+            "official_gt_recall_025": (
+                official_gt_hit_025 / official_gt_total
+                if official_gt_total else 0.0
+            ),
             "mean_scene_map_50_95": float(np.mean([item["map_50_95"] for item in per_scene])),
             "tiny_small_official_gt_count": tiny_small_total,
             "tiny_small_recall_025": tiny_small_hit_025 / tiny_small_total if tiny_small_total else 0.0,

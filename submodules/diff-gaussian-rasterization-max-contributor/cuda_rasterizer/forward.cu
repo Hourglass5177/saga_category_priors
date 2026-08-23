@@ -271,6 +271,8 @@ renderCUDA(
 	uint32_t* __restrict__ n_contrib,
 	int* __restrict__ max_contributor,
 	float* __restrict__ max_contribute,
+	int* __restrict__ historical_max_contributor,
+	float* __restrict__ historical_max_contribute,
 	const float* __restrict__ bg_color,
 	float* __restrict__ out_color)
 {
@@ -305,6 +307,10 @@ renderCUDA(
 	float C[CHANNELS] = { 0 };
 	float max_weight = 0.0f;
 	int max_id = -1;
+	float historical_max_weight = 0.0f;
+	// Historical branch reproduces both old defects: alpha*T_new ranking and
+	// the zero ID assigned to pixels with no valid contribution.
+	int historical_max_id = 0;
 
 	// Iterate over batches until all done or range is complete
 	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
@@ -366,6 +372,14 @@ renderCUDA(
 				max_weight = weight;
 				max_id = collected_id[j];
 			}
+			// Read-only audit of the pre-V7 bug: the old code compared alpha
+			// after updating transmittance.  It never drives rendered colour or
+			// the corrected winner; V8 only records its pixel-level divergence.
+			const float historical_weight = alpha * test_T;
+			if(historical_weight > historical_max_weight){
+				historical_max_weight = historical_weight;
+				historical_max_id = collected_id[j];
+			}
 			T = test_T;
 			// Keep track of last range entry to update this
 			// pixel.
@@ -381,6 +395,8 @@ renderCUDA(
 		n_contrib[pix_id] = last_contributor;
 		max_contributor[pix_id] = max_id;
 		max_contribute[pix_id] = max_weight;
+		historical_max_contributor[pix_id] = historical_max_id;
+		historical_max_contribute[pix_id] = historical_max_weight;
 		for (int ch = 0; ch < CHANNELS; ch++)
 			out_color[ch * H * W + pix_id] = C[ch] + T * bg_color[ch];
 	}
@@ -398,6 +414,8 @@ void FORWARD::render(
 	uint32_t* n_contrib,
 	int* max_contributor,
 	float* max_contribute,
+	int* historical_max_contributor,
+	float* historical_max_contribute,
 	const float* bg_color,
 	float* out_color)
 {
@@ -412,6 +430,8 @@ void FORWARD::render(
 		n_contrib,
 		max_contributor,
 		max_contribute,
+		historical_max_contributor,
+		historical_max_contribute,
 		bg_color,
 		out_color);
 }

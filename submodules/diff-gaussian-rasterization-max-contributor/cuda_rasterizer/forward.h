@@ -60,6 +60,8 @@ namespace FORWARD
 		uint32_t* n_contrib,
 		int* max_contributor,
 		float* max_contribute,
+		int* historical_max_contributor,
+		float* historical_max_contribute,
 		const float* bg_color,
 		float* out_color);
 }

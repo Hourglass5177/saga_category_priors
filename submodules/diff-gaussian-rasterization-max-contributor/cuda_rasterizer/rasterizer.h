@@ -52,6 +52,8 @@ namespace CudaRasterizer
 			int* radii = nullptr,
 			int* max_contributor = nullptr,
 			float* max_contribute = nullptr,
+			int* historical_max_contributor = nullptr,
+			float* historical_max_contribute = nullptr,
 			bool debug = false);
 
 		static void backward(

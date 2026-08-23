@@ -371,15 +371,26 @@ def _select_viewer_cases(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         reverse=True,
     )
     add(
-        "small_object",
+        "tiny_small_success",
         [row for row in rows if row["class_name"] in SMALL_CATEGORIES],
         key=lambda row: (float(row["point_precision"]), float(row["gt_to_gaussian_recall"])),
         reverse=True,
     )
     add(
-        "duplicate_or_merge",
-        [row for row in rows if row["duplicate_prediction"] or row["merge_candidate"]],
-        key=lambda row: (bool(row["duplicate_prediction"]), int(row["same_class_gt_instances_touched"])),
+        "tiny_small_failure",
+        [row for row in rows if row["class_name"] in SMALL_CATEGORIES],
+        key=lambda row: (float(row["point_precision"]), float(row["gt_to_gaussian_recall"])),
+    )
+    add(
+        "merge_case",
+        [row for row in rows if row["merge_candidate"]],
+        key=lambda row: int(row["same_class_gt_instances_touched"]),
+        reverse=True,
+    )
+    add(
+        "split_or_duplicate_case",
+        [row for row in rows if row["duplicate_prediction"]],
+        key=lambda row: (float(row["point_precision"]), int(row["predicted_gaussian_count"])),
         reverse=True,
     )
     add(
