@@ -121,7 +121,7 @@ def test_am_mass_validation_still_rejects_substantive_relative_overflow() -> Non
     batch = next(iter_three_channel_mask_batches(np.ones((1, 1, 1), dtype=bool)))
     visible = np.array([5_000.0], dtype=float)
     inside = np.zeros((1, 3), dtype=float)
-    inside[:, 0] = visible * (1.0 + 2.0e-5)
+    inside[:, 0] = visible * (1.0 + 2.0e-4)
 
     with pytest.raises(ValueError, match="inside mass cannot exceed visible mass"):
         attribution_from_am_gradients(

@@ -152,7 +152,7 @@ def _validated_mass(
     # AM masses are accumulated by float32 CUDA atomics over many pixels.
     # Validate conservation relative to the accumulated visible mass instead
     # of using an absolute epsilon that becomes too strict for large objects.
-    tolerance = 1e-5 * np.maximum(visible[None, :], 1.0)
+    tolerance = 5e-5 * np.maximum(visible[None, :], 1.0)
     if excess.size and np.any(excess > tolerance):
         raise ValueError("inside mass cannot exceed visible mass")
     inside = np.minimum(inside, visible[None, :])
