@@ -13,12 +13,12 @@ from category_priors.v8_lifting import (
     V8FragmentConfig,
 )
 from category_priors.v8_worker import (
-    FrameLiftRecord,
     _serialize_records,
     compare_contributor_images,
     load_segment_everything_payload,
     normalize_grounded_payload,
     render_alpha_mass_attribution,
+    sparse_frame_lift_record,
     stable_fragments,
 )
 from category_priors.v8_masks import _save_packed_masks
@@ -166,21 +166,28 @@ def test_serialization_preserves_mass_and_grounded_abstention(tmp_path) -> None:
         core_inside_mass=np.array([2.0], dtype=np.float32),
         core_inside_ratio=np.array([1.0], dtype=np.float32),
     )
-    geometry = FrameLiftRecord(
-        0, "frame", geometry_mass, (fragment,), np.array([-1], dtype=np.int16)
-    )
-    semantic = FrameLiftRecord(
+    geometry = sparse_frame_lift_record(
         0,
         "frame",
-        AttributionMass(
-            source="AM",
-            inside_mass=np.zeros((0, 3)),
-            visible_mass=visible,
-            valid_pixel_count=3,
-            abstained=True,
-        ),
+        geometry_mass,
+        (fragment,),
+        np.array([-1], dtype=np.int16),
+        retain_visibility=True,
+    )
+    semantic_mass = AttributionMass(
+        source="AM",
+        inside_mass=np.zeros((0, 3)),
+        visible_mass=visible,
+        valid_pixel_count=3,
+        abstained=True,
+    )
+    semantic = sparse_frame_lift_record(
+        0,
+        "frame",
+        semantic_mass,
         (),
         np.empty(0, dtype=np.int16),
+        retain_visibility=False,
     )
     _serialize_records(
         tmp_path,
@@ -197,4 +204,58 @@ def test_serialization_preserves_mass_and_grounded_abstention(tmp_path) -> None:
         np.testing.assert_array_equal(arrays["fragment_full_ids"], [0, 1])
         np.testing.assert_allclose(arrays["fragment_full_mass"], [2.0, 0.5])
         np.testing.assert_array_equal(arrays["fragment_source_class"], [-1])
+        np.testing.assert_array_equal(arrays["frame_visible_indptr"], [0, 2])
+        np.testing.assert_array_equal(arrays["frame_visible_ids"], [0, 1])
+        np.testing.assert_allclose(arrays["frame_visible_mass"], [2.0, 1.0])
         np.testing.assert_array_equal(arrays["frame_grounded_missing"], [True])
+
+
+def test_sparse_frame_record_does_not_retain_dense_attribution() -> None:
+    point_count = 100_000
+    inside = np.zeros((3, point_count), dtype=np.float64)
+    visible = np.zeros(point_count, dtype=np.float64)
+    visible[[4, 90_000]] = [2.0, 1.0]
+    attribution = AttributionMass(
+        source="M1",
+        inside_mass=inside,
+        visible_mass=visible,
+        valid_pixel_count=3,
+    )
+
+    record = sparse_frame_lift_record(
+        5,
+        "frame-5",
+        attribution,
+        (),
+        np.arange(3, dtype=np.int16),
+        retain_visibility=True,
+    )
+
+    assert not hasattr(record, "attribution")
+    np.testing.assert_array_equal(record.visible_ids, [4, 90_000])
+    np.testing.assert_allclose(record.visible_mass, [2.0, 1.0])
+    assert record.mask_count == 3
+    assert record.visible_ids.nbytes + record.visible_mass.nbytes == 16
+
+
+def test_semantic_sparse_record_does_not_duplicate_visibility() -> None:
+    attribution = AttributionMass(
+        source="AM",
+        inside_mass=np.zeros((0, 50_000), dtype=np.float64),
+        visible_mass=np.ones(50_000, dtype=np.float64),
+        valid_pixel_count=50_000,
+        abstained=True,
+    )
+
+    record = sparse_frame_lift_record(
+        0,
+        "frame",
+        attribution,
+        (),
+        np.empty(0, dtype=np.int16),
+        retain_visibility=False,
+    )
+
+    assert record.visible_ids.size == 0
+    assert record.visible_mass.size == 0
+    assert record.abstained

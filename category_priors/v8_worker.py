@@ -58,9 +58,40 @@ class FrameMaskPayload:
 class FrameLiftRecord:
     frame_id: int
     image_name: str
-    attribution: AttributionMass
     fragments: tuple[AttributionFragment, ...]
     labels: np.ndarray
+    visible_ids: np.ndarray
+    visible_mass: np.ndarray
+    abstained: bool
+    mask_count: int
+
+
+def sparse_frame_lift_record(
+    frame_id: int,
+    image_name: str,
+    attribution: AttributionMass,
+    fragments: tuple[AttributionFragment, ...],
+    labels: np.ndarray,
+    *,
+    retain_visibility: bool,
+) -> FrameLiftRecord:
+    """Discard dense per-mask attribution after extracting frame evidence."""
+    if retain_visibility:
+        visible_ids = np.flatnonzero(attribution.visible_mass > 0).astype(np.int32)
+        visible_mass = attribution.visible_mass[visible_ids].astype(np.float32)
+    else:
+        visible_ids = np.empty(0, dtype=np.int32)
+        visible_mass = np.empty(0, dtype=np.float32)
+    return FrameLiftRecord(
+        frame_id=int(frame_id),
+        image_name=str(image_name),
+        fragments=tuple(fragments),
+        labels=np.asarray(labels, dtype=np.int16),
+        visible_ids=visible_ids,
+        visible_mass=visible_mass,
+        abstained=bool(attribution.abstained),
+        mask_count=int(attribution.mask_count),
+    )
 
 
 def _git_commit(repo: Path) -> str:
@@ -438,14 +469,8 @@ def _serialize_records(
     core_indptr, core_ids = _ragged([item.core_ids for item in fragments], np.int32)
     _, core_mass = _ragged([item.core_inside_mass for item in fragments], np.float32)
     _, core_ratio = _ragged([item.core_inside_ratio for item in fragments], np.float32)
-    visible_ids_rows = [
-        np.flatnonzero(record.attribution.visible_mass > 0).astype(np.int32)
-        for record in geometry_records
-    ]
-    visible_mass_rows = [
-        record.attribution.visible_mass[ids].astype(np.float32)
-        for record, ids in zip(geometry_records, visible_ids_rows)
-    ]
+    visible_ids_rows = [record.visible_ids for record in geometry_records]
+    visible_mass_rows = [record.visible_mass for record in geometry_records]
     visible_indptr, visible_ids = _ragged(visible_ids_rows, np.int32)
     _, visible_mass = _ragged(visible_mass_rows, np.float32)
 
@@ -509,10 +534,10 @@ def _serialize_records(
         frame_visible_ids=visible_ids,
         frame_visible_mass=visible_mass,
         frame_geometry_abstained=np.asarray(
-            [record.attribution.abstained for record in geometry_records], dtype=np.bool_
+            [record.abstained for record in geometry_records], dtype=np.bool_
         ),
         frame_grounded_missing=np.asarray(
-            [record.attribution.abstained for record in semantic_records], dtype=np.bool_
+            [record.abstained for record in semantic_records], dtype=np.bool_
         ),
         semantic_fragment_full_indptr=semantic_full_indptr,
         semantic_fragment_full_ids=semantic_full_ids,
@@ -729,13 +754,21 @@ def run_v8_lifting_bank(
                 fragment_min_full=1,
             ),
         )
-        geometry_records.append(FrameLiftRecord(
-            frame_id, str(camera.image_name), geometry_attr,
-            geometry_fragments, geometry.labels,
+        geometry_records.append(sparse_frame_lift_record(
+            frame_id,
+            str(camera.image_name),
+            geometry_attr,
+            geometry_fragments,
+            geometry.labels,
+            retain_visibility=True,
         ))
-        semantic_records.append(FrameLiftRecord(
-            frame_id, str(camera.image_name), semantic_attr,
-            semantic_fragments, grounded.labels,
+        semantic_records.append(sparse_frame_lift_record(
+            frame_id,
+            str(camera.image_name),
+            semantic_attr,
+            semantic_fragments,
+            grounded.labels,
+            retain_visibility=False,
         ))
         geometry_offset += geometry.mask_count
         semantic_offset += grounded.mask_count
@@ -800,7 +833,7 @@ def run_v8_lifting_bank(
         "frame_count": len(geometry_records),
         "frame_image_names": [record.image_name for record in geometry_records],
         "grounded_abstention_frame_count": grounded_abstentions,
-        "mask_count": int(sum(record.attribution.mask_count for record in geometry_records)),
+        "mask_count": int(sum(record.mask_count for record in geometry_records)),
         "fragment_count": fragment_count,
         "semantic_fragment_count": semantic_fragment_count,
         "classes": list(classes),
