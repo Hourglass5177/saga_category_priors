@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from category_priors.v8_lifting import (
     AttributionMass,
@@ -98,6 +99,37 @@ def test_am_normalization_conserves_pixel_mass_and_splits_inside_outside() -> No
         mass.inside_mass + mass.outside_mass,
         np.broadcast_to(mass.visible_mass, mass.inside_mass.shape),
     )
+
+
+def test_am_mass_validation_uses_scale_aware_cuda_accumulation_tolerance() -> None:
+    batch = next(iter_three_channel_mask_batches(np.ones((1, 1, 1), dtype=bool)))
+    visible = np.array([5_000.0, 2.0], dtype=float)
+    inside = np.zeros((2, 3), dtype=float)
+    inside[:, 0] = visible * (1.0 + 6.6e-6)
+
+    mass = attribution_from_am_gradients(
+        visible,
+        [(batch, inside)],
+        mask_count=1,
+        valid_pixel_count=1,
+    )
+
+    assert np.array_equal(mass.inside_mass[0], visible)
+
+
+def test_am_mass_validation_still_rejects_substantive_relative_overflow() -> None:
+    batch = next(iter_three_channel_mask_batches(np.ones((1, 1, 1), dtype=bool)))
+    visible = np.array([5_000.0], dtype=float)
+    inside = np.zeros((1, 3), dtype=float)
+    inside[:, 0] = visible * (1.0 + 2.0e-5)
+
+    with pytest.raises(ValueError, match="inside mass cannot exceed visible mass"):
+        attribution_from_am_gradients(
+            visible,
+            [(batch, inside)],
+            mask_count=1,
+            valid_pixel_count=1,
+        )
 
 
 def test_am_three_channel_batches_are_deterministic_and_zero_padded() -> None:
