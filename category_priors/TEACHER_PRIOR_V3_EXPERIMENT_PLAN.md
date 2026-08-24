@@ -1,13 +1,13 @@
 # SAGA 类别先验与小物体保护实验计划（当前权威：V8）
 
-> **权威状态：第 20 节 V8 是当前执行的唯一实验事实源。** 旧 B2、class-first、
+> **权威状态：V8 已按第 20 节门槛停止；第 21 节原始交付基线闭环是当前唯一执行路径。** 旧 B2、class-first、
 > prior-v2、teacher-preservation 和 selective-restore 文档与代码只作为失败审计记录，
 > 不得覆盖本文件的研究问题、条件定义、阶段门槛或结论边界。
 
 - 版本：V8.0
 - 冻结日期：2026-08-23
 - V3 起点代码检查点：`f1367fa58c8f50df75f80b86f67bab469af06531`
-- 当前状态：**V7 已按 Stage 0 oracle 门槛停止；V8 本地实现与终审通过，待部署运行**
+- 当前状态：**V8 已在自动 bank 健康门槛停止；正在闭合最早可证的 teacher handoff 基线**
 - 适用范围：现有 24 个 tune 场景、原 48 个内部评估场景及现有训练资产
 - 独立实验单位：physical scene
 - 技术重复：seed `42`、`3407`、`20260804`
@@ -963,5 +963,34 @@ V8 仍记录 selected-mask 局部 affinity edge AUROC，但它只解释输入表
 - [x] V7 云端停止结果和只读根因复核完成。
 - [x] V8 条件、公式、场景、门槛和升级边界在收集 V8 结果前冻结。
 - [x] 实现并测试 V8 oracle、M1/AM lifting、对象 bank、晚分类和 replay（本地 `157 passed, 1 skipped`；skip 为本机无 Torch，待云端补测）。
-- [ ] commit/push，部署相同 commit，启动 Stage 0/1。
+- [x] commit/push 并部署；两场 Mask×Alpha 因果实验完成，`S-AM` 通过几何上限门槛。
+- [x] 扩展到固定 8 场景；V8 自动 bank 未通过健康门槛，按预注册规则停止，未进入 prior replay/24/48。
+
+V8 的实际停止结果：`S-AM` 两场 geometric greedy IoU≥.50 为 16 个，证明 SAM-everything
+和 alpha-mass lifting 能提供几何支持；但 8 场自动 bank 只有 2 个 geometric IoU≥.50、
+0 个 same-class IoU≥.50，U00 mAP 为 0、tiny/small Recall@.25 为 0，且 precision/unsupported
+均劣于 B1-fixed。因此停止原因为跨视角 mask-overlap bank 不健康，不是类别先验失败。
+
+## 21. 原始交付基线闭环（当前执行）
+
+只读 Git/reflog 和老师聊天重新核对后，最早可证的 a800 交付锚点是 `bfc2192`，而非
+`8c5e167`。前者是 18 类/4 个 `other_classes`；后者是交付后扩到 28 类/7 个小类的演化版本。
+公开 SAGA `96e5021` 仍只作提示式分割上游，不是自动 ScanNet AP 基线。
+
+当前实验严格按
+[`TEACHER_BASELINE_CLOSURE_PLAN.md`](./TEACHER_BASELINE_CLOSURE_PLAN.md) 执行：
+
+- 三个开发物理场景：`scene0064_01/scene0025_01/scene0231_00`；
+- 隔离重建 handoff 的 18 类 masks/scales/features，不复用 32 类语义资产；
+- 比较 `bfc2192` literal handoff、`95073c6` 训练修复、historical/fixed contributor、
+  L1/L2/L3 后处理快照和 adaptive/10k 预算；
+- 同时报官方 9 阈值、历史 10 阈值、Gaussian 精度和 handoff 可预测类交集；
+- 三场结束即停止，不测试类别先验，不扩展 24/48。
+
+当前检查点：
+
+- [x] Git provenance、老师聊天、README、评估协议和三场资产范围完成只读审计。
+- [x] 冻结原始基线闭环设计与结论边界。
+- [x] 实现隔离 runner/evaluator、fixed contributor、L0 等价门槛、Gaussian 精度和 viewer。
+- [ ] commit/push，云端部署同 commit，启动三场闭环。
 - [ ] runner 健康后创建并核验绑定当前任务的每小时自动检查。
