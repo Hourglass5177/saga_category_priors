@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Small public CLI for the active SAGA baseline and V8 experiment.
+"""Small public CLI for the active SAGA baseline and V9 experiment.
 
 Retired B2/class-first/prior-v2/V3-V6 experiment entry points intentionally do
 not live here; their exact implementations remain available through Git.
@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 from .alignment import audit_saga_alignment
+from .baseline_closure_analysis import evaluate_teacher_handoff
 from .evaluator import evaluate_manifest
 from .gaussian_object_audit import audit_gaussian_object_runs
 from .io import read_rows
@@ -24,6 +25,15 @@ from .v8_bank import (
 from .v8_evaluation import evaluate_v8_replays
 from .v8_replay import CONDITIONS as V8_CONDITIONS
 from .v8_runner import run_v8_lifting_banks, run_v8_lifting_factorial
+from .v9_feature_training import execute_v9_feature_training
+from .v9_replay import CONDITION_FACTORS as V9_CONDITIONS
+from .v9_runner import (
+    ASSOCIATION_MODES as V9_ASSOCIATION_MODES,
+    CLASSIFIERS as V9_CLASSIFIERS,
+    replay_v9_priors,
+    run_v9_banks,
+)
+from .v9_metrics import evaluate_v9_candidate_banks, evaluate_v9_predictions
 
 
 def _fit(args: argparse.Namespace) -> None:
@@ -130,6 +140,95 @@ def _evaluate_v8(args: argparse.Namespace) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+def _audit_teacher_baseline(args: argparse.Namespace) -> None:
+    payload = evaluate_teacher_handoff(
+        closure_root=Path(args.closure_root),
+        gt_dir=Path(args.gt_dir),
+        runtime_manifest=Path(args.runtime_manifest),
+        output_dir=Path(args.output_dir),
+        taxonomy=load_taxonomy(args.taxonomy),
+        min_region_size=args.min_region_size,
+        radius_m=args.radius_m,
+        final_vote_scores_path=(
+            Path(args.final_vote_scores) if args.final_vote_scores else None
+        ),
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _train_object_features_10k(args: argparse.Namespace) -> None:
+    payload = execute_v9_feature_training(
+        scene_manifest=Path(args.scene_manifest),
+        output_root=Path(args.output_root),
+        workspace=Path(args.workspace),
+        git_commit=args.git_commit,
+        scene_ids=args.scene,
+        resume=not args.no_resume,
+        dry_run=args.dry_run,
+        continue_on_error=args.continue_on_error,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _run_object_bank(args: argparse.Namespace) -> None:
+    payload = run_v9_banks(
+        lifting_root=args.lifting_root,
+        output_root=args.output_root,
+        scene_ids=args.scene,
+        association_modes=args.association_mode,
+        git_commit=args.git_commit,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _replay_object_priors(args: argparse.Namespace) -> None:
+    payload = replay_v9_priors(
+        bank_root=Path(args.bank_root) / args.association_mode,
+        output_root=args.output_root,
+        scene_ids=args.scene,
+        classifier=args.classifier,
+        conditions=args.condition or tuple(V9_CONDITIONS),
+        category_priors=args.category_priors,
+        acceptance_threshold=args.acceptance_threshold,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _evaluate_object_system(args: argparse.Namespace) -> None:
+    taxonomy = load_taxonomy(args.taxonomy)
+    if args.evaluation_target == "bank":
+        payload = evaluate_v9_candidate_banks(
+            runtime_manifest=Path(args.runtime_manifest),
+            gt_dir=Path(args.gt_dir),
+            bank_root=Path(args.input_root),
+            scene_ids=args.scene,
+            association_mode=args.association_mode,
+            classifier=args.classifier,
+            taxonomy=taxonomy,
+            rows_output=Path(args.metrics_output),
+            analysis_output=Path(args.analysis_output),
+            size_bins=Path(args.size_bins) if args.size_bins else None,
+            radius_m=args.radius_m,
+            min_region_size=args.min_region_size,
+        )
+    else:
+        payload = evaluate_v9_predictions(
+            runtime_manifest=Path(args.runtime_manifest),
+            gt_dir=Path(args.gt_dir),
+            prediction_root=Path(args.input_root),
+            scene_ids=args.scene,
+            conditions=args.condition or tuple(V9_CONDITIONS),
+            taxonomy=taxonomy,
+            metrics_output=Path(args.metrics_output),
+            analysis_output=Path(args.analysis_output),
+            radius_m=args.radius_m,
+            min_region_size=args.min_region_size,
+            size_bins=Path(args.size_bins) if args.size_bins else None,
+            viewer_output=Path(args.viewer_output) if args.viewer_output else None,
+        )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="SAGA category-prior utilities")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -233,6 +332,83 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_v8.add_argument("--radius-m", type=float, default=0.05)
     evaluate_v8.add_argument("--min-region-size", type=int, default=100)
     evaluate_v8.set_defaults(func=_evaluate_v8)
+
+    teacher = commands.add_parser(
+        "audit-teacher-baseline",
+        help="forensic evaluation of the reconstructed teacher handoff",
+    )
+    teacher.add_argument("--closure-root", required=True)
+    teacher.add_argument("--gt-dir", required=True)
+    teacher.add_argument("--runtime-manifest", required=True)
+    teacher.add_argument("--output-dir", required=True)
+    teacher.add_argument("--taxonomy")
+    teacher.add_argument("--final-vote-scores")
+    teacher.add_argument("--radius-m", type=float, default=0.05)
+    teacher.add_argument("--min-region-size", type=int, default=100)
+    teacher.set_defaults(func=_audit_teacher_baseline)
+
+    train_v9 = commands.add_parser(
+        "train-object-features-10k",
+        help="train isolated 10k affinity/semantic features from separate sources",
+    )
+    train_v9.add_argument("--scene-manifest", required=True)
+    train_v9.add_argument("--output-root", required=True)
+    train_v9.add_argument("--workspace", default=".")
+    train_v9.add_argument("--git-commit", required=True)
+    train_v9.add_argument("--scene", action="append", required=True)
+    train_v9.add_argument("--dry-run", action="store_true")
+    train_v9.add_argument("--no-resume", action="store_true")
+    train_v9.add_argument("--continue-on-error", action="store_true")
+    train_v9.set_defaults(func=_train_object_features_10k)
+
+    bank_v9 = commands.add_parser(
+        "run-object-bank", help="build deterministic A0-A3 V9 object banks"
+    )
+    bank_v9.add_argument("--lifting-root", required=True)
+    bank_v9.add_argument("--output-root", required=True)
+    bank_v9.add_argument("--scene", action="append", required=True)
+    bank_v9.add_argument(
+        "--association-mode",
+        action="append",
+        choices=V9_ASSOCIATION_MODES,
+        required=True,
+    )
+    bank_v9.add_argument("--git-commit", required=True)
+    bank_v9.set_defaults(func=_run_object_bank)
+
+    replay_v9 = commands.add_parser(
+        "replay-object-priors", help="run frozen 2^3 category-prior replay"
+    )
+    replay_v9.add_argument("--bank-root", required=True)
+    replay_v9.add_argument("--output-root", required=True)
+    replay_v9.add_argument("--category-priors", required=True)
+    replay_v9.add_argument("--association-mode", choices=V9_ASSOCIATION_MODES, required=True)
+    replay_v9.add_argument("--classifier", choices=V9_CLASSIFIERS, required=True)
+    replay_v9.add_argument("--scene", action="append", required=True)
+    replay_v9.add_argument("--condition", action="append", choices=tuple(V9_CONDITIONS))
+    replay_v9.add_argument("--acceptance-threshold", type=float, required=True)
+    replay_v9.set_defaults(func=_replay_object_priors)
+
+    evaluate_v9 = commands.add_parser(
+        "evaluate-object-system",
+        help="evaluate a frozen V9 bank or strict replay outputs",
+    )
+    evaluate_v9.add_argument("--evaluation-target", choices=("bank", "replay"), required=True)
+    evaluate_v9.add_argument("--runtime-manifest", required=True)
+    evaluate_v9.add_argument("--gt-dir", required=True)
+    evaluate_v9.add_argument("--input-root", required=True)
+    evaluate_v9.add_argument("--scene", action="append", required=True)
+    evaluate_v9.add_argument("--association-mode", choices=V9_ASSOCIATION_MODES, default="A1")
+    evaluate_v9.add_argument("--classifier", choices=V9_CLASSIFIERS, default="mv-label")
+    evaluate_v9.add_argument("--condition", action="append", choices=tuple(V9_CONDITIONS))
+    evaluate_v9.add_argument("--taxonomy")
+    evaluate_v9.add_argument("--metrics-output", required=True)
+    evaluate_v9.add_argument("--analysis-output", required=True)
+    evaluate_v9.add_argument("--size-bins")
+    evaluate_v9.add_argument("--viewer-output")
+    evaluate_v9.add_argument("--radius-m", type=float, default=0.05)
+    evaluate_v9.add_argument("--min-region-size", type=int, default=100)
+    evaluate_v9.set_defaults(func=_evaluate_object_system)
     return parser
 
 

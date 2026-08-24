@@ -552,7 +552,8 @@ def run_baseline_closure(
         )
     summary = {
         "schema": "saga-teacher-baseline-closure-run-v1",
-        "baseline": "teacher-handoff-bfc2192",
+        "baseline": "prototype-ancestor-bfc2192",
+        "teacher_handoff_candidate": "8c5e167+recovered-dirty-5804fcb2",
         "primary_commit": SOURCE_VARIANTS["literal-bfc"].exact_commit,
         "full950_commit": SOURCE_VARIANTS["full950"].exact_commit,
         "source_variants": {

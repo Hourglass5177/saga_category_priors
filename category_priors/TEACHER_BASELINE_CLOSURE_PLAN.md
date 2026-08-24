@@ -1,20 +1,21 @@
-# SAGA 原始交付基线闭环
+# SAGA 原始交付基线闭环（V9 法证修订版）
 
 ## 目标与证据边界
 
 本阶段不调类别先验，也不继续 V8。它只回答：老师交付的自动实例流水线本身是什么、能否按原资产协议复现、低分主要在哪一层产生。
 
-Git 与本机 reflog 能证明的三个锚点必须分开命名：
+Git、reflog、老师聊天记录和 2026-07 办公室运行记录能证明的锚点必须分开命名：
 
 - `official-upstream-96e5021`：公开 SAGA；只有提示式分割，不是自动 ScanNet 实例 AP 基线。
-- `teacher-handoff-bfc2192`：本克隆首次切到 a800 时最早可证的交付快照；18 类词表、4 类 `other_classes`。
-- `teacher-source-tip-8c5e167`：后来扩到 28 类、7 类 `other_classes` 的演化版本；不是最初交付快照。
+- `prototype-ancestor-bfc2192`：当前 Git 历史中最早可见的 18 类/4 `other_classes` 原型祖先；**不是**可字节确认的老师实际交付版本。
+- `training-repair-95073c6`：训练参数、特征归一化与 mask/label 对齐的修正版。
+- `teacher-handoff-candidate-8c5e167+dirty`：2026-07 实际交付最接近的候选。法证检查从不可达 `git stash` 对象恢复了 commit `5804fcb2`：其第一父提交正是 `8c5e167`，tracked dirty tree 仅改动 `train_contrastive_feature.py`。因此 dirty tree 已可字节恢复；但下载压缩包本身没有历史校验值，仍须以办公室四阶段历史输出作行为 oracle，不能称为已证明与 `saga.zip` 逐字节相同。
 
-聊天中的 `saga.zip` 无法与某个 Git 对象做字节级核对，所以不得宣称 `bfc2192` 就是压缩包逐字节内容；它只是当前证据链中最早可复现的 a800 锚点。
+聊天中的 `saga.zip` 无法与某个 Git 对象做字节级核对，所以不得把任一现有 commit 宣称为压缩包逐字节内容。办公室场景成功复现只证明四阶段工程可运行，不证明自动实例分割准确、类别先验有效或能够泛化。
 
 ## 研究问题
 
-1. `teacher-handoff-bfc2192` 的 B0/B1 在隔离重建的原始 18 类资产上表现如何？
+1. prototype、训练修复版和 reconstructed handoff candidate 分别产生什么行为；哪一个与办公室历史输出最一致？
 2. 随后 `95073c6` 修复的 feature-channel 归一化、mask/label 排序和训练参数作用域，是否解释主要差距？
 3. 历史 contributor、全点中心吸附、全局 256-NN 和最终类别 vote 分别造成何种精度/召回变化？
 4. 自适应 feature 预算与显式 10k 是否改变上述归因？
@@ -33,7 +34,7 @@ Git 与本机 reflog 能证明的三个锚点必须分开命名：
 
 ## 精确词表
 
-`teacher-handoff-bfc2192` 的 18 类顺序：
+`prototype-ancestor-bfc2192` 的 18 类顺序：
 
 ```text
 chair table plant flower foliage tv painting sofa cabinet bed wall floor ceiling
@@ -74,7 +75,7 @@ socket book remote key
 
 ### A. 精确交付与训练修复
 
-- `H-literal/B0,B1`：在 `scene0064_01` 原样运行 `bfc2192` 的 adaptive CLI。该脚本的
+- `H-literal/B0,B1`：在 `scene0064_01` 原样运行 prototype `bfc2192` 的 adaptive CLI。该脚本的
   `args` 位于模块全局作用域，`training()` 可以合法读取它；先前预注册的 NameError 判断错误。
 - `H-args-only/B0,B1`：仅把模块全局 CLI `args` 显式传入训练函数，作为源码语义等价的
   plumbing 负控；保留错误的
@@ -107,7 +108,7 @@ socket book remote key
 `full950-iterations-cli` 源分别训练 adaptive 与 10k，再重跑 `R-fixed/B0,B1`，
 不重复整个结构消融网格。
 
-`8c5e167` 的 28 类/7 类版本本阶段不重新训练；它只作为“交付后扩类”的代码历史背景。若原始闭环后仍需评估扩类贡献，再另立计划。
+V9 使用已恢复的 `5804fcb2` dirty tree，并用办公室历史输出完成行为闭环。prototype 的 18 类实验只保留为法证梯度，不能代表老师实际交付基线。
 
 ## 评价协议
 
@@ -220,7 +221,7 @@ vote 误胜为某个 `selected_class` 时，`instances["-1"]` 会被写出（`sc
 统一只读忽略所有负 metadata ID，并在 projection stats 中报告其 ID 和数量；raw JSON 仍
 保持不变。这是老师后处理输出与旧评价适配器共同暴露的 P0 基线闭环错误。
 
-### 2026-08-24 实际机械终止结果
+### 2026-08-24 comparator 假阳性纠正与恢复结论
 
 负 metadata 修复后的闭环代码为 `bc0fdb0909cee7de5817ad8db99b2de020d6e76e`，本地
 `tests/category_priors` 为 `225 passed, 1 skipped`。云端直接复用了 32 份完整输出，没有
@@ -235,10 +236,18 @@ vote 误胜为某个 `selected_class` 时，`instances["-1"]` 会被写出（`sc
   B0/B1 逐点等价，说明 contributor 修复是场景相关的真实干预；
 - 共享冻结 feature 的 `R-fixed → current-L0` 六组机械对照中五组逐点等价：三个 B0
   全部等价，B1 的 `scene0064_01`、`scene0231_00` 等价；
-- 唯一失败项为 `scene0025_01/B1-original`：规范化实例 ID 后仍有
-  `370,226/1,459,291=25.370%` 点不同，R-fixed/current-L0 分别声明 16/15 个实例。
+- 原先唯一“失败项” `scene0025_01/B1-original` 后经云端直接核对，两份 raw
+  `point_labels` 在 1,459,291 点上逐点完全相同，other-class 选择、41个分支候选、merge前
+  92实例和post-filter状态也相同。真实差异只在最终vote→metadata：R-fixed多声明ID78
+  `chair`，共31个Gaussian；current未声明它，其余15个共同实例类别相同。
+- 旧 comparator 把按成员排序后的全局 `rank` 写入canonical point label。插入一个31点实例
+  会让后续实例rank整体平移，因而把31点真实export差异虚报成370,226点。该比较器结果无效。
+- 修正后的门槛拆为：raw/internal geometry partition、declared/exported partition、匹配mask
+  的class/score/bbox和negative/orphan统计。当前样本的raw geometry为exact，export真实差异
+  31点（0.002124%）。这足以撤销旧 comparator 的25.37%假差异，但 **31个Gaussian不能据此
+  推断官方AP中性**：`min_region_size=100`作用于评价点而不是Gaussian。L1/L2/L3是否继续须以
+  实际官方 evaluator parity 为准，并单独报告book分支几何被最终vote改写为chair的类别仲裁问题。
 
-因此严格触发 `stopped-current-harness-parity-failed`。不得运行或解释 L1/L2/L3，也不得
-用这些结果评价类别先验。当前可下的结论是：老师交付 B1 的 current harness 复现未闭合，
-且原始导出/旧评价还存在负背景实例和大规模 orphan 两类协议错误；这证明原始自动基线本身
-不健康，但没有检验、更没有证伪类别先验。
+因此撤销 `stopped-current-harness-parity-failed` 的方法结论。修正 comparator 后从已有完整
+产物恢复L1/L2/L3，不重复训练或完整输出。负背景实例、orphan双真相和vote改类仍是已确认的
+输出/仲裁缺陷；它们没有检验、更没有证伪类别先验。

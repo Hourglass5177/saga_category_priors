@@ -182,6 +182,61 @@ def _output_runs(closure_root: Path) -> Iterable[tuple[str, str, str, str, Path]
             ).output_json
             if path.is_file():
                 yield reported_variant, "adaptive", condition, scene_id, path
+
+
+def _stage_trace_rows(closure_root: Path) -> list[dict[str, Any]]:
+    """Summarize V9 forensic partitions without treating internal IDs as output."""
+
+    stage_names = (
+        "global_sample_core",
+        "global_full_assignment",
+        "other_class_candidates",
+        "branch_class_before_merge",
+        "merged_partition",
+        "post_global_knn",
+        "post_filter",
+        "final_internal_labels",
+    )
+    rows: list[dict[str, Any]] = []
+    for scene_id in CLOSURE_SCENES:
+        conditions = (("L0", "B0-global"), ("L0", "B1-original")) + tuple(
+            (level, "B1-original") for level in ("L1", "L2", "L3")
+        )
+        for level, condition in conditions:
+            paths = output_paths(
+                closure_root,
+                scene_id,
+                "current-causal-harness",
+                "adaptive",
+                f"{level}-{condition}",
+                "bfc18",
+            )
+            trace_path = paths.root / "stage_trace.npz"
+            if not trace_path.is_file():
+                continue
+            with np.load(trace_path, allow_pickle=False) as arrays:
+                previous: np.ndarray | None = None
+                for stage in stage_names:
+                    labels = np.asarray(arrays[stage], dtype=np.int64)
+                    foreground = labels >= 0
+                    rows.append(
+                        {
+                            "scene_id": scene_id,
+                            "level": level,
+                            "condition": condition,
+                            "stage": stage,
+                            "point_count": len(labels),
+                            "assigned_point_count": int(np.count_nonzero(foreground)),
+                            "instance_count": int(len(np.unique(labels[foreground]))),
+                            "changed_from_previous_stage": (
+                                None
+                                if previous is None
+                                else int(np.count_nonzero(previous != labels))
+                            ),
+                        }
+                    )
+                    previous = labels
+    return rows
     for budget in ("adaptive-iterations-cli", "10000"):
         for condition in ("B0-global", "B1-original"):
             path = output_paths(
@@ -433,19 +488,73 @@ def evaluate_teacher_handoff(
     metrics_path = output_dir / "teacher_handoff_metrics.parquet"
     analysis_path = output_dir / "teacher_handoff_analysis.json"
     write_rows(metrics_path, all_rows)
+    write_rows(
+        output_dir / "baseline_causal_ablation.parquet",
+        [
+            row
+            for row in all_rows
+            if str(row.get("variant_id", "")).startswith("current-L")
+            or row.get("variant_id") == "full950-contributor-fixed"
+        ],
+    )
+    write_rows(
+        output_dir / "baseline_stage_trace.parquet",
+        _stage_trace_rows(closure_root),
+    )
     run_summary_path = closure_root / "run_summary.json"
     run_summary = load_json(run_summary_path) if run_summary_path.is_file() else None
     provenance = {
-        "schema": "saga-teacher-handoff-provenance-v1",
-        "teacher_handoff_anchor": "bfc21922384cc991a71b5e51429354b5d6b06375",
+        "schema": "saga-teacher-handoff-provenance-v2",
+        "prototype_ancestor": "bfc21922384cc991a71b5e51429354b5d6b06375",
         "full950_repair_anchor": "95073c640a77984c6af24abb276147e4315abcd1",
+        "likely_delivered_commit_candidate": "8c5e167493b26987c9c52e2e05caf0c6d7406789",
+        "recovered_dirty_worktree_commit": "5804fcb2243e165197ac305b286ac34bd4fdaf68",
+        "recovered_dirty_worktree_first_parent": "8c5e167493b26987c9c52e2e05caf0c6d7406789",
+        "recovered_dirty_worktree_changed_files": [
+            "train_contrastive_feature.py"
+        ],
+        "likely_delivered_worktree_state": (
+            "byte-recovered from unreachable git-stash tree; archive identity "
+            "still requires office behavior oracle"
+        ),
+        "office_behavior_oracle": {
+            "source": ".agents/AutoDL部署与完整复现报告.md",
+            "date": "2026-07-31",
+            "gaussian_count": 801399,
+            "declared_instance_count": 31,
+            "matched_partition_fraction": 0.971523,
+            "interpretation": "engineering reproducibility only; no GT accuracy claim",
+        },
         "public_upstream_anchor": "96e5021",
-        "taxonomy": "bfc18",
+        "prototype_taxonomy": "bfc18",
+        "likely_delivered_taxonomy": "tip28",
         "scenes": list(CLOSURE_SCENES),
         "run_summary": run_summary,
         "no_artifact_hashes": True,
     }
     write_json(output_dir / "teacher_handoff_provenance.json", provenance)
+    structural_path = closure_root / "structural_run_summary.json"
+    structural = load_json(structural_path) if structural_path.is_file() else None
+    write_json(
+        output_dir / "baseline_comparator_correction.json",
+        {
+            "schema": "saga-v9-baseline-comparator-correction-v1",
+            "withdrawn_claim": (
+                "scene0025_01 B1 changed 370226 points (25.37%)"
+            ),
+            "corrected_observation": {
+                "raw_geometry_changed_points": 0,
+                "exported_geometry_changed_points": 31,
+                "exported_changed_fraction": 0.00002124,
+                "cause": "global rank canonicalization shifted every later instance",
+            },
+            "comparison_semantics": (
+                "maximum-overlap bipartite matching; raw/internal, declared/exported, "
+                "class and metadata reported separately"
+            ),
+            "structural_run_summary": structural,
+        },
+    )
     asset_rows: list[dict[str, Any]] = []
     for scene_id in CLOSURE_SCENES:
         assets = asset_paths(closure_root, scene_id, "bfc18")

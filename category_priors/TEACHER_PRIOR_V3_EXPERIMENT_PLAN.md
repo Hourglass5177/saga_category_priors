@@ -1,13 +1,13 @@
-# SAGA 类别先验与小物体保护实验计划（当前权威：V8）
+# SAGA 类别先验与小物体保护实验计划（当前权威：V9）
 
-> **权威状态：V8 已按第 20 节门槛停止；第 21 节原始交付基线闭环是当前唯一执行路径。** 旧 B2、class-first、
+> **权威状态：V8 已按第 20 节门槛停止；第 22 节 V9 法证闭环、Clean ObjectBank 与类别先验终局验证是当前唯一执行路径。** 旧 B2、class-first、
 > prior-v2、teacher-preservation 和 selective-restore 文档与代码只作为失败审计记录，
 > 不得覆盖本文件的研究问题、条件定义、阶段门槛或结论边界。
 
-- 版本：V8.0
-- 冻结日期：2026-08-23
+- 版本：V9.0
+- 冻结日期：2026-08-24
 - V3 起点代码检查点：`f1367fa58c8f50df75f80b86f67bab469af06531`
-- 当前状态：**V8 已在自动 bank 健康门槛停止；正在闭合最早可证的 teacher handoff 基线**
+- 当前状态：**正在纠正 handoff provenance 与 parity comparator，并恢复 Legacy L0–L3 后进入独立 10k Clean ObjectBank**
 - 适用范围：现有 24 个 tune 场景、原 48 个内部评估场景及现有训练资产
 - 独立实验单位：physical scene
 - 技术重复：seed `42`、`3407`、`20260804`
@@ -973,9 +973,14 @@ V8 的实际停止结果：`S-AM` 两场 geometric greedy IoU≥.50 为 16 个�
 
 ## 21. 原始交付基线闭环（当前执行）
 
-只读 Git/reflog 和老师聊天重新核对后，最早可证的 a800 交付锚点是 `bfc2192`，而非
-`8c5e167`。前者是 18 类/4 个 `other_classes`；后者是交付后扩到 28 类/7 个小类的演化版本。
-公开 SAGA `96e5021` 仍只作提示式分割上游，不是自动 ScanNet AP 基线。
+后续只读 Git/reflog、老师聊天与 2026-07-31 AutoDL 完整复现报告交叉核对后确认：
+`bfc2192` 只能称为最早可见的 18 类/4 `other_classes` prototype ancestor，不能称为老师
+2026-07 实际交付快照。实际交付候选更接近名义 `8c5e167` 加当时 dirty working tree；
+办公室四阶段复现使用的也是该工作树。V9 法证检查已从不可达 `git stash` 恢复
+`5804fcb2`：第一父提交为 `8c5e167`，tracked dirty tree 仅修改
+`train_contrastive_feature.py`。该 tree 可字节恢复，但因原 `saga.zip` 没有历史校验值，仍以
+办公室历史输出作行为 oracle，不宣称两者逐字节相同。公开 SAGA `96e5021`
+仍只作提示式分割上游，不是自动 ScanNet AP 基线。
 
 当前实验严格按
 [`TEACHER_BASELINE_CLOSURE_PLAN.md`](./TEACHER_BASELINE_CLOSURE_PLAN.md) 执行：
@@ -989,12 +994,115 @@ V8 的实际停止结果：`S-AM` 两场 geometric greedy IoU≥.50 为 16 个�
 
 当前检查点：
 
-- [x] Git provenance、老师聊天、README、评估协议和三场资产范围完成只读审计。
+- [x] Git provenance、老师聊天、README、评估协议和三场资产范围完成只读审计；后续已纠正
+  `bfc2192` 的命名边界。
 - [x] 冻结原始基线闭环设计与结论边界。
 - [x] 实现隔离 runner/evaluator、fixed contributor、L0 等价门槛、Gaussian 精度和 viewer。
 - [x] commit/push，云端部署同 commit，启动三场闭环。
 - [x] runner 健康后创建并核验绑定当前任务的每小时自动检查。
 - [x] 运行时纠正错误预注册：`bfc2192` 的模块全局 `args` 合法，literal adaptive 应真运行；
   首次 `--iterations 1` 失败是 harness 触发历史 NoneType CLI 缺陷，不属于老师基线。
-- [ ] 按纠正后的 literal/args-plumbing identity/args-norm/full950 adaptive 矩阵完成闭环；
-  10k 仅在独立 `full950-iterations-cli` 机械变体上与同源 adaptive 比较。
+- [ ] 修正 partition comparator 的全局 rank 假阳性后恢复闭环；prototype ancestor 的
+  literal/args-plumbing/args-norm/full950 只作法证，实际方法结论以 8c reconstructed
+  candidate 与办公室行为 oracle 为准。
+
+## 22. V9 当前权威计划：法证闭环、10k Clean ObjectBank 与类别先验终局验证
+
+### 22.1 已冻结的纠正
+
+- `scene0025_01/B1` 的两份 raw `point_labels` 在 1,459,291 点上逐点相同。旧 comparator
+  因为用全局实例 rank 作 canonical ID，把一个新增的 31-Gaussian metadata 实例放大成
+  370,226 点差异。真实 exported 差异为 31 点（0.002124%）。撤销
+  `stopped-current-harness-parity-failed` 的方法结论，修 comparator 后恢复 L1–L3。
+- 已确认且仍需修复的 P0/P1：negative metadata、undeclared orphan、raw labels 与 metadata
+  双真相、错误 contributor、类别顺序覆盖、全点中心吸附、全场 256-NN、分支类别被最终 vote
+  改写、缺少原生 score。
+- 四条比较必须分离：`T1-B1−T1-B0`、`F10k−T1`、`N0−F10k-legacy`、
+  `N-data−N0-uniform`。后一级结果不得反向包装成前一级结论。
+
+### 22.2 法证与唯一输出合同
+
+provenance 固定为 official SAGA / bfc prototype / 950 training fix / 8c reconstructed
+candidate 四锚点。使用已恢复的 `5804fcb2` dirty tree，并以办公室历史输出作行为 oracle。
+
+partition 比较分为 internal raw partition、declared exported partition 与 metadata 三层；
+实例用成员集合的最大重叠一一匹配，不使用全局 rank。最终输出规定：`-1` 只表示背景；所有
+非负标签必须有 class、score 与非空 mask；未声明内部标签投影为背景；最终 ID 连续；内部
+cluster/track ID 只写 diagnostics。官方 AP、Gaussian precision 与 viewer 共用该投影。
+
+Legacy 固定 L0/L1/L2/L3：L0 为修 contributor/输出合同后的交付候选结构；L1 去全场 KNN；
+L2 再去全点中心吸附；L3 加一次性局部同候选 attach。每一级保存 global core/assignment、
+other candidate/class、merge、post-KNN、post-filter、vote 与 export sidecar。归因门槛沿用：
+precision +5pp 或 unsupported -5pp 且 recall 损失不超过10pp；L3须恢复至少一半 recall 缺口并
+保留80% precision增益。
+
+### 22.3 直接 10k 双源特征
+
+对每个实际进入当前阶段的场景固定现有30k 3DGS、相机、图像、checkpoint和seed42：
+SAM-everything mask只监督affinity；Grounded-SAM 32类mask/label只监督semantic；训练10k，
+输出到独立 `feature-10k-objectbank`，不覆盖历史feature/scale gate，不重训3DGS。相同10k
+feature同时供 `F10k-B0/F10k-B1/N0` 使用，以分离输入和主干效应。
+
+### 22.4 Clean ObjectBank
+
+新主干独立于巨型 `postprocess.py`。每帧同时流式计算正确最大 `alpha*T_prev` contributor
+与归一化 alpha mass；空像素为 `-1/0`。fragment规则固定：full inside mass≥0.5；core
+inside mass≥2且inside/visible≥0.50；至少3 core、10 full；类别不参与生成或关联。
+
+两场景固定比较：A0 V8顺序overlap负控、A1全局受约束overlap、A2 A1+10k affinity
+bridge；A0–A2失败才运行A3物理24-NN/mutual-top4 affinity core graph。direct edge要求
+跨帧weighted core overlap≥0.25且共享≥3 core；bridge只允许mutual-best、5cm、cosine≥0.95、
+conflict≤0.25，并且只能把singleton附着component，不能桥接两个既有component。同帧为
+cannot-link，合并确定性。
+
+最终core要求positive views≥2、positive/visible≥0.60、conflict/visible≤0.25；一次性局部
+attach只写未分配点，要求5cm、3个同object anchor、affinity≥0.95、best-second margin≥0.02，
+禁止迭代和跨object覆盖。对象冻结后才比较MV-label与32类codebook晚分类；差≤2pp选MV。
+基础score为语义、多视角支持、内部affinity、重叠、视角数与低冲突的固定几何平均。
+
+### 22.5 同bank 2^3类别先验
+
+bank保留core≥3候选及一次性halo证据。U/D不得重建fragment、graph或object ID。所有条件
+同时包含size `G`、support `C`、smoothness `B`，只切换global/class-shrunk统计：
+
+```text
+U000 D100 D010 D001 D110 D101 D011 D111
+S = Q * G * C * B
+```
+
+size仅惩罚过大sorted extent；support用局部Gaussian密度和train-only典型表面积；smoothness
+用5cm图边界率相对q50/q75的单边破碎惩罚。阈值只在两个开发场景U000上从
+`.05/.10/.15/.20/.25`选择，按官方mAP、结构门槛、并列更高阈值冻结；D不得单独调参。
+
+### 22.6 阶段门槛
+
+1. Stage 0：修provenance/comparator/output contract并恢复Legacy闭环。
+2. Stage 1：完成L0–L3、historical/fixed contributor、B0/B1，输出AP与precision漏斗。
+3. Stage 2（scene0645_00/scene0025_01）：10k geometric oracle须≥6个IoU≥.50且tiny/small
+   Recall@.25≥.20；从A0–A3按几何匹配、association F1、merge/split、candidate precision和
+   简单性选一个。A3仍失败则停止类别先验，归因为identity/tracker不足。
+4. Stage 3（冻结8 physical scenes）：geometric≥16/4场景、same-class≥12/4场景、
+   precision@.25≥10%、tiny/small Recall@.25≥.20；Gaussian precision相对T1 +5pp或
+   unsupported -10pp；GT recall损失≤5pp；N0相对F10k-B0 mAP≥-.001、AP50≥-.002、
+   instances≤1.25x、score-IoU Spearman≥.20、orphan/negative metadata为0。
+5. Stage 4：先验机械生效后，best-D相对U须ΔmAP≥.002，或tiny/small Recall@.50 +.01且
+   ΔmAP≥-.0005；正向场景更多、FP/TP恶化≤20%。只保留一个D。
+6. Stage 5：五个未开发canonical scenes要求mean ΔmAP>0、至少3/5为正、小物指标为正；
+   再按physical scene聚合tune24，宏平均ΔmAP≥.002才进入final。
+7. Stage 6：48 physical scenes每场一个10k bank，只CPU replay U/best-D；10,000次paired
+   bootstrap，ΔmAP≥.002且95% CI下界>0才支持稳定有效，final禁止调参。
+
+### 22.7 工程与当前检查点
+
+- 不下载、不重训3DGS；单GPU单训练/后处理；磁盘≥80GB；只读90GiB cgroup；不生成SHA、
+  lock、schedule hash或contributor cache。
+- Stage 3健康通过后，从active runtime删除B2/class-first/prior-v2/V3–V8入口；Git与只读
+  audit runner保留历史，不写兼容adapter。
+- [x] V9计划经用户确认并冻结到本节。
+- [x] 修正 comparator 与输出合同，更新原始闭环状态；加入31-Gaussian插入回归、
+  internal/exported/metadata三层比较和strict prediction contract。
+- [x] 实现隔离10k双源训练、原生alpha lifting、Clean ObjectBank、2^3 replay、
+  Stage 2--6 controller、runner/evaluator与本地测试（`320 passed, 1 skipped`；
+  skip为本机缺少云端CUDA/Torch运行环境的条件测试）。
+- [ ] commit/push、云端部署并恢复Stage 0–1。
+- [ ] runner健康后创建并核验绑定当前任务ID的每小时自动化。

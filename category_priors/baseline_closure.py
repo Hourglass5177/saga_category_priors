@@ -75,6 +75,13 @@ CLOSURE_SCENES = ("scene0064_01", "scene0025_01", "scene0231_00")
 PRIMARY_COMMIT = "bfc21922384cc991a71b5e51429354b5d6b06375"
 FULL950_COMMIT = "95073c640a77984c6af24abb276147e4315abcd1"
 EVOLUTION_COMMIT = "8c5e167493b26987c9c52e2e05caf0c6d7406789"
+# Recovered from an otherwise unreachable ``git stash`` merge commit.  Its
+# first parent is exactly EVOLUTION_COMMIT and its tree contains the tracked
+# dirty worktree (the third parent contains the untracked ``.codex`` file).
+# This is a byte-recoverable handoff candidate, but the historical office
+# output remains the behavioral oracle because the downloaded archive itself
+# was never checksummed.
+RECOVERED_DIRTY_COMMIT = "5804fcb2243e165197ac305b286ac34bd4fdaf68"
 
 
 @dataclass(frozen=True)
@@ -239,10 +246,20 @@ SOURCE_VARIANTS: Mapping[str, SourceVariantSpec] = {
         normalized_feature_dim=True,
         sorted_semantic_masks=True,
     ),
+    "tip8c-dirty-recovered": SourceVariantSpec(
+        variant_id="tip8c-dirty-recovered",
+        base_commit=EVOLUTION_COMMIT,
+        patch_set="recovered-stash-worktree",
+        exact_commit=RECOVERED_DIRTY_COMMIT,
+        has_args_plumbing=True,
+        normalized_feature_dim=True,
+        sorted_semantic_masks=True,
+    ),
 }
 
-# The 8c source tip is deliberately absent.  It is provenance context, not an
-# experimental arm in this closeout.
+# The 8c source tip is deliberately absent from the prototype causal matrix.
+# It is the likely delivered code candidate and is handled by the V9 handoff
+# recovery/office behavior oracle rather than being mislabeled as exact here.
 REGISTERED_RUNS = (
     RunSpec(
         variant_id="literal-bfc",

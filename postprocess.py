@@ -27,6 +27,7 @@ from utils.clip_utils import get_relevancy
 from scipy.spatial import KDTree
 from hdbscan import HDBSCAN
 from utils.resource_exit import resource_error_handler
+from category_priors.prediction_contract import normalize_prediction
 
 def uniform_sample(xyz, n_samples):
     device = xyz.device
@@ -688,6 +689,12 @@ def main():
     lp = ModelParams(parser)
     pp = PipelineParams(parser)
     parser.add_argument("--progress_path", type=str, required=True)
+    parser.add_argument(
+        "--stage_trace_path",
+        type=str,
+        default=None,
+        help="Optional V9 forensic NPZ sidecar; never consumed by prediction.",
+    )
     parser.add_argument("--clean", action='store_true')
     parser.add_argument("--scale", type=float, default=1.0)
     parser.add_argument("--k", type=int, default=256)
@@ -1097,6 +1104,20 @@ def main():
     end_time = datetime.now()
     elapsed_time = end_time - start_time
 
+    sampled_indices_for_trace = torch.nonzero(
+        sampled_mask, as_tuple=False
+    ).flatten()
+    global_sample_core_trace = torch.full(
+        (len(point_xyz),), -1, dtype=torch.long
+    )
+    sampled_cluster_labels_for_trace = torch.as_tensor(
+        cluster_labels, dtype=torch.long
+    )
+    sampled_core_for_trace = sampled_cluster_labels_for_trace >= 0
+    global_sample_core_trace[
+        sampled_indices_for_trace[sampled_core_for_trace]
+    ] = sampled_cluster_labels_for_trace[sampled_core_for_trace]
+
     if args.v7_causal_ablation in {"L2", "L3"}:
         point_labels = torch.full((len(point_xyz),), -1, dtype=torch.long)
         point_assignment_confidence = torch.zeros(len(point_xyz), dtype=torch.float32)
@@ -1124,6 +1145,7 @@ def main():
         point_labels[~assigned_mask] = -1
     print(f'{assigned_mask.sum()=}, {(~assigned_mask).sum()=}')
     fallback_point_labels = point_labels.detach().cpu().clone()
+    global_full_assignment_trace = fallback_point_labels.clone()
     fallback_assignment_confidence = point_assignment_confidence.detach().cpu().clone()
     prior_overlay = None
     if prior_resolver is not None:
@@ -1176,6 +1198,9 @@ def main():
     v3_semantic_margin = None
     v3_sam_covered = torch.zeros(len(point_xyz), dtype=torch.bool)
     v4_candidate_capture = None
+    other_class_candidates_trace = torch.full(
+        (len(point_xyz),), -1, dtype=torch.long
+    )
     teacher_branch_preservation = bool(
         teacher_prior is not None
         and teacher_prior["table"].get("branch_preservation", False)
@@ -1286,6 +1311,7 @@ def main():
             teacher_prior=teacher_prior,
             exclusive_masks=teacher_exclusive_masks,
         )
+        other_class_candidates_trace = other_point_labels.detach().cpu().clone()
 
         # ========== MERGE other_class instances into main labels (BEFORE filters) ==========
         if len(other_instance_to_class) > 0:
@@ -1521,6 +1547,9 @@ def main():
             ratios[instance] = votes[:-1] / denominator if denominator > 0 else np.zeros(len(args.classes), dtype=np.float64)
         return ratios
 
+    merged_partition_trace = point_labels.detach().cpu().clone()
+    post_filter_trace = None
+    post_attach_trace = None
     start_time = datetime.now()
     v3_shadow_stages = {}
     if prior_overlay is not None:
@@ -1558,6 +1587,8 @@ def main():
             semantic_similarity_by_instance,
         )
         point_labels = filter_small_clusters(point_labels, prior_overlay.branch_instances, default_min=args.min_cluster_size)
+        post_filter_trace = point_labels.detach().cpu().clone()
+        post_attach_trace = post_filter_trace.clone()
     else:
         for shadow_mode, capture in v3_shadow_captures.items():
             shadow_branch = capture['branch_labels']
@@ -1595,6 +1626,9 @@ def main():
             point_labels = filter3d(point_xyz, point_labels, args.k)
         teacher_after_knn = point_labels.detach().cpu().clone()
         point_labels = filter_num(point_labels, min_num=10)
+        # This snapshot belongs exactly to filter_num.  Later local attachment
+        # and branch-preservation operations must not overwrite its meaning.
+        post_filter_trace = point_labels.detach().cpu().clone()
         if args.v7_causal_ablation == "L3":
             from category_priors.v7_objects import attach_local_labels
             point_labels = torch.from_numpy(attach_local_labels(
@@ -1602,6 +1636,7 @@ def main():
                 normed_point_features.detach().cpu().numpy(),
                 point_labels.detach().cpu().numpy(),
             ))
+        post_attach_trace = point_labels.detach().cpu().clone()
         if (
             args.teacher_evidence_protection == 'multi-anchor'
             and teacher_merged_classes
@@ -1702,6 +1737,10 @@ def main():
                 retained_points / merged_points if merged_points else None
             ),
         }
+    if post_filter_trace is None:
+        post_filter_trace = point_labels.detach().cpu().clone()
+    if post_attach_trace is None:
+        post_attach_trace = post_filter_trace.clone()
     end_time = datetime.now()
     elapsed_time = end_time - start_time
     print(f'{elapsed_time=}, {len(torch.unique(point_labels))=}') # 89, pytorch3d.ops.knn_points=49
@@ -2217,8 +2256,15 @@ def main():
             bbox[instance_id] = torch.from_numpy(bbox_corners_world).flatten().tolist()
         return bbox
     def combine_prop(bbox, clazz):
-        merged = {instance: {"bbox": bbox[instance], "class": clazz[instance]}
-                for instance in bbox.keys() & clazz.keys()}
+        merged = {}
+        for instance in bbox.keys() & clazz.keys():
+            ratio = np.asarray(instance_ratio.get(instance, []), dtype=np.float64)
+            score = float(ratio.max()) if ratio.size else 0.0
+            merged[instance] = {
+                "bbox": bbox[instance],
+                "class": clazz[instance],
+                "score": score,
+            }
         return merged
     bbox = get_bbox(point_labels.cpu(), point_xyz, is_big_gaussian)
     clazz = {instance: get_class(args.classes, ratio) for instance, ratio in instance_ratio.items()}
@@ -2237,13 +2283,56 @@ def main():
         if clazz[instance_id] != branch_class:
             teacher_vote_class_mismatches += 1
         clazz[instance_id] = branch_class
+    raw_instances = combine_prop(bbox, clazz)
+    raw_instances = {
+        key: value
+        for key, value in raw_instances.items()
+        if value.get('class') in args.selected_classes
+    }
+    contracted = normalize_prediction(point_labels.tolist(), raw_instances)
+    if args.stage_trace_path:
+        trace_path = os.path.abspath(args.stage_trace_path)
+        os.makedirs(os.path.dirname(trace_path), exist_ok=True)
+        post_knn_trace = (
+            teacher_after_knn
+            if teacher_after_knn is not None
+            else post_filter_trace
+        )
+        np.savez_compressed(
+            trace_path,
+            global_sample_core=global_sample_core_trace.numpy(),
+            global_full_assignment=global_full_assignment_trace.numpy(),
+            other_class_candidates=other_class_candidates_trace.numpy(),
+            branch_class_before_merge=teacher_merged_membership.numpy(),
+            merged_partition=merged_partition_trace.numpy(),
+            post_global_knn=post_knn_trace.detach().cpu().numpy(),
+            post_filter=post_filter_trace.numpy(),
+            post_attach=post_attach_trace.numpy(),
+            final_internal_labels=point_labels.detach().cpu().numpy(),
+            exported_prediction=contracted.point_labels,
+        )
+        trace_metadata = {
+            "schema": "saga-v9-legacy-stage-trace-v1",
+            "point_count": int(len(point_labels)),
+            "level": args.v7_causal_ablation,
+            "branch_instance_classes": {
+                str(key): value
+                for key, value in sorted(teacher_merged_classes.items())
+            },
+            "raw_instances": {str(key): value for key, value in raw_instances.items()},
+            "vote_histogram": {
+                str(key): np.asarray(value, dtype=np.float64).tolist()
+                for key, value in instance_ratio.items()
+            },
+        }
+        with open(os.path.splitext(trace_path)[0] + ".json", "w", encoding="utf-8") as handle:
+            json.dump(trace_metadata, handle)
     output = dict()
-    output['point_labels'] = point_labels.tolist()
+    output['point_labels'] = contracted.point_labels.tolist()
     output['is_big_gaussian'] = is_big_gaussian.tolist()
     output['is_transparent_gaissian'] = is_transparent_gaissian.tolist()
-    # output['instances'] = {instance: {'class': get_class(args.classes, ratio)} for instance, ratio in instance_ratio.items()}
-    output['instances'] = combine_prop(bbox, clazz)
-    output['instances'] = {k: v for k, v in output['instances'].items() if v.get('class') in args.selected_classes}
+    output['instances'] = contracted.instances
+    output['prediction_contract'] = contracted.audit
     with open(args.json_path,'w') as f:
         json.dump(output,f)
     if args.prior_metadata_path:

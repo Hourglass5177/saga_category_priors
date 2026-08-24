@@ -111,9 +111,14 @@ ARGS_ONLY_ROOT="$SOURCE_ROOT/args-only"
 ARGS_NORM_ROOT="$SOURCE_ROOT/args-norm"
 ITERATIONS_CLI_ROOT="$SOURCE_ROOT/full950-iterations-cli"
 FIXED_ROOT="$SOURCE_ROOT/full950-contributor-fixed"
+RECOVERED_HANDOFF_ROOT="$SOURCE_ROOT/tip8c-dirty-recovered"
 
 export_commit bfc21922384cc991a71b5e51429354b5d6b06375 "$LITERAL_ROOT"
 export_commit 95073c640a77984c6af24abb276147e4315abcd1 "$FULL950_ROOT"
+# Recovered unreachable stash tree: first parent is 8c5e167 and the tracked
+# dirty worktree is byte-preserved in this commit.  It is a forensic/office
+# behavior anchor only; the prototype causal matrix below remains isolated.
+export_commit 5804fcb2243e165197ac305b286ac34bd4fdaf68 "$RECOVERED_HANDOFF_ROOT"
 build_contributor_extension "$LITERAL_ROOT"
 
 if [[ ! -f "$ARGS_ONLY_ROOT/train_contrastive_feature.py" && ! -e "$ARGS_NORM_ROOT" ]]; then
@@ -154,7 +159,8 @@ cat > "$ARTIFACT_ROOT/workspace_manifest.json" <<EOF
     "args-only": "$ARGS_ONLY_ROOT",
     "args-norm": "$ARGS_NORM_ROOT",
     "full950": "$FULL950_ROOT",
-    "full950-iterations-cli": "$ITERATIONS_CLI_ROOT"
+    "full950-iterations-cli": "$ITERATIONS_CLI_ROOT",
+    "tip8c-dirty-recovered": "$RECOVERED_HANDOFF_ROOT"
   }
 }
 EOF
@@ -177,6 +183,7 @@ build_contributor_extension "$FIXED_ROOT"
 build_contributor_extension "$REPO_DIR"
 "$PY" -m category_priors.baseline_closure_ablation \
     --runtime-manifest "$RUNTIME_MANIFEST" \
+    --gt-dir "$GT_DIR" \
     --closure-root "$CLOSURE_ROOT" \
     --fixed-workspace "$FIXED_ROOT" \
     --current-workspace "$REPO_DIR"
