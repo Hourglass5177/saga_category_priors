@@ -15,11 +15,13 @@ CUDA_HOME="${SAGA_CUDA_HOME:-/root/autodl-tmp/saga/conda/envs/saga}"
 RUNTIME_MANIFEST="${SAGA_RUNTIME_MANIFEST:-/root/autodl-tmp/saga/artifacts/category-priors-20260804/scene_runtime_manifest.json}"
 GT_DIR="${SAGA_GT_DIR:-/root/autodl-tmp/saga/artifacts/category-priors-20260804/gt_val_tune}"
 WEIGHT_ROOT="${SAGA_WEIGHT_ROOT:-/root/autodl-tmp/saga/workspace/saga/weights}"
+HF_HOME="${SAGA_HF_HOME:-/root/autodl-tmp/saga/cache/huggingface}"
 STATUS_PATH="$ARTIFACT_ROOT/baseline_status.json"
 CURRENT_STAGE="initializing"
 
 mkdir -p "$WORK_ROOT" "$CLOSURE_ROOT" "$ARTIFACT_ROOT" "$SOURCE_ROOT"
 export PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}"
+export HF_HOME
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export CUDA_VISIBLE_DEVICES=0
