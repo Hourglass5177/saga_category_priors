@@ -166,7 +166,10 @@ def test_scene_adapter_projects_orphans_without_changing_declared_mask(
         json.dumps(
             {
                 "point_labels": [4, 9, 4],
-                "instances": {"4": {"class": "chair"}},
+                "instances": {
+                    "-1": {"class": "cabinet"},
+                    "4": {"class": "chair"},
+                },
             }
         ),
         encoding="utf-8",
@@ -195,3 +198,4 @@ def test_scene_adapter_projects_orphans_without_changing_declared_mask(
     assert diagnostics["gt_nearest_declared_fraction"] == 2 / 3
     assert diagnostics["orphan_instance_count"] == 1.0
     assert diagnostics["orphan_gaussian_count"] == 1.0
+    assert diagnostics["ignored_negative_metadata_count"] == 1.0

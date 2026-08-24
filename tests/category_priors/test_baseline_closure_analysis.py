@@ -111,8 +111,11 @@ def test_analysis_artifact_exposes_full_orphan_projection_stats(
     output_json.write_text(
         json.dumps(
             {
-                "point_labels": [4, 9],
-                "instances": {"4": {"class": "chair"}},
+                "point_labels": [-1, 4, 9],
+                "instances": {
+                    "-1": {"class": "cabinet", "vote_ratio": 0.9},
+                    "4": {"class": "chair", "vote_ratio": 0.8},
+                },
             }
         ),
         encoding="utf-8",
@@ -136,11 +139,11 @@ def test_analysis_artifact_exposes_full_orphan_projection_stats(
         analysis_module,
         "load_ground_truth_npz",
         lambda _path, scene_id: (
-            np.zeros((2, 3)),
+            np.zeros((3, 3)),
             GroundTruthScene(
                 scene_id,
-                semantic=np.asarray([0, 0]),
-                instance=np.asarray([1, 1]),
+                semantic=np.asarray([0, 0, 0]),
+                instance=np.asarray([1, 1, 1]),
             ),
         ),
     )
@@ -169,4 +172,6 @@ def test_analysis_artifact_exposes_full_orphan_projection_stats(
     assert projection["orphan_instance_ids"] == [9]
     assert projection["orphan_counts"] == {"9": 1}
     assert projection["declared_gaussian_count"] == 1
-    assert projection["orphan_gaussian_fraction"] == 0.5
+    assert projection["orphan_gaussian_fraction"] == 1 / 3
+    assert projection["ignored_negative_metadata_ids"] == [-1]
+    assert projection["ignored_negative_metadata_count"] == 1

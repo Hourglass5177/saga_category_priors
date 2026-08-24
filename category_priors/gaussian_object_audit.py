@@ -152,6 +152,8 @@ def evaluate_gaussian_object_precision(
     point_categories: dict[int, np.ndarray] = {}
     for raw_instance_id, payload in instances_metadata.items():
         instance_id = int(raw_instance_id)
+        if instance_id < 0:
+            continue
         class_id, class_name = _class_id(payload, canonical_classes)
         if class_id < 0:
             continue
@@ -512,9 +514,12 @@ def audit_gaussian_object_runs(
             audits[(scene_id, condition)] = {**audit, "point_labels": point_labels}
             class_by_point = np.full(len(point_labels), -1, dtype=np.int64)
             for raw_id, payload in output.get("instances", {}).items():
+                instance_id = int(raw_id)
+                if instance_id < 0:
+                    continue
                 class_id, _ = _class_id(payload, taxonomy.canonical_classes)
                 if class_id >= 0:
-                    class_by_point[point_labels == int(raw_id)] = class_id
+                    class_by_point[point_labels == instance_id] = class_id
             if condition == "B0-legacy":
                 reference_classes = class_by_point
             for row in audit["instances"]:

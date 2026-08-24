@@ -99,15 +99,17 @@ def _read_final_vote_sidecar(path: Path | None) -> dict[tuple[str, int], float]:
         for row in payload:
             if not isinstance(row, Mapping):
                 raise TypeError("final-vote score rows must be objects")
-            scores[(str(row["scene_id"]), int(row["instance_id"]))] = float(
-                row["score"]
-            )
+            instance_id = int(row["instance_id"])
+            if instance_id >= 0:
+                scores[(str(row["scene_id"]), instance_id)] = float(row["score"])
     elif isinstance(payload, Mapping):
         for scene_id, values in payload.items():
             if not isinstance(values, Mapping):
                 raise TypeError("final-vote score mapping must be nested by scene")
             for instance_id, score in values.items():
-                scores[(str(scene_id), int(instance_id))] = float(score)
+                instance_id = int(instance_id)
+                if instance_id >= 0:
+                    scores[(str(scene_id), instance_id)] = float(score)
     else:
         raise TypeError("final-vote score sidecar must be a mapping or row list")
     for key, value in scores.items():
@@ -129,9 +131,12 @@ def _scores_embedded_in_output(
     for raw_id, values in instances.items():
         if not isinstance(values, Mapping):
             continue
+        instance_id = int(raw_id)
+        if instance_id < 0:
+            continue
         for field in FINAL_VOTE_FIELDS:
             if field in values:
-                result[(scene_id, int(raw_id))] = float(values[field])
+                result[(scene_id, instance_id)] = float(values[field])
                 break
     return result
 

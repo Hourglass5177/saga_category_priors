@@ -23,6 +23,7 @@ class DeclaredInstanceProjection:
 
     point_labels: np.ndarray
     declared_instance_ids: tuple[int, ...]
+    ignored_negative_metadata_ids: tuple[int, ...]
     orphan_instance_ids: tuple[int, ...]
     orphan_counts: tuple[tuple[int, int], ...]
     empty_declared_instance_ids: tuple[int, ...]
@@ -42,6 +43,12 @@ class DeclaredInstanceProjection:
             "semantics": "undeclared non-negative point labels project to -1",
             "point_count": self.point_count,
             "declared_instance_count": len(self.declared_instance_ids),
+            "ignored_negative_metadata_count": len(
+                self.ignored_negative_metadata_ids
+            ),
+            "ignored_negative_metadata_ids": list(
+                self.ignored_negative_metadata_ids
+            ),
             "nonempty_declared_instance_count": (
                 len(self.declared_instance_ids)
                 - len(self.empty_declared_instance_ids)
@@ -77,6 +84,7 @@ class DeclaredInstanceProjection:
         keys = (
             "point_count",
             "declared_instance_count",
+            "ignored_negative_metadata_count",
             "nonempty_declared_instance_count",
             "declared_gaussian_count",
             "declared_gaussian_fraction",
@@ -91,8 +99,11 @@ class DeclaredInstanceProjection:
         return {key: float(stats[key]) for key in keys}
 
 
-def _declared_ids(instances_metadata: Mapping[str | int, Any]) -> tuple[int, ...]:
+def _declared_ids(
+    instances_metadata: Mapping[str | int, Any],
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
     result: set[int] = set()
+    ignored_negative: set[int] = set()
     for raw_instance_id in instances_metadata:
         if isinstance(raw_instance_id, bool):
             raise TypeError("instance metadata IDs must be integers")
@@ -107,9 +118,10 @@ def _declared_ids(instances_metadata: Mapping[str | int, Any]) -> tuple[int, ...
                 f"instance metadata ID is not canonical: {raw_instance_id!r}"
             )
         if instance_id < 0:
-            raise ValueError("declared instance IDs must be non-negative")
-        result.add(instance_id)
-    return tuple(sorted(result))
+            ignored_negative.add(instance_id)
+        else:
+            result.add(instance_id)
+    return tuple(sorted(result)), tuple(sorted(ignored_negative))
 
 
 def project_declared_instances(
@@ -130,7 +142,7 @@ def project_declared_instances(
     if not np.array_equal(raw, labels):
         raise TypeError("point_labels must contain integers")
 
-    declared_ids = _declared_ids(instances_metadata)
+    declared_ids, ignored_negative_ids = _declared_ids(instances_metadata)
     nonnegative = labels >= 0
     declared_mask = np.isin(labels, declared_ids) if declared_ids else np.zeros(
         labels.shape, dtype=bool
@@ -149,6 +161,7 @@ def project_declared_instances(
     return DeclaredInstanceProjection(
         point_labels=labels,
         declared_instance_ids=declared_ids,
+        ignored_negative_metadata_ids=ignored_negative_ids,
         orphan_instance_ids=tuple(int(value) for value in orphan_ids),
         orphan_counts=tuple(
             (int(instance_id), int(count))

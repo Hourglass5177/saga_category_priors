@@ -66,7 +66,19 @@ def test_projection_leaves_declared_instance_precision_numerically_unchanged() -
     assert projected_audit["aggregate"] == raw_audit["aggregate"]
 
 
-@pytest.mark.parametrize("instance_id", [-1, "01", "not-an-id"])
+def test_projection_ignores_negative_metadata_ids_as_background() -> None:
+    result = project_declared_instances(
+        [-1, 4],
+        {"-1": {"class": "cabinet"}, "4": {"class": "chair"}},
+    )
+
+    assert result.point_labels.tolist() == [-1, 4]
+    assert result.declared_instance_ids == (4,)
+    assert result.ignored_negative_metadata_ids == (-1,)
+    assert result.stats()["ignored_negative_metadata_ids"] == [-1]
+
+
+@pytest.mark.parametrize("instance_id", ["01", "not-an-id"])
 def test_projection_rejects_invalid_declared_instance_ids(instance_id: object) -> None:
     with pytest.raises((TypeError, ValueError)):
         project_declared_instances([0], {instance_id: {"class": "chair"}})

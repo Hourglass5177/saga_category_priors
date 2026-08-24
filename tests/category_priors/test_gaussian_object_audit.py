@@ -138,6 +138,36 @@ def test_audit_does_not_mutate_prediction_labels() -> None:
     assert np.array_equal(labels, before)
 
 
+def test_negative_metadata_id_is_background_not_a_predicted_instance() -> None:
+    result = audit(
+        [[0, 0, 0], [0.02, 0, 0]],
+        [-1, 10],
+        {"-1": {"class": "cup"}, "10": {"class": "chair"}},
+        [[0, 0, 0], [0.02, 0, 0]],
+        [0, 0],
+        [1, 1],
+    )
+
+    assert [row["instance_id"] for row in result["instances"]] == [10]
+    assert result["aggregate"]["predicted_instance_count"] == 1
+    assert result["aggregate"]["predicted_gaussian_count"] == 1
+
+
+def test_negative_metadata_only_produces_no_prediction() -> None:
+    result = audit(
+        [[0, 0, 0]],
+        [-1],
+        {"-1": {"class": "chair"}},
+        [[0, 0, 0]],
+        [0],
+        [1],
+    )
+
+    assert result["instances"] == []
+    assert result["aggregate"]["predicted_instance_count"] == 0
+    assert result["aggregate"]["predicted_gaussian_count"] == 0
+
+
 def test_viewer_exports_predicted_gt_overlay_and_metrics(tmp_path) -> None:
     gaussian_xyz = np.asarray([[0, 0, 0], [1, 0, 0]], dtype=np.float64)
     labels = np.asarray([10, -1], dtype=np.int64)

@@ -132,6 +132,8 @@ def saga_scene_predictions(
     predictions: list[PredictedInstance] = []
     for raw_instance_id, properties in output_instances.items():
         instance_id = int(raw_instance_id)
+        if instance_id < 0:
+            continue
         class_name = str(properties.get("class", "")).strip().lower()
         if class_name not in class_to_id:
             continue

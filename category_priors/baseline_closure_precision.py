@@ -70,10 +70,17 @@ def evaluate_teacher_handoff_precision(
             )
         gt_xyz, gt_semantic, gt_instance, gaussian_xyz = scene_arrays[scene_id]
         output = load_json(output_json)
+        output_instances = output.get("instances", {})
         projection = project_declared_instances(
-            output["point_labels"], output.get("instances", {})
+            output["point_labels"], output_instances
         )
         labels = projection.point_labels
+        declared_ids = set(projection.declared_instance_ids)
+        declared_instances = {
+            raw_id: metadata
+            for raw_id, metadata in output_instances.items()
+            if int(raw_id) in declared_ids
+        }
         if labels.shape != (len(gaussian_xyz),):
             raise ValueError(
                 f"{output_json}: point_labels length differs from Gaussian PLY"
@@ -94,7 +101,7 @@ def evaluate_teacher_handoff_precision(
             audit = evaluate_gaussian_object_precision(
                 gaussian_xyz,
                 labels,
-                output.get("instances", {}),
+                declared_instances,
                 gt_xyz,
                 gt_semantic,
                 gt_instance,
