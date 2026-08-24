@@ -26,8 +26,10 @@ from .scannet import physical_scene_id
 from .taxonomy import load_taxonomy
 from .v9_evaluation import SceneMethodMetrics, stage3_uniform_health_gate, stage4_prior_gate
 from .v9_feature_training import (
+    V9_FEATURE_SEED,
     execute_v9_feature_training,
     prepare_v9_affinity_inputs,
+    registered_v9_feature_source,
     v9_affinity_input_paths,
     v9_feature_training_paths,
 )
@@ -47,6 +49,7 @@ from .v9_metrics import (
 from .v9_pipeline import select_v9_late_classifier
 from .v9_replay import CONDITION_FACTORS
 from .v9_runner import object_bank_is_complete, replay_v9_priors, run_v9_banks
+from .v9_t1_runner import V9_T1_SCHEMA
 
 
 DEV8 = (
@@ -307,9 +310,16 @@ def _valid_prediction(path: Path) -> bool:
 
 
 def _validate_t1_reference(config: V9ContinuationConfig) -> dict[str, Any]:
-    """Reject historical-contributor or non-contract teacher references."""
+    """Reject historical-contributor or non-contract teacher references.
+
+    The immutable T1 producer commit may predate a controller-only recovery
+    commit.  Mechanical identity reuse is enforced by the T1 runner; here we
+    preserve that producer provenance instead of relabelling old output as if
+    the current controller produced it.
+    """
 
     rows: list[dict[str, Any]] = []
+    producer_commits: set[str] = set()
     for scene_id in DEV8:
         target = config.t1_b1_root / config.t1_b1_condition / scene_id
         if not (target / "output.json").is_file():
@@ -329,13 +339,39 @@ def _validate_t1_reference(config: V9ContinuationConfig) -> dict[str, Any]:
         identity = record.get("identity")
         if record.get("status") != "complete" or not isinstance(identity, Mapping):
             raise ValueError(f"{scene_id}: T1-B1 run record is not complete")
-        if str(identity.get("git_commit", "")) != config.git_commit:
-            raise ValueError(f"{scene_id}: T1-B1 was not produced by the fixed V9 commit")
+        producer_commit = str(identity.get("git_commit", "")).strip()
+        if not producer_commit:
+            raise ValueError(f"{scene_id}: T1-B1 lacks its producer commit")
+        expected_identity = {
+            "schema": V9_T1_SCHEMA,
+            "scene_id": scene_id,
+            "condition": config.t1_b1_condition,
+            "seed": V9_FEATURE_SEED,
+            "input_budget": "existing-scene-feature-2k",
+            "contributor_weight": "alpha_times_t_prev",
+            "teacher_prior_mode": "original",
+            "causal_level": "L0",
+        }
+        mismatched = {
+            key: (identity.get(key), expected)
+            for key, expected in expected_identity.items()
+            if identity.get(key) != expected
+        }
+        if mismatched:
+            raise ValueError(f"{scene_id}: T1-B1 identity is not registered: {mismatched}")
+        producer_commits.add(producer_commit)
         command = tuple(map(str, identity.get("command", ())))
         joined = " ".join(command).lower()
         if "historical" in joined or "--teacher-prior-mode original" not in joined:
             raise ValueError(f"{scene_id}: T1-B1 contributor/teacher path is not registered")
-        rows.append({"scene_id": scene_id, "root": str(target), "git_commit": config.git_commit})
+        rows.append({
+            "scene_id": scene_id,
+            "root": str(target),
+            "producer_git_commit": producer_commit,
+            "consumer_git_commit": config.git_commit,
+        })
+    if len(producer_commits) != 1:
+        raise ValueError("T1-B1 development references mix producer commits")
     result = {
         "schema": "saga-v9-t1-b1-reference-audit-v1",
         "condition": config.t1_b1_condition,
@@ -388,7 +424,7 @@ def _downstream_complete(
         feature_identity = feature_record.get("identity")
         if (
             feature_record.get("status") != "complete"
-            or feature_record.get("git_commit") != config.git_commit
+            or not str(feature_record.get("git_commit", "")).strip()
             or not isinstance(feature_identity, Mapping)
             or not lifting_bank_is_complete(
                 lifting,
@@ -400,7 +436,11 @@ def _downstream_complete(
             return False
         lifting_metadata, _ = load_lifting_bank(lifting)
         lifting_identity = lifting_metadata.get("identity")
-        if not isinstance(lifting_identity, Mapping):
+        if (
+            not isinstance(lifting_identity, Mapping)
+            or lifting_identity.get("feature_producer_git_commit")
+            != feature_record.get("git_commit")
+        ):
             return False
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return False
@@ -537,15 +577,22 @@ def _process_scenes(
             sam_checkpoint=config.sam_checkpoint,
             sam_reusable_root=config.sam_reusable_root,
         )
-        prepared = hooks.prepare_affinity(
-            workspace=config.workspace,
-            scene=scenes[scene_id],
-            scene_id=scene_id,
-            packed_masks_root=packed,
-            output_root=config.runs_root / "feature-10k-objectbank",
-            git_commit=config.git_commit,
-            resume=True,
+        feature_paths = v9_feature_training_paths(
+            config.runs_root / "feature-10k-objectbank", scene_id
         )
+        frozen_feature = registered_v9_feature_source(feature_paths)
+        if frozen_feature is None:
+            prepared = hooks.prepare_affinity(
+                workspace=config.workspace,
+                scene=scenes[scene_id],
+                scene_id=scene_id,
+                packed_masks_root=packed,
+                output_root=config.runs_root / "feature-10k-objectbank",
+                git_commit=config.git_commit,
+                resume=True,
+            )
+        else:
+            prepared = frozen_feature
         manifest = _scene_manifest(
             config,
             source_manifest=source_manifest,
@@ -553,23 +600,34 @@ def _process_scenes(
             scene=scenes[scene_id],
             overrides=prepared["scene_overrides"],
         )
-        resources_before_training = hooks.audit_resources(
-            output_root=config.runs_root,
-            scene_id=scene_id,
-            action="train-10k",
-        )
-        hooks.train_features(
-            scene_manifest=manifest,
-            output_root=config.runs_root / "feature-10k-objectbank",
-            workspace=config.workspace,
-            git_commit=config.git_commit,
-            scene_ids=(scene_id,),
-            resume=True,
-            continue_on_error=False,
-        )
-        feature = v9_feature_training_paths(
-            config.runs_root / "feature-10k-objectbank", scene_id
-        ).feature_ply
+        if frozen_feature is None:
+            resources_before_training = hooks.audit_resources(
+                output_root=config.runs_root,
+                scene_id=scene_id,
+                action="train-10k",
+            )
+            hooks.train_features(
+                scene_manifest=manifest,
+                output_root=config.runs_root / "feature-10k-objectbank",
+                workspace=config.workspace,
+                git_commit=config.git_commit,
+                scene_ids=(scene_id,),
+                resume=True,
+                continue_on_error=False,
+            )
+        else:
+            resources_before_training = hooks.audit_resources(
+                output_root=config.runs_root,
+                scene_id=scene_id,
+                action="reuse-registered-10k",
+            )
+        feature = feature_paths.feature_ply
+        feature_record = load_json(feature_paths.record)
+        feature_producer_commit = str(
+            feature_record.get("git_commit", "")
+        ).strip()
+        if feature_record.get("status") != "complete" or not feature_producer_commit:
+            raise RuntimeError(f"{scene_id}: feature producer provenance is incomplete")
         hooks.run_lifting(
             manifest,
             (scene_id,),
@@ -593,7 +651,7 @@ def _process_scenes(
                 workspace=config.workspace,
                 git_commit=config.git_commit,
                 scene_ids=(scene_id,),
-                feature_git_commit=config.git_commit,
+                feature_git_commit=feature_producer_commit,
                 resume=True,
                 continue_on_error=False,
             )

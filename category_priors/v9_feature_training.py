@@ -22,6 +22,7 @@ import numpy as np
 
 from .io import load_json, write_json
 from .runner import load_scene_runtime_manifest
+from .v9_masks import SAM_EVERYTHING_CONFIG
 
 
 V9_FEATURE_ITERATIONS = 10_000
@@ -425,6 +426,14 @@ def validate_v8_sam_everything_source(
         "saga-v9-segment-everything-v1",
     }:
         raise ValueError(f"unexpected SAM-everything schema: {summary_path}")
+    if payload.get("sam_arch") != "vit_h" or payload.get("config") != (
+        SAM_EVERYTHING_CONFIG
+    ):
+        raise ValueError(f"unexpected SAM-everything generation config: {summary_path}")
+    if not str(payload.get("image_root", "")).strip() or not str(
+        payload.get("output_root", "")
+    ).strip():
+        raise ValueError(f"SAM-everything summary lacks registered roots: {summary_path}")
     rows = payload.get("images")
     if not isinstance(rows, list) or int(payload.get("image_count", -1)) != len(rows):
         raise ValueError(f"SAM-everything summary image count is invalid: {summary_path}")
@@ -660,6 +669,7 @@ def prepare_v9_affinity_inputs(
         "mask_scales": str(paths.mask_scales),
         "command": command,
     }
+
     if dry_run:
         return {
             "kind": "v9_affinity_input_preparation",
@@ -888,6 +898,61 @@ def v9_feature_training_complete(
         and _valid_scale_gate(paths.scale_gate)
         and _progress_complete(paths.progress)
     )
+
+
+def registered_v9_feature_source(paths: V9FeaturePaths) -> dict[str, Any] | None:
+    """Validate and return an immutable feature producer without rebuilding it.
+
+    This is the narrow recovery boundary used when controller/lifting code has
+    moved to a new commit or workspace.  Validation is performed against the
+    producer's own frozen identity and commit, so no current-workspace paths
+    are substituted and the original run record is never rewritten.
+    """
+
+    try:
+        record = load_json(paths.record)
+        identity = record.get("identity")
+        producer_commit = str(record.get("git_commit", "")).strip()
+        inputs = identity.get("inputs") if isinstance(identity, Mapping) else None
+        outputs = identity.get("outputs") if isinstance(identity, Mapping) else None
+        if (
+            not producer_commit
+            or not isinstance(identity, Mapping)
+            or identity.get("schema") != V9_FEATURE_SCHEMA
+            or identity.get("scene_id") != paths.root.name
+            or int(identity.get("iterations", -1)) != V9_FEATURE_ITERATIONS
+            or int(identity.get("seed", -1)) != V9_FEATURE_SEED
+            or not isinstance(inputs, Mapping)
+            or not isinstance(outputs, Mapping)
+            or Path(str(outputs.get("feature_ply", ""))).resolve()
+            != paths.feature_ply.resolve()
+            or Path(str(outputs.get("scale_gate", ""))).resolve()
+            != paths.scale_gate.resolve()
+            or not v9_feature_training_complete(paths, identity, producer_commit)
+        ):
+            return None
+        affinity_masks = inputs.get("affinity_masks")
+        affinity_scales = inputs.get("affinity_mask_scales")
+        if not isinstance(affinity_masks, Mapping) or not isinstance(
+            affinity_scales, Mapping
+        ):
+            return None
+        mask_path = Path(str(affinity_masks.get("path", ""))).resolve()
+        scale_path = Path(str(affinity_scales.get("path", ""))).resolve()
+        if not mask_path.is_dir() or not scale_path.is_dir():
+            return None
+    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+        return None
+    return {
+        "producer_git_commit": producer_commit,
+        "identity": dict(identity),
+        "feature_ply": paths.feature_ply,
+        "scale_gate": paths.scale_gate,
+        "scene_overrides": {
+            "sam_everything_masks_path": str(mask_path),
+            "sam_everything_mask_scales_path": str(scale_path),
+        },
+    }
 
 
 def _identity_conflict(

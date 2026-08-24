@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .io import write_json
+from .io import load_json, write_json
 from .runner import load_scene_runtime_manifest
 from .v9_lifting import (
     DEFAULT_CLASSES,
@@ -17,6 +17,24 @@ from .v9_lifting import (
     lifting_bank_is_complete,
 )
 from .v9_masks import sam_directory_is_complete
+from .v9_feature_training import validate_v8_sam_everything_source
+
+
+def _registered_sam_directory_is_complete(
+    directory: Path, image_root: Path
+) -> bool:
+    """Require both the registered summary and every packed frame payload."""
+
+    try:
+        validate_v8_sam_everything_source(directory)
+        summary = load_json(Path(directory) / "summary.json")
+        if Path(str(summary.get("image_root", ""))).resolve() != Path(
+            image_root
+        ).resolve():
+            return False
+        return sam_directory_is_complete(directory, image_root)
+    except (FileNotFoundError, OSError, ValueError, TypeError, KeyError):
+        return False
 
 
 def _run_logged(command: Sequence[str], *, cwd: Path, log_path: Path) -> None:
@@ -45,10 +63,10 @@ def ensure_v9_segment_everything(
     image_root = Path(str(scene["base_path"])) / "fastRecon/dense/sparse/0/images"
     if reusable_root is not None:
         reusable = Path(reusable_root) / str(scene_id)
-        if sam_directory_is_complete(reusable, image_root):
+        if _registered_sam_directory_is_complete(reusable, image_root):
             return reusable
     target = Path(output_root) / str(scene_id)
-    if sam_directory_is_complete(target, image_root):
+    if _registered_sam_directory_is_complete(target, image_root):
         return target
     python_bin = Path(str(scene.get("python_bin", "")))
     if not python_bin.is_file():
@@ -68,7 +86,7 @@ def ensure_v9_segment_everything(
         cwd=repo_root,
         log_path=target / "sam_everything.log",
     )
-    if not sam_directory_is_complete(target, image_root):
+    if not _registered_sam_directory_is_complete(target, image_root):
         raise RuntimeError(f"incomplete native V9 SAM masks for {scene_id}")
     return target
 
@@ -108,7 +126,7 @@ def run_v9_lifting_banks(
         if sam_scene_roots is not None and scene_id in sam_scene_roots:
             sam_scene = Path(sam_scene_roots[scene_id])
             image_root = Path(str(scene["base_path"])) / "fastRecon/dense/sparse/0/images"
-            if not sam_directory_is_complete(sam_scene, image_root):
+            if not _registered_sam_directory_is_complete(sam_scene, image_root):
                 raise ValueError(f"declared SAM root is incomplete for {scene_id}")
         else:
             if sam_checkpoint is None:

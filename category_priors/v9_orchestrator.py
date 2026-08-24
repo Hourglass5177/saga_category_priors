@@ -18,7 +18,11 @@ from typing import Any
 from .io import write_json
 from .v9_pipeline import V9Stage2Config, run_v9_stage2
 from .v9_stage3_controller import V9ContinuationConfig, run_v9_stage3_to_6
-from .v9_t1_runner import V9_T1_DEV8, execute_v9_t1_runs
+from .v9_t1_runner import (
+    V9_T1_DEV8,
+    execute_v9_t1_runs,
+    registered_v9_t1_batch,
+)
 
 
 def _status(
@@ -78,15 +82,19 @@ def run_v9_orchestrator(
             checkpoint="t1-corrected-dev8",
             git_commit=commit,
         )
-        t1 = execute_v9_t1_runs(
-            scene_manifest=runtime_manifest,
-            output_root=runs_root / "t1-legacy",
-            workspace=workspace,
-            git_commit=commit,
-            scene_ids=V9_T1_DEV8,
-            resume=True,
-            continue_on_error=False,
+        t1 = registered_v9_t1_batch(
+            runs_root / "t1-legacy", scene_ids=V9_T1_DEV8
         )
+        if t1 is None:
+            t1 = execute_v9_t1_runs(
+                scene_manifest=runtime_manifest,
+                output_root=runs_root / "t1-legacy",
+                workspace=workspace,
+                git_commit=commit,
+                scene_ids=V9_T1_DEV8,
+                resume=True,
+                continue_on_error=False,
+            )
         if any(row.get("status") == "failed" for row in t1.get("runs", ())):
             raise RuntimeError("corrected T1 dev8 contains a failed run")
 

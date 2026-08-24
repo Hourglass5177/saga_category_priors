@@ -17,6 +17,7 @@ from category_priors.v9_feature_training import (
     execute_v9_feature_training,
     materialize_v9_sam_everything_masks,
     prepare_v9_affinity_inputs,
+    registered_v9_feature_source,
     resolve_v9_feature_inputs,
     validate_v8_sam_everything_source,
     v9_affinity_input_paths,
@@ -154,6 +155,18 @@ def _packed_sam_source(root: Path, masks: np.ndarray) -> Path:
     )
     (root / "summary.json").write_text(json.dumps({
         "schema": "saga-v8-segment-everything-v1",
+        "image_root": str((root.parent / "images").resolve()),
+        "output_root": str(root.resolve()),
+        "sam_arch": "vit_h",
+        "config": {
+            "points_per_side": 32,
+            "pred_iou_thresh": 0.88,
+            "stability_score_thresh": 0.95,
+            "box_nms_thresh": 0.70,
+            "crop_n_layers": 0,
+            "crop_n_points_downscale_factor": 1,
+            "min_mask_region_area": 100,
+        },
         "image_count": 1,
         "mask_count": int(count),
         "images": [{
@@ -277,6 +290,14 @@ def test_v9_complete_run_skips_only_matching_identity(
     )
     assert first["complete"] == 1
     assert second["runs"][0]["status"] == "skipped_complete"
+    assert len(calls) == 1
+
+    frozen = registered_v9_feature_source(
+        v9_feature_training_paths(output_root, scene["scene_id"])
+    )
+    assert frozen is not None
+    assert frozen["producer_git_commit"] == "abc"
+    assert frozen["feature_ply"].is_file()
     assert len(calls) == 1
 
     semantic_mask = Path(scene["base_path"]) / "saga/masks/frame.pt"

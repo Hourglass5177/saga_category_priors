@@ -24,6 +24,7 @@ from .v9_evaluation import stage2_oracle_gate
 from .v9_feature_training import (
     execute_v9_feature_training,
     prepare_v9_affinity_inputs,
+    registered_v9_feature_source,
     v9_feature_training_paths,
 )
 from .v9_legacy_runner import read_v9_legacy_resources
@@ -522,6 +523,7 @@ def run_v9_stage2(
     try:
         overrides: dict[str, Mapping[str, Any]] = {}
         sam_scene_roots: dict[str, Path] = {}
+        registered_features: dict[str, Mapping[str, Any]] = {}
         for scene_id in V9_STAGE2_SCENES:
             sam_scene_roots[scene_id] = hooks.ensure_masks(
                 scene_id=scene_id,
@@ -531,17 +533,31 @@ def run_v9_stage2(
                 sam_checkpoint=config.sam_checkpoint,
                 reusable_root=config.sam_packed_root,
             )
-            result = hooks.prepare_affinity_inputs(
-                workspace=config.workspace,
-                scene=scenes[scene_id],
-                scene_id=scene_id,
-                packed_masks_root=sam_scene_roots[scene_id],
-                output_root=config.runs_root / "feature-10k-objectbank",
-                git_commit=config.git_commit,
-                resume=True,
+            frozen = registered_v9_feature_source(
+                v9_feature_training_paths(
+                    config.runs_root / "feature-10k-objectbank", scene_id
+                )
             )
+            if frozen is None:
+                result = hooks.prepare_affinity_inputs(
+                    workspace=config.workspace,
+                    scene=scenes[scene_id],
+                    scene_id=scene_id,
+                    packed_masks_root=sam_scene_roots[scene_id],
+                    output_root=config.runs_root / "feature-10k-objectbank",
+                    git_commit=config.git_commit,
+                    resume=True,
+                )
+            else:
+                result = frozen
+                registered_features[scene_id] = frozen
             overrides[scene_id] = dict(result["scene_overrides"])
             progress["prepared_scenes"].append(scene_id)
+            if frozen is not None:
+                progress.setdefault("registered_feature_scenes", []).append({
+                    "scene_id": scene_id,
+                    "producer_git_commit": frozen["producer_git_commit"],
+                })
             _write_status(
                 config,
                 state="running",
@@ -554,6 +570,15 @@ def run_v9_stage2(
         progress["augmented_runtime_manifest"] = str(augmented)
 
         for scene_id in V9_STAGE2_SCENES:
+            if scene_id in registered_features:
+                progress["trained_scenes"].append(scene_id)
+                _write_status(
+                    config,
+                    state="running",
+                    checkpoint="reusing-registered-10k-features",
+                    progress=progress,
+                )
+                continue
             resource_audit = hooks.audit_resources(
                 output_root=config.runs_root,
                 scene_id=scene_id,

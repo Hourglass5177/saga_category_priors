@@ -168,7 +168,9 @@ def test_late_classifier_is_selected_on_all_dev8_without_worker_or_replay(
     assert load_json(config.artifacts_root / "late_classifier_selection8.json") == result
 
 
-def test_t1_reference_must_be_current_fixed_commit_and_strict(tmp_path: Path) -> None:
+def test_t1_reference_preserves_registered_producer_commit_and_strict_contract(
+    tmp_path: Path,
+) -> None:
     config = _config(tmp_path)
     for scene_id in (
         "scene0645_00", "scene0025_01", "scene0046_00", "scene0474_01",
@@ -191,25 +193,48 @@ def test_t1_reference_must_be_current_fixed_commit_and_strict(tmp_path: Path) ->
             {
                 "status": "complete",
                 "identity": {
+                    "schema": "saga-v9-t1-legacy-v1",
                     "git_commit": config.git_commit,
+                    "scene_id": scene_id,
+                    "condition": config.t1_b1_condition,
+                    "seed": 42,
+                    "input_budget": "existing-scene-feature-2k",
+                    "contributor_weight": "alpha_times_t_prev",
+                    "teacher_prior_mode": "original",
+                    "causal_level": "L0",
                     "command": ["postprocess.py", "--teacher-prior-mode original"],
                 },
             },
         )
-    assert _validate_t1_reference(config)["corrected_contributor"] is True
+    initial = _validate_t1_reference(config)
+    assert initial["corrected_contributor"] is True
 
     bad = config.t1_b1_root / config.t1_b1_condition / "scene0645_00/run.json"
-    write_json(
-        bad,
-        {
-            "status": "complete",
-            "identity": {
-                "git_commit": "old",
-                "command": ["postprocess.py", "--teacher-prior-mode original"],
-            },
-        },
+    payload = load_json(bad)
+    payload["identity"]["git_commit"] = "old-producer"
+    write_json(bad, payload)
+    with pytest.raises(ValueError, match="mix producer commits"):
+        _validate_t1_reference(config)
+
+    for scene_id in (
+        "scene0645_00", "scene0025_01", "scene0046_00", "scene0474_01",
+        "scene0591_02", "scene0329_02", "scene0164_03", "scene0064_01",
+    ):
+        path = config.t1_b1_root / config.t1_b1_condition / scene_id / "run.json"
+        payload = load_json(path)
+        payload["identity"]["git_commit"] = "old-producer"
+        write_json(path, payload)
+    recovered = _validate_t1_reference(config)
+    scene = next(
+        row for row in recovered["scenes"] if row["scene_id"] == "scene0645_00"
     )
-    with pytest.raises(ValueError, match="fixed V9 commit"):
+    assert scene["producer_git_commit"] == "old-producer"
+    assert scene["consumer_git_commit"] == config.git_commit
+
+    payload = load_json(bad)
+    payload["identity"]["git_commit"] = ""
+    write_json(bad, payload)
+    with pytest.raises(ValueError, match="lacks its producer commit"):
         _validate_t1_reference(config)
 
 

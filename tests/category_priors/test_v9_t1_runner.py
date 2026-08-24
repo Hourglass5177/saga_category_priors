@@ -10,6 +10,7 @@ from category_priors.v9_t1_runner import (
     V9T1Invocation,
     build_v9_t1_invocation,
     execute_v9_t1_runs,
+    registered_v9_t1_batch,
     v9_t1_run_complete,
 )
 
@@ -185,6 +186,9 @@ def test_t1_execution_is_ordered_resumable_and_never_trains(tmp_path: Path) -> N
     }
     first = execute_v9_t1_runs(**kwargs)
     second = execute_v9_t1_runs(**kwargs)
+    recovered = registered_v9_t1_batch(
+        tmp_path / "runs", scene_ids=[scene["scene_id"]]
+    )
     assert calls == [
         (scene["scene_id"], "T1-B0"),
         (scene["scene_id"], "T1-B1"),
@@ -194,4 +198,7 @@ def test_t1_execution_is_ordered_resumable_and_never_trains(tmp_path: Path) -> N
         "skipped_complete",
         "skipped_complete",
     ]
+    assert recovered is not None
+    assert recovered["producer_git_commit"] == "fixed-commit"
+    assert all(row["status"] == "registered_complete" for row in recovered["runs"])
     assert (tmp_path / "runs/execution_summary.json").is_file()

@@ -15,6 +15,13 @@ from typing import Any, Iterator, Mapping, Sequence
 
 import numpy as np
 
+from .v9_feature_training import (
+    V9_FEATURE_ITERATIONS,
+    V9_FEATURE_SCHEMA,
+    V9_FEATURE_SEED,
+    validate_v8_sam_everything_source,
+)
+
 
 V9_LIFTING_SCHEMA = "saga-v9-native-lifting-bank-v1"
 V9_LIFTING_IDENTITY_SCHEMA = "saga-v9-native-lifting-identity-v1"
@@ -64,43 +71,83 @@ def build_lifting_identity(
         raise ValueError("lifting git_commit must be non-empty")
     record = json.loads(Path(feature_record).read_text("utf-8"))
     record_identity = record.get("identity")
+    producer_commit = str(record.get("git_commit", "")).strip()
     if (
-        record.get("status") != "complete"
-        or record.get("git_commit") != commit
+        record.get("kind") != "v9_feature_training_run"
+        or record.get("status") != "complete"
+        or not producer_commit
         or not isinstance(record_identity, Mapping)
+        or record_identity.get("schema") != V9_FEATURE_SCHEMA
+        or record_identity.get("scene_id") != str(scene_id)
+        or int(record_identity.get("iterations", -1)) != V9_FEATURE_ITERATIONS
+        or int(record_identity.get("seed", -1)) != V9_FEATURE_SEED
     ):
-        raise ValueError("lifting requires a complete current-commit feature record")
+        raise ValueError("lifting requires a complete registered feature record")
     declared_outputs = record_identity.get("outputs")
     if (
         not isinstance(declared_outputs, Mapping)
         or Path(str(declared_outputs.get("feature_ply", ""))).resolve()
         != Path(feature_ply).resolve()
+        or not Path(str(declared_outputs.get("scale_gate", ""))).is_file()
+        or not Path(feature_ply).is_file()
     ):
         raise ValueError("feature record does not declare the lifting feature PLY")
-    summary_path = Path(segment_everything_root).resolve() / "summary.json"
-    summary = json.loads(summary_path.read_text("utf-8"))
-    if summary.get("schema") != "saga-v9-segment-everything-v1":
-        raise ValueError("lifting requires a registered SAM-everything summary")
-    sam_identity = {
-        key: summary.get(key)
-        for key in (
-            "schema",
-            "image_root",
-            "output_root",
-            "sam_arch",
-            "config",
-            "image_count",
-            "mask_count",
-            "images",
+    try:
+        progress = int((Path(feature_record).parent / "train_progress.txt").read_text().strip())
+    except (FileNotFoundError, OSError, ValueError):
+        progress = -1
+    if progress != 100:
+        raise ValueError("lifting feature producer is not complete")
+    # The frozen V8 masks are a registered read-only data source, not a V8
+    # runtime dependency.  Training already validates this exact packed source;
+    # lifting must apply the same fail-closed frame/count/shape verification
+    # instead of accepting files by presence or rejecting them by schema name.
+    # The returned identity records every frame stat and the summary stat, so a
+    # changed source cannot be silently reused.
+    sam_identity = validate_v8_sam_everything_source(segment_everything_root)
+    materialization_path = (
+        Path(feature_record).parent
+        / "affinity-inputs"
+        / "sam_everything_materialization.json"
+    )
+    materialization = json.loads(materialization_path.read_text("utf-8"))
+    if (
+        materialization.get("kind") != "v9_sam_everything_materialization"
+        or materialization.get("source") != sam_identity
+    ):
+        raise ValueError(
+            "lifting SAM source differs from the registered affinity training source"
         )
+    summary = json.loads(
+        (Path(segment_everything_root).resolve() / "summary.json").read_text("utf-8")
+    )
+    sam_identity = {
+        **sam_identity,
+        "registered_summary_schema": str(summary.get("schema", "")),
+        "generation": {
+            key: summary.get(key)
+            for key in (
+                "image_root",
+                "output_root",
+                "sam_arch",
+                "config",
+                "image_count",
+                "mask_count",
+            )
+        },
     }
     return {
         "schema": V9_LIFTING_IDENTITY_SCHEMA,
         "scene_id": str(scene_id),
         "git_commit": commit,
+        "feature_producer_git_commit": producer_commit,
         "feature_ply": _source_file_identity(Path(feature_ply)),
         "feature_record_path": str(Path(feature_record).resolve()),
         "feature_record_identity": dict(record_identity),
+        "feature_affinity_materialization": {
+            "path": str(materialization_path.resolve()),
+            "source": sam_identity,
+        },
         "label_features": _source_file_identity(Path(label_features)),
         "segment_everything_root": str(Path(segment_everything_root).resolve()),
         "segment_everything": sam_identity,

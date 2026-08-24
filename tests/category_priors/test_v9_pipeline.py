@@ -195,6 +195,38 @@ def test_oracle_failure_stops_before_object_bank(tmp_path: Path) -> None:
         )
 
 
+def test_stage2_registered_feature_recovery_skips_prepare_and_training(
+    tmp_path: Path, monkeypatch
+) -> None:
+    events: list[str] = []
+
+    def frozen(paths):
+        return {
+            "producer_git_commit": "feature-producer",
+            "feature_ply": paths.feature_ply,
+            "scale_gate": paths.scale_gate,
+            "scene_overrides": {
+                "sam_everything_masks_path": str(paths.root / "frozen-masks"),
+                "sam_everything_mask_scales_path": str(paths.root / "frozen-scales"),
+            },
+        }
+
+    monkeypatch.setattr(
+        "category_priors.v9_pipeline.registered_v9_feature_source", frozen
+    )
+    result = run_v9_stage2(
+        _config(tmp_path), hooks=_hooks(events, oracle_passed=False)
+    )
+
+    assert result["state"] == "stopped"
+    assert not any(item.startswith("prepare:") for item in events)
+    assert not any(item.startswith("train:") for item in events)
+    assert not any(":train-10k" in item for item in events)
+    assert [row["scene_id"] for row in result["progress"]["registered_feature_scenes"]] == list(
+        V9_STAGE2_SCENES
+    )
+
+
 def test_a3_fallback_selects_only_association_mode(tmp_path: Path) -> None:
     events: list[str] = []
     result = run_v9_stage2(_config(tmp_path), hooks=_hooks(events, oracle_passed=True))

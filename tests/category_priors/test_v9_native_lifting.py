@@ -29,7 +29,11 @@ from category_priors.v9_objectbank import (
     attach_local_halo,
     materialize_candidate_bank,
 )
-from category_priors.v9_lifting_runner import _run_logged
+from category_priors.v9_lifting_runner import (
+    _registered_sam_directory_is_complete,
+    _run_logged,
+)
+from category_priors.v9_feature_training import validate_v8_sam_everything_source
 
 
 def test_native_m1_rejects_empty_and_invalid_pixels() -> None:
@@ -159,16 +163,26 @@ def test_non_saga_classification_does_not_remove_geometry_candidate() -> None:
 def _write_native_bank(tmp_path, *, core_id: int = 0, semantic_class: int = 0) -> None:
     feature = tmp_path / "feature.ply"
     feature.write_bytes(b"ply\n")
+    scale_gate = tmp_path / "scale_gate_10k.pt"
+    scale_gate.write_bytes(b"gate")
+    (tmp_path / "train_progress.txt").write_text("100", "utf-8")
     label_features = tmp_path / "labels.pt"
     label_features.write_bytes(b"labels")
     feature_record = tmp_path / "train_10k.json"
     feature_identity = {
-        "outputs": {"feature_ply": str(feature.resolve())},
+        "schema": "saga-v9-dual-source-feature-v1",
         "scene_id": "scene",
+        "iterations": 10_000,
+        "seed": 42,
+        "outputs": {
+            "feature_ply": str(feature.resolve()),
+            "scale_gate": str(scale_gate.resolve()),
+        },
     }
     feature_record.write_text(
         json.dumps(
             {
+                "kind": "v9_feature_training_run",
                 "status": "complete",
                 "git_commit": "commit",
                 "identity": feature_identity,
@@ -178,26 +192,59 @@ def _write_native_bank(tmp_path, *, core_id: int = 0, semantic_class: int = 0) -
     )
     sam = tmp_path / "sam"
     sam.mkdir(exist_ok=True)
+    np.savez_compressed(
+        sam / "frame.npz",
+        packed=np.packbits(
+            np.asarray(
+                [
+                    [True, False, False, True],
+                    [False, True, True, False],
+                ],
+                dtype=np.bool_,
+            ),
+            axis=1,
+        ),
+        count=np.asarray(2, dtype=np.int32),
+        height=np.asarray(2, dtype=np.int32),
+        width=np.asarray(2, dtype=np.int32),
+    )
     (sam / "summary.json").write_text(
         json.dumps(
             {
                 "schema": "saga-v9-segment-everything-v1",
-                "image_root": str(tmp_path / "images"),
+                "image_root": str((tmp_path / "images").resolve()),
                 "output_root": str(sam.resolve()),
                 "sam_arch": "vit_h",
-                "config": {},
+                "config": {
+                    "points_per_side": 32,
+                    "pred_iou_thresh": 0.88,
+                    "stability_score_thresh": 0.95,
+                    "box_nms_thresh": 0.70,
+                    "crop_n_layers": 0,
+                    "crop_n_points_downscale_factor": 1,
+                    "min_mask_region_area": 100,
+                },
                 "image_count": 1,
-                "mask_count": 1,
+                "mask_count": 2,
                 "images": [
                     {
                         "image": "frame.jpg",
                         "height": 2,
                         "width": 2,
-                        "mask_count": 1,
+                        "mask_count": 2,
                     }
                 ],
             }
         ),
+        "utf-8",
+    )
+    materialization = tmp_path / "affinity-inputs/sam_everything_materialization.json"
+    materialization.parent.mkdir(parents=True, exist_ok=True)
+    materialization.write_text(
+        json.dumps({
+            "kind": "v9_sam_everything_materialization",
+            "source": validate_v8_sam_everything_source(sam),
+        }),
         "utf-8",
     )
     identity = build_lifting_identity(
@@ -251,6 +298,61 @@ def test_native_bank_validation_accepts_complete_identified_bank(tmp_path) -> No
     assert lifting_bank_is_complete(
         tmp_path, expected_scene_id="scene", expected_git_commit="commit"
     )
+
+
+def test_lifting_strictly_reuses_registered_v8_masks_and_pins_feature_producer(
+    tmp_path,
+) -> None:
+    _write_native_bank(tmp_path)
+    sam = tmp_path / "sam"
+    summary = json.loads((sam / "summary.json").read_text("utf-8"))
+    summary["schema"] = "saga-v8-segment-everything-v1"
+    (sam / "summary.json").write_text(json.dumps(summary), "utf-8")
+    materialization_path = tmp_path / "affinity-inputs/sam_everything_materialization.json"
+    materialization = json.loads(materialization_path.read_text("utf-8"))
+    materialization["source"] = validate_v8_sam_everything_source(sam)
+    materialization_path.write_text(json.dumps(materialization), "utf-8")
+    record_path = tmp_path / "train_10k.json"
+    record = json.loads(record_path.read_text("utf-8"))
+    record["git_commit"] = "feature-producer"
+    record_path.write_text(json.dumps(record), "utf-8")
+
+    identity = build_lifting_identity(
+        scene_id="scene",
+        git_commit="lifting-consumer",
+        feature_ply=tmp_path / "feature.ply",
+        feature_record=record_path,
+        label_features=tmp_path / "labels.pt",
+        segment_everything_root=sam,
+        classes=("chair",),
+    )
+
+    assert identity["git_commit"] == "lifting-consumer"
+    assert identity["feature_producer_git_commit"] == "feature-producer"
+    assert identity["segment_everything"]["registered_summary_schema"] == (
+        "saga-v8-segment-everything-v1"
+    )
+    assert json.loads(record_path.read_text("utf-8"))["git_commit"] == (
+        "feature-producer"
+    )
+
+
+def test_registered_sam_source_binds_scene_root_and_frozen_config(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_native_bank(tmp_path)
+    sam = tmp_path / "sam"
+    monkeypatch.setattr(
+        "category_priors.v9_lifting_runner.sam_directory_is_complete",
+        lambda directory, image_root: True,
+    )
+    assert _registered_sam_directory_is_complete(sam, tmp_path / "images")
+    assert not _registered_sam_directory_is_complete(sam, tmp_path / "other-images")
+
+    summary = json.loads((sam / "summary.json").read_text("utf-8"))
+    summary["config"]["pred_iou_thresh"] = 0.5
+    (sam / "summary.json").write_text(json.dumps(summary), "utf-8")
+    assert not _registered_sam_directory_is_complete(sam, tmp_path / "images")
 
 
 def test_native_bank_validation_rejects_core_outside_full(tmp_path) -> None:

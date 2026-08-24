@@ -225,6 +225,64 @@ def v9_t1_run_complete(paths: V9T1Paths, identity: Mapping[str, Any]) -> bool:
     )
 
 
+def registered_v9_t1_batch(
+    output_root: str | Path,
+    *,
+    scene_ids: Sequence[str] = V9_T1_DEV8,
+    conditions: Sequence[str] = V9_T1_CONDITIONS,
+) -> dict[str, Any] | None:
+    """Validate a frozen T1 producer batch without rebuilding its identity."""
+
+    rows: list[dict[str, Any]] = []
+    producer_commits: set[str] = set()
+    for scene_id in map(str, scene_ids):
+        for condition in map(str, conditions):
+            paths = v9_t1_paths(output_root, condition, scene_id)
+            try:
+                record = load_json(paths.record)
+                identity = record.get("identity")
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                return None
+            expected = {
+                "schema": V9_T1_SCHEMA,
+                "scene_id": scene_id,
+                "condition": condition,
+                "seed": V9_FEATURE_SEED,
+                "input_budget": "existing-scene-feature-2k",
+                "contributor_weight": "alpha_times_t_prev",
+                "teacher_prior_mode": "original",
+                "causal_level": "L0",
+            }
+            if (
+                not isinstance(identity, Mapping)
+                or any(identity.get(key) != value for key, value in expected.items())
+                or not v9_t1_run_complete(paths, identity)
+            ):
+                return None
+            producer_commit = str(identity.get("git_commit", "")).strip()
+            if not producer_commit:
+                return None
+            producer_commits.add(producer_commit)
+            rows.append({
+                "scene_id": scene_id,
+                "condition": condition,
+                "status": "registered_complete",
+                "root": str(paths.root),
+                "producer_git_commit": producer_commit,
+            })
+    if len(producer_commits) != 1:
+        return None
+    return {
+        "kind": "v9_t1_registered_batch",
+        "schema": V9_T1_SCHEMA,
+        "producer_git_commit": next(iter(producer_commits)),
+        "total": len(rows),
+        "complete": len(rows),
+        "failed": 0,
+        "runs": rows,
+    }
+
+
 def execute_v9_t1_runs(
     *,
     scene_manifest: str | Path,
