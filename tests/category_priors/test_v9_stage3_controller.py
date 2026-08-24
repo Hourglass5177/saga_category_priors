@@ -297,7 +297,14 @@ def test_stream_cleanup_never_deletes_part_files(tmp_path: Path) -> None:
     part = feature.model / "checkpoint.part"
     part.write_bytes(b"resume")
 
-    result = _safe_cleanup_scene(config=config, scene_id="scene0000_00")
+    result = _safe_cleanup_scene(
+        config=config,
+        scene_id="scene0000_00",
+        resource_audit={
+            "disk_free_gib": 100.0,
+            "cgroup": {"current": 1, "max": 90 * 1024**3},
+        },
+    )
 
     assert part.is_file()
     assert str(part.resolve()) in result["preserved_part_files"]
