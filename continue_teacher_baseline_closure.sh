@@ -11,6 +11,7 @@ CLOSURE_ROOT="${SAGA_BASELINE_RUN_ROOT:-/root/autodl-tmp/saga/runs/teacher-basel
 ARTIFACT_ROOT="${SAGA_BASELINE_ARTIFACT_ROOT:-/root/autodl-tmp/saga/artifacts/teacher-baseline-closure}"
 SOURCE_ROOT="$WORK_ROOT/sources"
 PY="${SAGA_PYTHON:-/root/autodl-tmp/saga/conda/envs/saga/bin/python}"
+ANALYSIS_PY="${SAGA_ANALYSIS_PYTHON:-/root/autodl-tmp/saga/venvs/category-priors/bin/python}"
 CUDA_HOME="${SAGA_CUDA_HOME:-/root/autodl-tmp/saga/conda/envs/saga}"
 RUNTIME_MANIFEST="${SAGA_RUNTIME_MANIFEST:-/root/autodl-tmp/saga/artifacts/category-priors-20260804/scene_runtime_manifest.json}"
 GT_DIR="${SAGA_GT_DIR:-/root/autodl-tmp/saga/artifacts/category-priors-20260804/gt_val_tune}"
@@ -191,12 +192,13 @@ build_contributor_extension "$REPO_DIR"
 CURRENT_STAGE="read-only-evaluation-and-viewer"
 write_status "running"
 assert_resources
-"$PY" -m category_priors.baseline_closure_analysis \
+test -x "$ANALYSIS_PY"
+"$ANALYSIS_PY" -m category_priors.baseline_closure_analysis \
     --closure-root "$CLOSURE_ROOT" \
     --gt-dir "$GT_DIR" \
     --runtime-manifest "$RUNTIME_MANIFEST" \
     --output-dir "$ARTIFACT_ROOT"
-"$PY" -m category_priors.baseline_closure_precision \
+"$ANALYSIS_PY" -m category_priors.baseline_closure_precision \
     --closure-root "$CLOSURE_ROOT" \
     --gt-dir "$GT_DIR" \
     --runtime-manifest "$RUNTIME_MANIFEST" \
