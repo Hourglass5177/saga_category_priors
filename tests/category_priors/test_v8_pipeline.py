@@ -70,20 +70,72 @@ def test_b1_closeout_compares_labels_and_metadata(tmp_path) -> None:
 def test_b1_resume_requires_output_and_diagnostics(tmp_path) -> None:
     run = tmp_path / "run"
     output = {
-        "point_labels": [0, -1, 0],
+        "point_labels": [0, -1, 1],
         "instances": {"0": {"class": "chair"}},
     }
     _write_json(run / "output.json", output)
     assert not _b1_run_is_complete(run)
-    _write_json(run / "diagnostics.json", {"instances": output["instances"]})
+    _write_json(run / "diagnostics.json", {"instances": {
+        "0": {"class": "chair", "score": 0.8},
+        "1": {"class": "wall", "score": 0.2},
+    }})
     assert _b1_run_is_complete(run, 3)
     assert not _b1_run_is_complete(run, 4)
     _write_json(run / "diagnostics.json", {"instances": {}})
-    assert _b1_run_is_complete(run)
+    assert not _b1_run_is_complete(run)
+    _write_json(run / "diagnostics.json", {"instances": {
+        "0": {"class": "chair", "score": 0.8},
+        "1": {"class": "wall", "score": 0.2},
+    }})
     _write_json(run / "output.json", {
         "point_labels": [1], "instances": {"0": {"class": "chair"}}
     })
     assert not _b1_run_is_complete(run)
+
+
+@pytest.mark.parametrize(
+    "diagnostics",
+    (
+        {"instances": {
+            "0": {"class": "table", "score": 0.8},
+            "1": {"class": "wall", "score": 0.2},
+        }},
+        {"instances": {
+            "0": {"class": "chair"},
+            "1": {"class": "wall", "score": 0.2},
+        }},
+        {"instances": {
+            "0": {"class": "chair", "score": float("nan")},
+            "1": {"class": "wall", "score": 0.2},
+        }},
+        {"instances": {
+            "0": {"class": "chair", "score": 1.1},
+            "1": {"class": "wall", "score": 0.2},
+        }},
+    ),
+)
+def test_b1_resume_rejects_invalid_evaluator_metadata(
+    tmp_path, diagnostics
+) -> None:
+    run = tmp_path / "run"
+    _write_json(run / "output.json", {
+        "point_labels": [0, 1],
+        "instances": {"0": {"class": "chair"}},
+    })
+    _write_json(run / "diagnostics.json", diagnostics)
+    assert not _b1_run_is_complete(run)
+
+
+def test_b1_resume_allows_no_selected_instances(tmp_path) -> None:
+    run = tmp_path / "run"
+    _write_json(run / "output.json", {
+        "point_labels": [1, -1],
+        "instances": {},
+    })
+    _write_json(run / "diagnostics.json", {
+        "instances": {"1": {"class": "wall", "score": 0.2}},
+    })
+    assert _b1_run_is_complete(run, 2)
 
 
 def test_mechanical_effect_ignores_disjoint_rank_only_renumbering(tmp_path) -> None:

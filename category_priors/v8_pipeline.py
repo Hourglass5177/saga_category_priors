@@ -236,9 +236,41 @@ def _b1_run_is_complete(
             for values in instances.values()
         ):
             return False
-        instance_ids = {int(value) for value in instances}
+        if any(
+            not isinstance(values, Mapping)
+            or not isinstance(values.get("class"), str)
+            or not str(values["class"]).strip()
+            for values in diagnostic_instances.values()
+        ):
+            return False
+        output_instance_ids = {int(value) for value in instances}
+        diagnostic_instance_ids = {int(value) for value in diagnostic_instances}
         assigned = {int(value) for value in labels if int(value) >= 0}
-        return assigned.issubset(instance_ids)
+        for raw_id, values in instances.items():
+            diagnostic = diagnostic_instances.get(
+                str(raw_id), diagnostic_instances.get(int(raw_id))
+            )
+            if not isinstance(diagnostic, Mapping):
+                return False
+            if str(diagnostic.get("class", "")).strip() != str(
+                values["class"]
+            ).strip():
+                return False
+            score = diagnostic.get("score")
+            if (
+                not isinstance(score, (int, float))
+                or not np.isfinite(float(score))
+                or not 0.0 <= float(score) <= 1.0
+            ):
+                return False
+        # ``postprocess.py`` intentionally retains labels for every clustered
+        # instance, while ``output.instances`` contains only selected ScanNet
+        # classes.  The unfiltered diagnostics table is the authoritative
+        # completeness record for all assigned labels.
+        return (
+            output_instance_ids.issubset(assigned)
+            and diagnostic_instance_ids == assigned
+        )
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
         return False
 
