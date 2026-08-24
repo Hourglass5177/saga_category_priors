@@ -1,12 +1,18 @@
 from __future__ import annotations
 
-import numpy as np
+import json
+from pathlib import Path
 
+import numpy as np
+import pytest
+
+import category_priors.evaluator as evaluator
 from category_priors.evaluator import (
     GroundTruthScene,
     PredictedInstance,
     evaluate_instances,
 )
+from category_priors.taxonomy import load_taxonomy
 
 
 def prediction(
@@ -150,3 +156,42 @@ def test_prediction_smaller_than_min_region_size_is_skipped() -> None:
         min_region_size=3,
     )
     assert result["per_class"]["chair"]["ap_0.50"] == 0.0
+
+
+def test_scene_adapter_projects_orphans_without_changing_declared_mask(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_path = tmp_path / "output.json"
+    output_path.write_text(
+        json.dumps(
+            {
+                "point_labels": [4, 9, 4],
+                "instances": {"4": {"class": "chair"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    gaussian_xyz = np.asarray(
+        [[0.0, 0.0, 0.0], [0.1, 0.0, 0.0], [0.2, 0.0, 0.0]],
+        dtype=np.float64,
+    )
+    monkeypatch.setattr(evaluator, "load_ply_xyz", lambda _path: gaussian_xyz)
+
+    predictions, diagnostics = evaluator.saga_scene_predictions(
+        scene_id="scene",
+        gt_coords=gaussian_xyz,
+        output_json=output_path,
+        gaussian_ply=tmp_path / "unused.ply",
+        taxonomy=load_taxonomy(),
+        metadata_json=None,
+        transform=np.eye(4),
+        require_scores=False,
+    )
+
+    assert len(predictions) == 1
+    assert predictions[0].instance_id == 4
+    assert predictions[0].mask.tolist() == [True, False, True]
+    assert diagnostics["mapped_fraction"] == 1.0
+    assert diagnostics["gt_nearest_declared_fraction"] == 2 / 3
+    assert diagnostics["orphan_instance_count"] == 1.0
+    assert diagnostics["orphan_gaussian_count"] == 1.0

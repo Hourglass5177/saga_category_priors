@@ -34,6 +34,7 @@ from .evaluator import (
     saga_scene_predictions,
 )
 from .io import load_json, write_json, write_rows
+from .instance_projection import project_declared_instances
 from .runner import load_scene_runtime_manifest
 from .taxonomy import Taxonomy, load_taxonomy
 
@@ -336,6 +337,7 @@ def evaluate_teacher_handoff(
     all_rows: list[dict[str, Any]] = []
     evaluations: list[dict[str, Any]] = []
     unavailable: list[dict[str, Any]] = []
+    projection_runs: list[dict[str, Any]] = []
     for (variant_id, budget, condition), scene_outputs in sorted(grouped.items()):
         ground_truth: list[GroundTruthScene] = []
         predictions: list[PredictedInstance] = []
@@ -344,6 +346,20 @@ def evaluate_teacher_handoff(
         for scene_id, output_json in sorted(scene_outputs):
             if scene_id not in runtime:
                 raise KeyError(f"runtime manifest is missing {scene_id}")
+            raw_output = load_json(output_json)
+            projection = project_declared_instances(
+                raw_output["point_labels"], raw_output.get("instances", {})
+            )
+            projection_runs.append(
+                {
+                    "variant_id": variant_id,
+                    "budget": budget,
+                    "condition": condition,
+                    "scene_id": scene_id,
+                    "output_json": str(output_json),
+                    **projection.stats(),
+                }
+            )
             gt_coords, gt = load_ground_truth_npz(gt_dir / f"{scene_id}.npz", scene_id)
             scene_predictions, diagnostics = saga_scene_predictions(
                 scene_id=scene_id,
@@ -497,6 +513,14 @@ def evaluate_teacher_handoff(
         "min_region_size": min_region_size,
         "radius_m": radius_m,
         "metrics_path": metrics_path.name,
+        "declared_instance_projection": {
+            "semantics": (
+                "non-negative point labels absent from instances metadata are "
+                "reported and projected to background without changing output.json"
+            ),
+            "orphan_gaussians_count_as_predictions": False,
+            "runs": projection_runs,
+        },
         "unavailable_sensitivity": unavailable,
         "evaluations": evaluations,
     }

@@ -36,6 +36,10 @@ from .baseline_closure_runner import (
     execute_stage,
     read_cgroup_snapshot,
 )
+from .instance_projection import (
+    DeclaredInstanceProjection,
+    project_declared_instances,
+)
 
 STRUCTURAL_LEVELS = ("L0", "L1", "L2", "L3")
 FIXED_VARIANT = "full950-contributor-fixed"
@@ -233,12 +237,25 @@ def canonical_point_partition(
 ) -> tuple[tuple[str, int] | None, ...]:
     """Canonicalize instance IDs while retaining each instance class."""
 
+    partition, _projection = _canonical_point_partition(payload)
+    return partition
+
+
+def _canonical_point_partition(
+    payload: Mapping[str, Any],
+) -> tuple[
+    tuple[tuple[str, int] | None, ...],
+    DeclaredInstanceProjection,
+]:
+    """Build a partition plus the explicit declared-instance projection."""
+
     raw_labels = payload.get("point_labels")
     raw_instances = payload.get("instances")
     if not isinstance(raw_labels, list) or not isinstance(raw_instances, Mapping):
         raise TypeError("prediction is missing point_labels/instances")
+    projection = project_declared_instances(raw_labels, raw_instances)
     members: dict[int, list[int]] = {}
-    for index, raw in enumerate(raw_labels):
+    for index, raw in enumerate(projection.point_labels):
         value = int(raw)
         if value >= 0:
             members.setdefault(value, []).append(index)
@@ -255,12 +272,12 @@ def canonical_point_partition(
     for rank, (class_name, indices, _raw_id) in enumerate(records):
         for index in indices:
             canonical[index] = (class_name, rank)
-    return tuple(canonical)
+    return tuple(canonical), projection
 
 
 def compare_partitions(left_path: Path, right_path: Path) -> dict[str, Any]:
-    left = canonical_point_partition(_load_output(left_path))
-    right = canonical_point_partition(_load_output(right_path))
+    left, left_projection = _canonical_point_partition(_load_output(left_path))
+    right, right_projection = _canonical_point_partition(_load_output(right_path))
     if len(left) != len(right):
         raise ValueError("prediction point counts differ")
     changed = sum(a != b for a, b in zip(left, right))
@@ -271,6 +288,8 @@ def compare_partitions(left_path: Path, right_path: Path) -> dict[str, Any]:
         "changed_points": changed,
         "changed_fraction": changed / max(len(left), 1),
         "equivalent": changed == 0,
+        "left_projection": left_projection.stats(),
+        "right_projection": right_projection.stats(),
     }
 
 

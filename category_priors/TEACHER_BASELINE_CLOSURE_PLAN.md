@@ -76,7 +76,7 @@ socket book remote key
 
 - `H-literal/B0,B1`：在 `scene0064_01` 原样运行 `bfc2192` 的 adaptive CLI。该脚本的
   `args` 位于模块全局作用域，`training()` 可以合法读取它；先前预注册的 NameError 判断错误。
-- `H-args-only/B0,B1`：仅把模块全局 CLI `args` 显式传入训练函数，作为预期逐点等价的
+- `H-args-only/B0,B1`：仅把模块全局 CLI `args` 显式传入训练函数，作为源码语义等价的
   plumbing 负控；保留错误的
   feature 归一化维度和未同步的 mask/label 排序。
 - `H-args-norm/B0,B1`：在 args-only 上再加入 feature-channel `dim=-1` 修复。
@@ -132,9 +132,12 @@ socket book remote key
 ## 预注册归因
 
 - harness 与 `R-fixed/L0` 不等价：机械复现失败，停止。
-- literal 与 args-only 必须先作为隐式/显式参数传递的机械等价检查；args-norm、full950 的
-  逐级变化再分别归因 distance regularizer 归一化与 semantic supervision 对齐。不得把
-  它们合称为类别先验收益。
+- literal 与 args-only 只用于确认隐式/显式参数传递的源码语义等价。它们各自重新训练
+  CUDA feature，实测 feature 高度相关但不逐字节相同，因此不得把两次独立训练所得输出的
+  微小差值归因于 `args` 传递，也不以逐点完全相同作为停止门槛。args-norm、full950 的逐级
+  结果分别描述 distance regularizer 归一化与 semantic supervision 对齐，同时保留单次
+  训练/非确定性的限制；不得把它们合称为类别先验收益。严格逐点等价门槛只用于共享同一
+  冻结 feature 且固定随机种子的 `R-fixed` 与 current `L0`。
 - 某后处理阶段使 Gaussian precision 下降至少 5 个百分点或 unsupported 增加至少 5 个百分点，且 GT recall 增益不足 10 个百分点：确认该阶段造成污染。
 - 几何 IoU≥0.50 明显多于 same-class IoU≥0.50，或晚分类准确率低于 70%：确认语义/vote 是主要瓶颈。
 - B1 在 pre-KNN 有收益，但至少 50% 分支点或实例在 KNN/filter/vote 后丢失：确认老师分支被后续主干吞掉。
@@ -180,6 +183,7 @@ bfc18 资产，运行 historical/fixed B0/B1 与 10k 正控，再做 fixed-950 �
 - `category_priors/baseline_closure_evaluation.py`
 - `category_priors/baseline_closure_analysis.py`
 - `category_priors/baseline_closure_precision.py`
+- `category_priors/instance_projection.py`
 - `continue_teacher_baseline_closure.sh`
 
 扩展通过各 source 的局部 `PYTHONPATH` 加载，不安装或覆盖共享 Python 环境。机械等价失败
@@ -190,3 +194,21 @@ bfc18 资产，运行 historical/fixed B0/B1 与 10k 正控，再做 fixed-950 �
 首次 runner 人为加入 `--iterations 1`，在进入训练前触发了历史 argparse 的
 `invalid NoneType value`。该失败不属于老师基线；原失败记录保留为 harness 审计，但不进入
 条件矩阵。闭环已改为 literal adaptive 真运行；10k 只允许由上述独立 CLI 机械变体启动。
+
+### 输出实例声明投影（2026-08-24 审计补充）
+
+老师原 `postprocess.py` 先生成全部内部簇的 `point_labels`，随后只按
+`selected_classes` 过滤 `instances` metadata，却没有同步把被过滤簇的点标签改回背景。
+因此原始 `output.json` 中可以保留“非负 label ID 存在、但 `instances` 未声明”的内部
+orphan 簇。本闭环按最终导出语义处理：
+
+- 原始 JSON 永远保留，不回写、不伪装修复后的老师输出；
+- 评价、Gaussian 精度和机械 partition 比较共用一个只读投影：未声明非负 ID 映射为 `-1`；
+- 官方 AP 原本就只遍历 `instances` 中声明的实例，所以该投影不改变已声明预测 mask 或 AP；
+- Gaussian precision 仍是“已导出实例条件下的精度”，orphan 不冒充 FP，但必须另外报告
+  orphan ID、Gaussian 数量和比例，量化后处理过滤掉的内部支持；
+- `mapped_fraction` 仅表示几何近邻可映射率，不能再当作有效预测覆盖；另报
+  `gt_nearest_declared_fraction`。
+
+这是原始输出序列化与诊断语义不一致的 P1 问题，不是现有官方 AP 算法被污染。严格 L0
+机械等价比较只比较最终声明实例；左右两侧的 orphan 统计同时写入产物，避免静默隐藏。

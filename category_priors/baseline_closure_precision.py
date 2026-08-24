@@ -24,6 +24,7 @@ from .gaussian_object_audit import (
     evaluate_gaussian_object_precision,
 )
 from .io import load_json, write_json, write_rows
+from .instance_projection import project_declared_instances
 from .taxonomy import Taxonomy, load_taxonomy
 
 AUDIT_RADII_M = (0.02, 0.05, 0.10)
@@ -50,6 +51,7 @@ def evaluate_teacher_handoff_precision(
     viewer_audits: dict[tuple[str, str], dict[str, Any]] = {}
     point_labels: dict[tuple[str, str], np.ndarray] = {}
     condition_rows: dict[tuple[str, str, str, float], list[dict[str, Any]]] = {}
+    projection_runs: list[dict[str, Any]] = []
 
     for variant_id, budget, condition, scene_id, output_json in output_runs:
         if scene_id not in runtime:
@@ -68,12 +70,26 @@ def evaluate_teacher_handoff_precision(
             )
         gt_xyz, gt_semantic, gt_instance, gaussian_xyz = scene_arrays[scene_id]
         output = load_json(output_json)
-        labels = np.asarray(output["point_labels"], dtype=np.int64)
+        projection = project_declared_instances(
+            output["point_labels"], output.get("instances", {})
+        )
+        labels = projection.point_labels
         if labels.shape != (len(gaussian_xyz),):
             raise ValueError(
                 f"{output_json}: point_labels length differs from Gaussian PLY"
             )
         label = f"{variant_id}/{budget}/{condition}"
+        projection_runs.append(
+            {
+                "variant_id": variant_id,
+                "budget": budget,
+                "condition": condition,
+                "condition_label": label,
+                "scene_id": scene_id,
+                "output_json": str(output_json),
+                **projection.stats(),
+            }
+        )
         for radius_m in AUDIT_RADII_M:
             audit = evaluate_gaussian_object_precision(
                 gaussian_xyz,
@@ -153,8 +169,17 @@ def evaluate_teacher_handoff_precision(
         "direction": "predicted Gaussian to nearest ScanNet GT point",
         "radii_m": list(AUDIT_RADII_M),
         "unsupported_gaussians_count_as_false_positive": True,
+        "orphan_gaussians_count_as_predictions": False,
         "official_ap_unchanged": True,
         "two_dimensional_metrics": False,
+        "declared_instance_projection": {
+            "semantics": (
+                "non-negative point labels absent from instances metadata are "
+                "reported and projected to background without changing output.json"
+            ),
+            "orphan_gaussians_count_as_predictions": False,
+            "runs": projection_runs,
+        },
         "summaries": summaries,
         "viewer": {
             "qualitative_only": True,

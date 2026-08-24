@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 
 from .io import hash_json, load_json, sha256_file, write_json
+from .instance_projection import project_declared_instances
 from .taxonomy import Taxonomy
 
 OVERLAPS = tuple(np.arange(0.50, 0.96, 0.05).round(2).tolist())
@@ -112,16 +113,24 @@ def saga_scene_predictions(
     require_scores: bool = True,
 ) -> tuple[list[PredictedInstance], dict[str, float]]:
     output = load_json(output_json)
-    gaussian_labels = np.asarray(output["point_labels"], dtype=np.int64)
+    output_instances = output.get("instances", {})
+    projection = project_declared_instances(
+        output["point_labels"], output_instances
+    )
+    gaussian_labels = projection.point_labels
     gaussian_coords = apply_transform(load_ply_xyz(gaussian_ply), transform)
     mapped_labels, diagnostics = map_gaussians_to_gt(
         gt_coords, gaussian_coords, gaussian_labels, radius_m
+    )
+    diagnostics.update(projection.numeric_stats())
+    diagnostics["gt_nearest_declared_fraction"] = (
+        float(np.mean(mapped_labels >= 0)) if len(mapped_labels) else 0.0
     )
     metadata = load_json(metadata_json) if metadata_json else {"instances": {}}
     metadata_instances = metadata.get("instances", {})
     class_to_id = {name: index for index, name in enumerate(taxonomy.canonical_classes)}
     predictions: list[PredictedInstance] = []
-    for raw_instance_id, properties in output.get("instances", {}).items():
+    for raw_instance_id, properties in output_instances.items():
         instance_id = int(raw_instance_id)
         class_name = str(properties.get("class", "")).strip().lower()
         if class_name not in class_to_id:

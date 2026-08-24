@@ -128,6 +128,24 @@ def test_partition_comparison_detects_class_or_membership_change(
     assert comparison["changed_points"] == 2
 
 
-def test_canonical_partition_rejects_missing_metadata() -> None:
-    with pytest.raises(TypeError, match="no class metadata"):
-        canonical_point_partition({"point_labels": [2], "instances": {}})
+def test_canonical_partition_projects_orphan_ids_to_background() -> None:
+    assert canonical_point_partition(
+        {"point_labels": [2, -1], "instances": {}}
+    ) == (None, None)
+
+
+def test_partition_comparison_exposes_orphan_projection_stats(tmp_path: Path) -> None:
+    left_path = tmp_path / "left.json"
+    right_path = tmp_path / "right.json"
+    payload = {
+        "point_labels": [4, 9, -1],
+        "instances": {"4": {"class": "book"}},
+    }
+    left_path.write_text(json.dumps(payload), encoding="utf-8")
+    right_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    comparison = compare_partitions(left_path, right_path)
+
+    assert comparison["equivalent"] is True
+    assert comparison["left_projection"]["orphan_instance_ids"] == [9]
+    assert comparison["left_projection"]["orphan_gaussian_count"] == 1

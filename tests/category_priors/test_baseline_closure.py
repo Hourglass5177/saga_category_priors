@@ -373,6 +373,9 @@ def test_feature_and_output_completeness_validate_point_count(
     )
     assert output_is_complete(scene, output, TAXONOMIES["bfc18"])
     payload = json.loads(output.output_json.read_text(encoding="utf-8"))
+    payload["point_labels"] = [0, 7, -1]
+    output.output_json.write_text(json.dumps(payload), encoding="utf-8")
+    assert output_is_complete(scene, output, TAXONOMIES["bfc18"])
     payload["point_labels"] = [0]
     output.output_json.write_text(json.dumps(payload), encoding="utf-8")
     assert not output_is_complete(scene, output, TAXONOMIES["bfc18"])
