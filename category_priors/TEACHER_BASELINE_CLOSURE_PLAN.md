@@ -219,3 +219,26 @@ vote 误胜为某个 `selected_class` 时，`instances["-1"]` 会被写出（`sc
 该 metadata，会把全部背景错误构造成一个超大实例，污染 AP 与 Gaussian 精度。因此闭环
 统一只读忽略所有负 metadata ID，并在 projection stats 中报告其 ID 和数量；raw JSON 仍
 保持不变。这是老师后处理输出与旧评价适配器共同暴露的 P0 基线闭环错误。
+
+### 2026-08-24 实际机械终止结果
+
+负 metadata 修复后的闭环代码为 `bc0fdb0909cee7de5817ad8db99b2de020d6e76e`，本地
+`tests/category_priors` 为 `225 passed, 1 skipped`。云端直接复用了 32 份完整输出，没有
+重跑已经完成的后处理。扫描结果如下：
+
+- 32 份输出中有 14 份含 `instances["-1"]`，全部来自 `scene0064_01` 的历史/修正
+  contributor 条件；
+- 未声明非负 orphan Gaussian 比例在全部输出中为 `26.683%–68.067%`，均值
+  `42.299%`；
+- `full950 historical → contributor-fixed` 在 `scene0025_01` 实际改变 B0 的
+  `143,036/1,459,291=9.802%` 点、B1 的 `78,843/1,459,291=5.403%` 点；其余两场
+  B0/B1 逐点等价，说明 contributor 修复是场景相关的真实干预；
+- 共享冻结 feature 的 `R-fixed → current-L0` 六组机械对照中五组逐点等价：三个 B0
+  全部等价，B1 的 `scene0064_01`、`scene0231_00` 等价；
+- 唯一失败项为 `scene0025_01/B1-original`：规范化实例 ID 后仍有
+  `370,226/1,459,291=25.370%` 点不同，R-fixed/current-L0 分别声明 16/15 个实例。
+
+因此严格触发 `stopped-current-harness-parity-failed`。不得运行或解释 L1/L2/L3，也不得
+用这些结果评价类别先验。当前可下的结论是：老师交付 B1 的 current harness 复现未闭合，
+且原始导出/旧评价还存在负背景实例和大规模 orphan 两类协议错误；这证明原始自动基线本身
+不健康，但没有检验、更没有证伪类别先验。
