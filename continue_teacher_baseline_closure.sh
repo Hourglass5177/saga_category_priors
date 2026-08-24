@@ -11,6 +11,7 @@ CLOSURE_ROOT="${SAGA_BASELINE_RUN_ROOT:-/root/autodl-tmp/saga/runs/teacher-basel
 ARTIFACT_ROOT="${SAGA_BASELINE_ARTIFACT_ROOT:-/root/autodl-tmp/saga/artifacts/teacher-baseline-closure}"
 SOURCE_ROOT="$WORK_ROOT/sources"
 PY="${SAGA_PYTHON:-/root/autodl-tmp/saga/conda/envs/saga/bin/python}"
+CUDA_HOME="${SAGA_CUDA_HOME:-/root/autodl-tmp/saga/conda/envs/saga}"
 RUNTIME_MANIFEST="${SAGA_RUNTIME_MANIFEST:-/root/autodl-tmp/saga/artifacts/category-priors-20260804/scene_runtime_manifest.json}"
 GT_DIR="${SAGA_GT_DIR:-/root/autodl-tmp/saga/artifacts/category-priors-20260804/gt_val_tune}"
 WEIGHT_ROOT="${SAGA_WEIGHT_ROOT:-/root/autodl-tmp/saga/workspace/saga/weights}"
@@ -22,6 +23,8 @@ export PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}"
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export CUDA_VISIBLE_DEVICES=0
+export CUDA_HOME
+export PATH="$CUDA_HOME/bin:$PATH"
 
 write_status() {
     local state="$1"
