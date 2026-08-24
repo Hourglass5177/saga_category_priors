@@ -992,5 +992,9 @@ V8 的实际停止结果：`S-AM` 两场 geometric greedy IoU≥.50 为 16 个�
 - [x] Git provenance、老师聊天、README、评估协议和三场资产范围完成只读审计。
 - [x] 冻结原始基线闭环设计与结论边界。
 - [x] 实现隔离 runner/evaluator、fixed contributor、L0 等价门槛、Gaussian 精度和 viewer。
-- [ ] commit/push，云端部署同 commit，启动三场闭环。
-- [ ] runner 健康后创建并核验绑定当前任务的每小时自动检查。
+- [x] commit/push，云端部署同 commit，启动三场闭环。
+- [x] runner 健康后创建并核验绑定当前任务的每小时自动检查。
+- [x] 运行时纠正错误预注册：`bfc2192` 的模块全局 `args` 合法，literal adaptive 应真运行；
+  首次 `--iterations 1` 失败是 harness 触发历史 NoneType CLI 缺陷，不属于老师基线。
+- [ ] 按纠正后的 literal/args-plumbing identity/args-norm/full950 adaptive 矩阵完成闭环；
+  10k 仅在独立 `full950-iterations-cli` 机械变体上与同源 adaptive 比较。

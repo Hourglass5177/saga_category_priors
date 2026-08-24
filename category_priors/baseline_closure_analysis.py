@@ -176,22 +176,23 @@ def _output_runs(closure_root: Path) -> Iterable[tuple[str, str, str, str, Path]
             ).output_json
             if path.is_file():
                 yield reported_variant, "adaptive", condition, scene_id, path
-    for condition in ("B0-global", "B1-original"):
-        path = output_paths(
-            closure_root,
-            "scene0064_01",
-            "full950-contributor-fixed",
-            "10000",
-            condition,
-        ).output_json
-        if path.is_file():
-            yield (
-                "full950-contributor-fixed",
-                "10000",
-                condition,
+    for budget in ("adaptive-iterations-cli", "10000"):
+        for condition in ("B0-global", "B1-original"):
+            path = output_paths(
+                closure_root,
                 "scene0064_01",
-                path,
-            )
+                "full950-contributor-fixed",
+                budget,
+                condition,
+            ).output_json
+            if path.is_file():
+                yield (
+                    "full950-contributor-fixed",
+                    budget,
+                    condition,
+                    "scene0064_01",
+                    path,
+                )
 
 
 def _metric_rows(
@@ -432,7 +433,7 @@ def evaluate_teacher_handoff(
         )
         feature_rows: list[dict[str, Any]] = []
         for spec in REGISTERED_RUNS:
-            if spec.expected_failure or scene_id not in spec.scene_ids:
+            if scene_id not in spec.scene_ids:
                 continue
             paths = feature_paths(
                 closure_root,

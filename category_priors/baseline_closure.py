@@ -95,7 +95,7 @@ class SourceVariantSpec:
     has_args_plumbing: bool
     normalized_feature_dim: bool
     sorted_semantic_masks: bool
-    expected_training_failure: str | None = None
+    integer_iteration_cli: bool = False
 
 
 @dataclass(frozen=True)
@@ -104,7 +104,6 @@ class RunSpec:
     budget: str
     scene_ids: tuple[str, ...]
     conditions: tuple[str, ...]
-    expected_failure: bool = False
 
 
 @dataclass(frozen=True)
@@ -193,7 +192,6 @@ SOURCE_VARIANTS: Mapping[str, SourceVariantSpec] = {
         has_args_plumbing=False,
         normalized_feature_dim=False,
         sorted_semantic_masks=False,
-        expected_training_failure="NameError: name 'args' is not defined",
     ),
     "args-only": SourceVariantSpec(
         variant_id="args-only",
@@ -222,6 +220,16 @@ SOURCE_VARIANTS: Mapping[str, SourceVariantSpec] = {
         normalized_feature_dim=True,
         sorted_semantic_masks=True,
     ),
+    "full950-iterations-cli": SourceVariantSpec(
+        variant_id="full950-iterations-cli",
+        base_commit=FULL950_COMMIT,
+        patch_set="iterations-none-to-zero",
+        exact_commit=None,
+        has_args_plumbing=True,
+        normalized_feature_dim=True,
+        sorted_semantic_masks=True,
+        integer_iteration_cli=True,
+    ),
     "tip8c": SourceVariantSpec(
         variant_id="tip8c",
         base_commit=PRIMARY_COMMIT,
@@ -238,10 +246,9 @@ SOURCE_VARIANTS: Mapping[str, SourceVariantSpec] = {
 REGISTERED_RUNS = (
     RunSpec(
         variant_id="literal-bfc",
-        budget="smoke-1",
+        budget="adaptive",
         scene_ids=("scene0064_01",),
-        conditions=(),
-        expected_failure=True,
+        conditions=("B0-global", "B1-original"),
     ),
     RunSpec(
         variant_id="args-only",
@@ -262,7 +269,13 @@ REGISTERED_RUNS = (
         conditions=("B0-global", "B1-original"),
     ),
     RunSpec(
-        variant_id="full950",
+        variant_id="full950-iterations-cli",
+        budget="adaptive",
+        scene_ids=("scene0064_01",),
+        conditions=("B0-global", "B1-original"),
+    ),
+    RunSpec(
+        variant_id="full950-iterations-cli",
         budget="10000",
         scene_ids=("scene0064_01",),
         conditions=("B0-global", "B1-original"),
@@ -610,7 +623,7 @@ def validate_source_workspace(workspace: SourceWorkspace) -> None:
         )
     text = (workspace.root / "train_contrastive_feature.py").read_text(encoding="utf-8")
     if (
-        workspace.variant_id in {"full950", "tip8c"}
+        workspace.variant_id in {"full950", "full950-iterations-cli", "tip8c"}
         and not (workspace.root / "utils/resource_exit.py").is_file()
     ):
         raise FileNotFoundError(
@@ -629,6 +642,13 @@ def validate_source_workspace(workspace: SourceWorkspace) -> None:
         raise ValueError(
             f"{workspace.variant_id} source sentinels are {observed}, expected {expected}"
         )
+    arguments = workspace.root / "arguments/__init__.py"
+    if spec.integer_iteration_cli:
+        argument_text = arguments.read_text(encoding="utf-8")
+        if "self.iterations = 0" not in argument_text:
+            raise ValueError(
+                f"{workspace.variant_id} is missing the integer iterations CLI repair"
+            )
 
 
 def assert_isolated_output(

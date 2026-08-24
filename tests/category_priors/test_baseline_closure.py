@@ -33,7 +33,6 @@ from category_priors.baseline_closure_runner import (
     build_postprocess_invocation,
     build_train_invocation,
     execute_stage,
-    expected_failure_is_complete,
     validate_cgroup,
 )
 
@@ -76,11 +75,13 @@ def test_registered_closeout_is_bfc_primary_and_tip28_is_not_run() -> None:
         "args-only",
         "args-norm",
         "full950",
+        "full950-iterations-cli",
     }
     assert all(run.variant_id != "tip8c" for run in REGISTERED_RUNS)
     literal = REGISTERED_RUNS[0]
     assert literal.scene_ids == ("scene0064_01",)
-    assert literal.expected_failure
+    assert literal.budget == "adaptive"
+    assert literal.conditions == ("B0-global", "B1-original")
     full_adaptive = next(
         run
         for run in REGISTERED_RUNS
@@ -88,13 +89,14 @@ def test_registered_closeout_is_bfc_primary_and_tip28_is_not_run() -> None:
     )
     assert full_adaptive.scene_ids == CLOSURE_SCENES
     full_10k = next(run for run in REGISTERED_RUNS if run.budget == "10000")
+    assert full_10k.variant_id == "full950-iterations-cli"
     assert full_10k.scene_ids == ("scene0064_01",)
 
 
 def test_paths_keep_assets_features_and_outputs_disjoint(tmp_path: Path) -> None:
     assets = asset_paths(tmp_path, "scene0064_01")
     adaptive = feature_paths(tmp_path, "scene0064_01", "full950", "adaptive")
-    control = feature_paths(tmp_path, "scene0064_01", "full950", "10000")
+    control = feature_paths(tmp_path, "scene0064_01", "full950-iterations-cli", "10000")
     b0 = output_paths(tmp_path, "scene0064_01", "full950", "adaptive", "B0-global")
     b1 = output_paths(tmp_path, "scene0064_01", "full950", "adaptive", "B1-original")
     assert assets.root == tmp_path / "assets/bfc18/scene0064_01"
@@ -176,10 +178,18 @@ def test_teacher_scene_point_cloud_name_takes_priority(tmp_path: Path) -> None:
 def test_commands_freeze_taxonomy_budget_and_b0_b1_difference(tmp_path: Path) -> None:
     scene = _scene(tmp_path)
     workspace = SourceWorkspace("full950", tmp_path / "full950")
+    budget_workspace = SourceWorkspace(
+        "full950-iterations-cli", tmp_path / "full950-iterations-cli"
+    )
     taxonomy = TAXONOMIES["bfc18"]
     assets = asset_paths(tmp_path / "runs", scene.scene_id)
     adaptive = feature_paths(tmp_path / "runs", scene.scene_id, "full950", "adaptive")
-    control = feature_paths(tmp_path / "runs", scene.scene_id, "full950", "10000")
+    control = feature_paths(
+        tmp_path / "runs",
+        scene.scene_id,
+        "full950-iterations-cli",
+        "10000",
+    )
     masks = build_masks_invocation(
         scene,
         assets,
@@ -196,11 +206,13 @@ def test_commands_freeze_taxonomy_budget_and_b0_b1_difference(tmp_path: Path) ->
         scene, assets, adaptive, workspace, budget="adaptive"
     )
     control_train = build_train_invocation(
-        scene, assets, control, workspace, budget="10000"
+        scene, assets, control, budget_workspace, budget="10000"
     )
     assert "--iterations" not in adaptive_train.command
     iteration_index = control_train.command.index("--iterations")
     assert control_train.command[iteration_index + 1] == "10000"
+    with pytest.raises(ValueError, match="integer iterations CLI"):
+        build_train_invocation(scene, assets, control, workspace, budget="10000")
 
     b0_paths = output_paths(
         tmp_path / "runs", scene.scene_id, "full950", "adaptive", "B0-global"
@@ -243,6 +255,7 @@ def test_commands_freeze_taxonomy_budget_and_b0_b1_difference(tmp_path: Path) ->
         ("args-only", True, False, False),
         ("args-norm", True, True, False),
         ("full950", True, True, True),
+        ("full950-iterations-cli", True, True, True),
     ),
 )
 def test_source_variant_sentinels(
@@ -250,9 +263,14 @@ def test_source_variant_sentinels(
 ) -> None:
     root = tmp_path / variant
     root.mkdir()
-    if variant == "full950":
+    if variant in {"full950", "full950-iterations-cli"}:
         (root / "utils").mkdir()
         (root / "utils/resource_exit.py").write_text("# present\n", encoding="utf-8")
+    if variant == "full950-iterations-cli":
+        (root / "arguments").mkdir()
+        (root / "arguments/__init__.py").write_text(
+            "self.iterations = 0\n", encoding="utf-8"
+        )
     for name in ("grounded_SAM_masks.py", "get_scale.py", "postprocess.py"):
         (root / name).write_text("# present\n", encoding="utf-8")
     lines = []
@@ -386,48 +404,6 @@ def test_execute_stage_skips_complete_and_reruns_damaged(tmp_path: Path) -> None
     )
     assert completed["status"] == "completed"
     assert state["calls"] == 1
-
-
-def test_literal_failure_smoke_is_recorded_and_then_reused(tmp_path: Path) -> None:
-    scene = _scene(tmp_path)
-    workspace = SourceWorkspace("literal-bfc", tmp_path / "literal")
-    assets = asset_paths(tmp_path / "runs", scene.scene_id)
-    features = feature_paths(
-        tmp_path / "runs", scene.scene_id, "literal-bfc", "smoke-1"
-    )
-    invocation = build_train_invocation(
-        scene, assets, features, workspace, budget="smoke-1", expected_failure=True
-    )
-    calls = 0
-
-    def executor(current) -> int:
-        nonlocal calls
-        calls += 1
-        current.log_path.parent.mkdir(parents=True, exist_ok=True)
-        with current.log_path.open("a", encoding="utf-8") as log:
-            log.write("NameError: name 'args' is not defined\n")
-        return 1
-
-    result = execute_stage(
-        invocation,
-        is_complete=lambda: expected_failure_is_complete(invocation),
-        executor=executor,
-    )
-    assert result["status"] == "expected-failure"
-    assert expected_failure_is_complete(invocation)
-    execute_stage(
-        invocation,
-        is_complete=lambda: expected_failure_is_complete(invocation),
-        executor=executor,
-    )
-    assert calls == 1
-    invocation.expected_failure_record.write_text("{broken", encoding="utf-8")
-    execute_stage(
-        invocation,
-        is_complete=lambda: expected_failure_is_complete(invocation),
-        executor=executor,
-    )
-    assert calls == 2
 
 
 def test_cgroup_guard_reads_only_90_gib_contract(tmp_path: Path) -> None:

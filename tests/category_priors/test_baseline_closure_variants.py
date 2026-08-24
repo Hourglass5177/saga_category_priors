@@ -19,7 +19,7 @@ def _source() -> str:
     return f"{ARGS_SIGNATURE_OLD}\n{NORMALIZE_OLD}\n{ARGS_CALL_OLD}"
 
 
-def test_args_only_changes_only_executability() -> None:
+def test_args_only_changes_only_implicit_to_explicit_plumbing() -> None:
     repaired = repair_training_source(_source(), "args-only")
     assert ARGS_SIGNATURE_OLD not in repaired
     assert ARGS_CALL_OLD not in repaired

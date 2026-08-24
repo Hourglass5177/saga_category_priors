@@ -109,6 +109,7 @@ LITERAL_ROOT="$SOURCE_ROOT/literal-bfc"
 FULL950_ROOT="$SOURCE_ROOT/full950"
 ARGS_ONLY_ROOT="$SOURCE_ROOT/args-only"
 ARGS_NORM_ROOT="$SOURCE_ROOT/args-norm"
+ITERATIONS_CLI_ROOT="$SOURCE_ROOT/full950-iterations-cli"
 FIXED_ROOT="$SOURCE_ROOT/full950-contributor-fixed"
 
 export_commit bfc21922384cc991a71b5e51429354b5d6b06375 "$LITERAL_ROOT"
@@ -131,6 +132,13 @@ find "$ARGS_NORM_ROOT/submodules/diff-gaussian-rasterization-max-contributor" \
     -name '_C*.so' -print -quit | grep -q .
 build_contributor_extension "$FULL950_ROOT"
 
+if [[ ! -d "$ITERATIONS_CLI_ROOT" ]]; then
+    "$PY" -m category_priors.baseline_closure_budget \
+        --full950-root "$FULL950_ROOT" \
+        --output-root "$ITERATIONS_CLI_ROOT"
+fi
+test -f "$ITERATIONS_CLI_ROOT/BASELINE_VARIANT.json"
+
 if [[ ! -d "$FIXED_ROOT" ]]; then
     "$PY" -m category_priors.baseline_closure_contributor \
         --full950-root "$FULL950_ROOT" \
@@ -145,7 +153,8 @@ cat > "$ARTIFACT_ROOT/workspace_manifest.json" <<EOF
     "literal-bfc": "$LITERAL_ROOT",
     "args-only": "$ARGS_ONLY_ROOT",
     "args-norm": "$ARGS_NORM_ROOT",
-    "full950": "$FULL950_ROOT"
+    "full950": "$FULL950_ROOT",
+    "full950-iterations-cli": "$ITERATIONS_CLI_ROOT"
   }
 }
 EOF

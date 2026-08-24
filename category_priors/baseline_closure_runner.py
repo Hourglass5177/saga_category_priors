@@ -58,8 +58,6 @@ class StageInvocation:
     command: tuple[str, ...]
     cwd: Path
     log_path: Path
-    expected_failure_pattern: str | None = None
-    expected_failure_record: Path | None = None
 
 
 Executor = Callable[[StageInvocation], int]
@@ -176,7 +174,6 @@ def build_train_invocation(
     workspace: SourceWorkspace,
     *,
     budget: str,
-    expected_failure: bool = False,
 ) -> StageInvocation:
     command = [
         str(scene.python_bin),
@@ -192,13 +189,13 @@ def build_train_invocation(
         "1000",
     ]
     if budget == "10000":
+        if workspace.variant_id != "full950-iterations-cli":
+            raise ValueError(
+                "the 10k control requires the registered integer iterations CLI variant"
+            )
         command.extend(("--iterations", "10000"))
-    elif budget == "smoke-1":
-        command.extend(("--iterations", "1"))
     elif budget != "adaptive":
         raise ValueError(f"unknown feature budget: {budget}")
-    variant = SOURCE_VARIANTS[workspace.variant_id]
-    expected_pattern = variant.expected_training_failure if expected_failure else None
     return StageInvocation(
         stage="train",
         scene_id=scene.scene_id,
@@ -208,10 +205,6 @@ def build_train_invocation(
         command=tuple(command),
         cwd=workspace.root,
         log_path=features.root / "train.log",
-        expected_failure_pattern=expected_pattern,
-        expected_failure_record=(features.root / "expected_failure.json")
-        if expected_failure
-        else None,
     )
 
 
@@ -263,31 +256,6 @@ def build_postprocess_invocation(
     )
 
 
-def expected_failure_is_complete(invocation: StageInvocation) -> bool:
-    record = invocation.expected_failure_record
-    pattern = invocation.expected_failure_pattern
-    if (
-        record is None
-        or pattern is None
-        or not record.is_file()
-        or not invocation.log_path.is_file()
-    ):
-        return False
-    try:
-        payload = json.loads(record.read_text(encoding="utf-8"))
-        return bool(
-            payload.get("schema") == "saga-baseline-expected-failure-v1"
-            and payload.get("scene_id") == invocation.scene_id
-            and payload.get("variant_id") == invocation.variant_id
-            and payload.get("budget") == invocation.budget
-            and int(payload.get("returncode", 0)) != 0
-            and payload.get("expected_error") == pattern
-            and payload.get("matched") is True
-        )
-    except (OSError, ValueError, TypeError, json.JSONDecodeError):
-        return False
-
-
 def _default_executor(invocation: StageInvocation) -> int:
     invocation.log_path.parent.mkdir(parents=True, exist_ok=True)
     environment = os.environ.copy()
@@ -325,46 +293,9 @@ def execute_stage(
             "command": list(invocation.command),
         }
     invocation.log_path.parent.mkdir(parents=True, exist_ok=True)
-    before = invocation.log_path.stat().st_size if invocation.log_path.is_file() else 0
     started = time.monotonic()
     returncode = int(executor(invocation))
     seconds = float(time.monotonic() - started)
-    if invocation.expected_failure_pattern is not None:
-        try:
-            with invocation.log_path.open("rb") as handle:
-                handle.seek(before)
-                current_log = handle.read().decode("utf-8", errors="replace")
-        except OSError:
-            current_log = ""
-        matched = invocation.expected_failure_pattern in current_log
-        record = {
-            "schema": "saga-baseline-expected-failure-v1",
-            "scene_id": invocation.scene_id,
-            "variant_id": invocation.variant_id,
-            "budget": invocation.budget,
-            "returncode": returncode,
-            "expected_error": invocation.expected_failure_pattern,
-            "matched": matched,
-            "command": list(invocation.command),
-            "runtime_seconds": seconds,
-        }
-        if invocation.expected_failure_record is None:
-            raise AssertionError("expected failure invocation has no record path")
-        invocation.expected_failure_record.parent.mkdir(parents=True, exist_ok=True)
-        invocation.expected_failure_record.write_text(
-            json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
-        if returncode == 0 or not matched:
-            raise RuntimeError(
-                f"{invocation.variant_id}/{invocation.scene_id} did not reproduce "
-                f"the registered literal-bfc failure; see {invocation.log_path}"
-            )
-        return {
-            "stage": invocation.stage,
-            "status": "expected-failure",
-            "seconds": seconds,
-            "command": list(invocation.command),
-        }
     if returncode != 0:
         raise RuntimeError(
             f"{invocation.stage} failed with exit {returncode}; see {invocation.log_path}"
@@ -464,28 +395,10 @@ def _run_registered_spec(
             features,
             workspace,
             budget=spec.budget,
-            expected_failure=spec.expected_failure,
         )
         _ensure_stage_parents(invocation)
         _assert_disk_floor(output_root, disk_floor_gib)
         validate_cgroup(cgroup_root)
-        if spec.expected_failure:
-            result = execute_stage(
-                invocation,
-                is_complete=lambda current=invocation: expected_failure_is_complete(
-                    current
-                ),
-                executor=executor,
-            )
-            records.append(
-                {
-                    **result,
-                    "scene_id": scene_id,
-                    "variant_id": spec.variant_id,
-                    "budget": spec.budget,
-                }
-            )
-            continue
         result = execute_stage(
             invocation,
             is_complete=lambda current_scene=scene, current_paths=features: (

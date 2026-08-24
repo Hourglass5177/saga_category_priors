@@ -63,7 +63,10 @@ socket book remote key
 同一套 handoff masks/scales 分别训练：
 
 - `adaptive`：源码原有的 `min(10 * camera_count, 10000)`；
-- `10k-control`：显式 10,000 轮，只作 feature-budget 正控。
+- `10k-control`：显式 10,000 轮，只作 feature-budget 正控。`bfc2192` 与
+  `95073c6` 把 `iterations=None` 注册成了不可解析的 `NoneType` CLI 参数，故该正控只能在
+  明确命名的 `full950-iterations-cli` 机械变体上运行；唯一修复是把 falsey 默认值从
+  `None` 改为整数 `0`。同一变体同时跑 adaptive 与 10k，避免把 CLI 修复混入预算差异。
 
 不重新训练 3DGS，不下载数据或权重。
 
@@ -71,9 +74,10 @@ socket book remote key
 
 ### A. 精确交付与训练修复
 
-- `H-literal`：在 `scene0064_01` 原样启动 `bfc2192` 训练。静态审计预期其因
-  `training()` 未接收 `args` 却读取 `args.progress_path` 而失败；只保存失败日志，不产生伪结果。
-- `H-args-only/B0,B1`：仅把 CLI `args` 传入训练函数，使 handoff 可执行；保留错误的
+- `H-literal/B0,B1`：在 `scene0064_01` 原样运行 `bfc2192` 的 adaptive CLI。该脚本的
+  `args` 位于模块全局作用域，`training()` 可以合法读取它；先前预注册的 NameError 判断错误。
+- `H-args-only/B0,B1`：仅把模块全局 CLI `args` 显式传入训练函数，作为预期逐点等价的
+  plumbing 负控；保留错误的
   feature 归一化维度和未同步的 mask/label 排序。
 - `H-args-norm/B0,B1`：在 args-only 上再加入 feature-channel `dim=-1` 修复。
 - `R-full950/B0,B1`：再加入 `masks[sort_indices]`，即 `95073c6` 的完整三项训练修复。
@@ -99,8 +103,8 @@ socket book remote key
 
 ### C. 10k 正控
 
-10k 只在相机数最少、adaptive 约 410 轮且 branch GT 最丰富的 `scene0064_01` 重跑
-`R-fixed/B0,B1`，
+10k 只在相机数最少、adaptive 约 410 轮且 branch GT 最丰富的 `scene0064_01`，使用同一
+`full950-iterations-cli` 源分别训练 adaptive 与 10k，再重跑 `R-fixed/B0,B1`，
 不重复整个结构消融网格。
 
 `8c5e167` 的 28 类/7 类版本本阶段不重新训练；它只作为“交付后扩类”的代码历史背景。若原始闭环后仍需评估扩类贡献，再另立计划。
@@ -128,8 +132,9 @@ socket book remote key
 ## 预注册归因
 
 - harness 与 `R-fixed/L0` 不等价：机械复现失败，停止。
-- args-only、args-norm、full950 的逐级变化用于分别归因可执行性、distance regularizer
-  归一化与 semantic supervision 对齐；不得把它们合称为类别先验收益。
+- literal 与 args-only 必须先作为隐式/显式参数传递的机械等价检查；args-norm、full950 的
+  逐级变化再分别归因 distance regularizer 归一化与 semantic supervision 对齐。不得把
+  它们合称为类别先验收益。
 - 某后处理阶段使 Gaussian precision 下降至少 5 个百分点或 unsupported 增加至少 5 个百分点，且 GT recall 增益不足 10 个百分点：确认该阶段造成污染。
 - 几何 IoU≥0.50 明显多于 same-class IoU≥0.50，或晚分类准确率低于 70%：确认语义/vote 是主要瓶颈。
 - B1 在 pre-KNN 有收益，但至少 50% 分支点或实例在 KNN/filter/vote 后丢失：确认老师分支被后续主干吞掉。
@@ -168,6 +173,7 @@ bfc18 资产，运行 historical/fixed B0/B1 与 10k 正控，再做 fixed-950 �
 
 - `category_priors/baseline_closure.py`
 - `category_priors/baseline_closure_variants.py`
+- `category_priors/baseline_closure_budget.py`
 - `category_priors/baseline_closure_contributor.py`
 - `category_priors/baseline_closure_runner.py`
 - `category_priors/baseline_closure_ablation.py`
@@ -178,3 +184,9 @@ bfc18 资产，运行 historical/fixed B0/B1 与 10k 正控，再做 fixed-950 �
 
 扩展通过各 source 的局部 `PYTHONPATH` 加载，不安装或覆盖共享 Python 环境。机械等价失败
 时 runner 以预注册复现失败状态停止，不解释 L1–L3 的 AP。
+
+### 2026-08-24 运行时纠错
+
+首次 runner 人为加入 `--iterations 1`，在进入训练前触发了历史 argparse 的
+`invalid NoneType value`。该失败不属于老师基线；原失败记录保留为 harness 审计，但不进入
+条件矩阵。闭环已改为 literal adaptive 真运行；10k 只允许由上述独立 CLI 机械变体启动。

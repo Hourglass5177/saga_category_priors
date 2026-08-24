@@ -72,8 +72,16 @@ def _common_args(
     scene: RuntimeScene, closure_root: Path, *, feature_budget: str
 ) -> list[str]:
     assets = asset_paths(closure_root, scene.scene_id, "bfc18")
+    feature_variant = (
+        "full950-iterations-cli"
+        if feature_budget in {"adaptive-iterations-cli", "10000"}
+        else "full950"
+    )
+    source_budget = (
+        "adaptive" if feature_budget == "adaptive-iterations-cli" else feature_budget
+    )
     features = feature_paths(
-        closure_root, scene.scene_id, "full950", feature_budget, "bfc18"
+        closure_root, scene.scene_id, feature_variant, source_budget, "bfc18"
     )
     return [
         "--sh_degree",
@@ -323,15 +331,31 @@ def run_ablation_closeout(
         if not feature_is_complete(scene, features):
             raise RuntimeError(f"full950/adaptive feature is incomplete: {scene_id}")
         fixed_budgets = (
-            ("adaptive", "10000") if scene_id == "scene0064_01" else ("adaptive",)
+            ("adaptive", "adaptive-iterations-cli", "10000")
+            if scene_id == "scene0064_01"
+            else ("adaptive",)
         )
         for fixed_budget in fixed_budgets:
+            feature_variant = (
+                "full950-iterations-cli"
+                if fixed_budget in {"adaptive-iterations-cli", "10000"}
+                else "full950"
+            )
+            source_budget = (
+                "adaptive"
+                if fixed_budget == "adaptive-iterations-cli"
+                else fixed_budget
+            )
             fixed_features = feature_paths(
-                closure_root, scene_id, "full950", fixed_budget, "bfc18"
+                closure_root,
+                scene_id,
+                feature_variant,
+                source_budget,
+                "bfc18",
             )
             if not feature_is_complete(scene, fixed_features):
                 raise RuntimeError(
-                    f"full950/{fixed_budget} feature is incomplete: {scene_id}"
+                    f"{feature_variant}/{source_budget} feature is incomplete: {scene_id}"
                 )
             for condition in ("B0-global", "B1-original"):
                 invocation = build_fixed_invocation(
