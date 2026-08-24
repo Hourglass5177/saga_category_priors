@@ -279,8 +279,21 @@ def test_official_parity_evidence_is_computed_from_registered_evaluator(
     )
 
     def fake_evaluate(_gt, predictions, _classes, **_kwargs):
-        aggregate = {"map_50_90": 0.5 if predictions[0] != "changed" else 0.4}
-        view = {"aggregate": aggregate}
+        changed = predictions[0] == "changed"
+        value = 0.4 if changed else 0.5
+        pred_instances = 2 if predictions[0] == "count-only" else 1
+        aggregate = {"map_50_90": value}
+        view = {
+            "aggregate": aggregate,
+            "per_class": {
+                "chair": {
+                    "ap_0.50": value,
+                    "ap_50_90": value,
+                    "gt_instances": 1,
+                    "pred_instances": pred_instances,
+                }
+            },
+        }
         return {
             "protocols": {
                 "scannet_official_9": {
@@ -309,8 +322,18 @@ def test_official_parity_evidence_is_computed_from_registered_evaluator(
         gt_dir=tmp_path,
         runtime_scene=scene,
     )
+    diagnostic_only = evaluate_official_parity(
+        scene_id="scene0000_00",
+        reference_output=tmp_path / "same.json",
+        candidate_output=tmp_path / "count-only.json",
+        gt_dir=tmp_path,
+        runtime_scene=scene,
+    )
     assert equal["evaluated"] is True and equal["equal"] is True
     assert unequal["equal"] is False
+    assert diagnostic_only["equal"] is True
+    assert diagnostic_only["metric_surface_equal"] is True
+    assert diagnostic_only["diagnostic_protocol_equal"] is False
     assert equal["protocol"] == "scannet-official-instance-9-v1"
 
 
