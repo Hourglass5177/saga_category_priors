@@ -37,6 +37,59 @@ def _registered_sam_directory_is_complete(
         return False
 
 
+def _registered_lifting_identity(
+    directory: Path,
+    *,
+    scene_id: str,
+    feature_ply: Path,
+    feature_record: Path,
+    label_features: Path,
+    segment_everything_root: Path,
+    classes: Sequence[str] = DEFAULT_CLASSES,
+    config: FragmentConfig = FragmentConfig(),
+) -> dict[str, Any] | None:
+    """Validate an immutable lifting artifact against its recorded producer.
+
+    A downstream ObjectBank consumer may have a newer commit than the lifting
+    producer.  Requiring those commits to match would recompute a complete
+    lifting bank after a downstream-only repair.  The producer commit remains
+    part of the frozen identity; every non-code input is rebuilt from the
+    current registered paths and must still match byte-for-byte metadata.
+    """
+
+    try:
+        metadata = load_json(Path(directory) / "lifting_bank.json")
+        identity = metadata.get("identity")
+        if not isinstance(identity, Mapping):
+            return None
+        producer_commit = str(identity.get("git_commit", "")).strip()
+        if not producer_commit:
+            return None
+        expected_identity = build_lifting_identity(
+            scene_id=scene_id,
+            git_commit=producer_commit,
+            feature_ply=feature_ply,
+            feature_record=feature_record,
+            label_features=label_features,
+            segment_everything_root=segment_everything_root,
+            classes=classes,
+            config=config,
+        )
+        if not lifting_bank_is_complete(
+            Path(directory),
+            expected_scene_id=scene_id,
+            expected_git_commit=producer_commit,
+            expected_identity=expected_identity,
+            expected_feature_record_identity=expected_identity[
+                "feature_record_identity"
+            ],
+        ):
+            return None
+        return dict(identity)
+    except (FileNotFoundError, OSError, ValueError, TypeError, KeyError):
+        return None
+
+
 def _run_logged(command: Sequence[str], *, cwd: Path, log_path: Path) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as log:
@@ -141,6 +194,23 @@ def run_v9_lifting_banks(
             )
         feature_ply = Path(feature_ply_by_scene[scene_id]).resolve()
         feature_record = feature_ply.parent / "train_10k.json"
+        registered_identity = _registered_lifting_identity(
+            target,
+            scene_id=scene_id,
+            feature_ply=feature_ply,
+            feature_record=feature_record,
+            label_features=Path(label_features),
+            segment_everything_root=sam_scene,
+        )
+        if registered_identity is not None:
+            records.append(
+                {
+                    "scene_id": scene_id,
+                    "status": "reused",
+                    "producer_git_commit": registered_identity["git_commit"],
+                }
+            )
+            continue
         expected_identity = build_lifting_identity(
             scene_id=scene_id,
             git_commit=git_commit,
@@ -157,7 +227,13 @@ def run_v9_lifting_banks(
             expected_git_commit=git_commit,
             expected_identity=expected_identity,
         ):
-            records.append({"scene_id": scene_id, "status": "reused"})
+            records.append(
+                {
+                    "scene_id": scene_id,
+                    "status": "reused",
+                    "producer_git_commit": git_commit,
+                }
+            )
             continue
         command = (
             str(python_bin),

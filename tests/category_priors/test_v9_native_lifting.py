@@ -30,6 +30,7 @@ from category_priors.v9_objectbank import (
     materialize_candidate_bank,
 )
 from category_priors.v9_lifting_runner import (
+    _registered_lifting_identity,
     _registered_sam_directory_is_complete,
     _run_logged,
 )
@@ -298,6 +299,32 @@ def test_native_bank_validation_accepts_complete_identified_bank(tmp_path) -> No
     assert lifting_bank_is_complete(
         tmp_path, expected_scene_id="scene", expected_git_commit="commit"
     )
+
+
+def test_downstream_consumer_reuses_registered_lifting_producer(tmp_path) -> None:
+    _write_native_bank(tmp_path)
+    identity = _registered_lifting_identity(
+        tmp_path,
+        scene_id="scene",
+        feature_ply=tmp_path / "feature.ply",
+        feature_record=tmp_path / "train_10k.json",
+        label_features=tmp_path / "labels.pt",
+        segment_everything_root=tmp_path / "sam",
+        classes=("chair",),
+    )
+    assert identity is not None
+    assert identity["git_commit"] == "commit"
+
+    (tmp_path / "feature.ply").write_bytes(b"changed producer input\n")
+    assert _registered_lifting_identity(
+        tmp_path,
+        scene_id="scene",
+        feature_ply=tmp_path / "feature.ply",
+        feature_record=tmp_path / "train_10k.json",
+        label_features=tmp_path / "labels.pt",
+        segment_everything_root=tmp_path / "sam",
+        classes=("chair",),
+    ) is None
 
 
 def test_lifting_strictly_reuses_registered_v8_masks_and_pins_feature_producer(
