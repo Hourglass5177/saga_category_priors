@@ -1,13 +1,13 @@
-# SAGA 类别先验与小物体保护实验计划（当前权威：V9）
+# SAGA 类别先验与小物体保护实验计划（当前权威：V10）
 
-> **权威状态：V8 已按第 20 节门槛停止；第 22 节 V9 法证闭环、Clean ObjectBank 与类别先验终局验证是当前唯一执行路径。** 旧 B2、class-first、
+> **权威状态：V9 已在类别先验介入前停止；第 23 节 V10 证据保真的多视角共识 ObjectBank 与类别先验终局验证是当前唯一执行路径。** 旧 B2、class-first、
 > prior-v2、teacher-preservation 和 selective-restore 文档与代码只作为失败审计记录，
 > 不得覆盖本文件的研究问题、条件定义、阶段门槛或结论边界。
 
-- 版本：V9.0
-- 冻结日期：2026-08-24
+- 版本：V10.0
+- 冻结日期：2026-08-25
 - V3 起点代码检查点：`f1367fa58c8f50df75f80b86f67bab469af06531`
-- 当前状态：**正在纠正 handoff provenance 与 parity comparator，并恢复 Legacy L0–L3 后进入独立 10k Clean ObjectBank**
+- 当前状态：**正在实现 V10 Stage 0–1：真实 edge/证据漏斗、P×R 因果闭环和 view-consensus ObjectBank**
 - 适用范围：现有 24 个 tune 场景、原 48 个内部评估场景及现有训练资产
 - 独立实验单位：physical scene
 - 技术重复：seed `42`、`3407`、`20260804`
@@ -1106,3 +1106,96 @@ size仅惩罚过大sorted extent；support用局部Gaussian密度和train-only�
   skip为本机缺少云端CUDA/Torch运行环境的条件测试）。
 - [ ] commit/push、云端部署并恢复Stage 0–1。
 - [ ] runner健康后创建并核验绑定当前任务ID的每小时自动化。
+
+### 22.8 V9 实际停止与结论纠正（2026-08-25）
+
+- T1 16/16、两场10k双源feature和两场S-AM lifting均完整；A0–A3两场全部完成。
+- geometric oracle为`16/38`个IoU≥.50，tiny/small Recall@.25=`0.954545`，证明输入
+  fragment-full支持充足；但A0–A3最终bank的geometric IoU≥.50均为0，类别先验未运行。
+- A0/A1/A2/A3记录的association pair precision约为`0.0506/0.0637/0.0636/0.0615`，
+  但后续静态复核发现A0/A2保存的是component代理边，不能把该数值直接解释为真实identity精度。
+- 进一步确认V9最终candidate完全丢弃成员fragment的`full_ids`，只保留consensus core与
+  全场halo；current overlap又是对小mask有利的containment，并会经全局连通传递放大假边。
+- 因此撤销“10k identity/tracker表示已被充分证实不足”的过早归因。V9只证明其具体
+  association/reconstruction实现失败；没有检验、更没有证伪类别先验。
+
+## 23. V10 当前权威计划：证据保真的多视角共识 ObjectBank
+
+### 23.1 唯一研究顺序
+
+V10先修正V9的真实edge评价与fragment-full证据重建，再以训练免费的多视角共识替换
+全场贪心连通；只有uniform bank健康后才运行类别先验。主比较固定为：
+
+1. `V10-U − B1-fixed`：对象主干是否健康；
+2. `V10-D − V10-U`：train-only类别统计是否带来额外收益。
+
+首轮只读复用`scene0645_00/scene0025_01`的完整S-AM lifting，不下载、不训练、不重做lifting。
+
+### 23.2 Stage 0：评价修正与完整漏斗
+
+评价必须分别保存single fragment full/core、component full/core union、冲突前后consensus、
+唯一归属和最终candidate。accepted edge必须是真实支持fragment pair；same-GT、different-GT、
+GT-unknown分开统计，并报告identifiable precision、all-edge precision和unknown rate。
+无GT映射的预测Gaussian以每点唯一sentinel计入诊断IoU的FP；官方ScanNet evaluator不变。
+
+归因门槛：full oracle为16而core oracle<6时归因core；component-full≥6而final<6时归因
+重建；component-full<6且identifiable edge precision<50%时归因关联；同帧多重声明>30%且
+冲突删除>50%正支持时归因层级mask替代假设处理。
+
+### 23.3 Stage 1A：P×R 两因素闭环
+
+两场运行`P0R0/P1R0/P0R1/P1R1`：P0为V9 containment；P1以逐Gaussian
+`p=clip(inside/visible,0,1)`计算双向coverage及其几何平均，要求共享≥3且两个方向≥.25。
+R0为V9 core+halo；R1只从成员fragment-full union重建，membership≥.40进入full、≥.60且
+至少两视角进入core；跨track最佳与第二名差<.10时保留背景，不向union外扩张。
+
+### 23.4 Stage 1B：最终 view-consensus
+
+- frame visible alpha mass的weighted Jaccard构造共视图；每帧top-8，取对称并集；
+- 每个共视frame pair对全部fragment运行Hungarian；仅保留mutual-best、双向coverage≥.25、
+  行列margin≥.10的匹配；
+- 双向coverage均≥.80的强边可形成两视角track，其他边必须属于三视图一致cycle；
+- component合并不得含同帧两个fragment，可比较跨component证据支持比例须≥.80；每次合并
+  后重算，不允许单条弱边桥接两个既有component；
+- 同帧层级mask是替代假设，不互记负冲突；最终full/core固定使用R1；禁止全场KNN、中心吸附、
+  迭代halo和affinity graph；类别在track冻结后才确定。
+
+进入8场景须同时满足：geometric IoU≥.50累计≥6、candidate precision@.25≥10%、
+official-valid tiny/small Recall@.25≥.20、identifiable association precision≥50%，且candidate
+数量≤P0R0的1.5倍。失败时必须生成`V10B_IDENTITY_TRAINING_PROPOSAL.md`并明确请求批准
+新的跨视角identity训练；停止当前计算不等于放弃后续。
+
+### 23.5 Stage 2：8场景uniform健康门槛
+
+沿用冻结DEV8。完整且身份一致的S-AM lifting直接复用，缺失时只补lifting。几何IoU≥.50
+须≥16/4场景、same-class≥12/4场景、precision@.25≥10%、tiny/small Recall@.25≥.20；
+Gaussian micro precision相对B1-fixed提高≥5pp或unsupported下降≥10pp；GT recall下降≤5pp；
+U000相对B1-fixed mAP≥-.001、AP50≥-.002、实例数≤1.25x；score-IoU Spearman≥.20，
+orphan与negative metadata均为0。失败则转入V10B审批，不运行prior。
+
+### 23.6 Stage 3–4：同bank先验与内部验证
+
+U000阈值只在两开发场景从`.05/.10/.15/.20/.25`选择并冻结。运行
+`U000/D100/D010/D001/D110/D101/D011/D111`；所有条件共享candidate/track/full/core/类别和
+`S=QGCB`结构，只切换global/class-shrunk统计。机械生效要求≥10%候选`|D-U|≥.01`或接受/
+所有权变化。best-D须ΔmAP≥.002，或tiny/small Recall@.50 +.01且ΔmAP≥-.0005；正向场景
+更多，FP/TP恶化≤20%。
+
+随后先验证五个canonical holdout，要求mean ΔmAP>0、至少3/5为正、小物指标为正；再按
+13个physical scenes等权汇总tune24，宏平均ΔmAP≥.002才进入final48。final每场一个确定性
+bank，只CPU replay U/best-D；10,000次physical-scene paired bootstrap，ΔmAP≥.002且95%CI
+下界>0才支持稳定有效。final不得调参。
+
+### 23.7 V10 当前执行检查点
+
+- [x] V9停止产物和代码路径完成只读复核；确认full证据丢失、containment假边、代理edge
+  diagnostics和A3无绝对affinity门槛。
+- [x] 用户确认V10计划和失败后的V10B审批边界。
+- [x] 实现独立V10 objectbank、真实accepted-edge/unknown-edge/八级漏斗评价、P×R因果臂、
+  VC1多视角共识、runner/replay、缺失场景lifting-only worker与四个CLI；DEV2的V9 lifting
+  只读复用，后续场景只允许用既有3DGS/feature/SAM资产补lifting，不调用训练或下载。
+- [x] 实现可恢复生产orchestrator、V9结论纠正产物、V10B失败升级文档和固定验收产物；
+  补齐注册回归测试并通过全部`tests/category_priors`（`398 passed, 1 skipped`；skip仍为
+  本地无云端CUDA/Torch条件）。
+- [ ] commit/push、云端部署、只读复用两场lifting并启动Stage 0–1。
+- [ ] runner健康后创建并回读核验绑定当前任务的每小时自动化；停止或完成后删除。

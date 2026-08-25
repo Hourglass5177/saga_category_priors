@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Small public CLI for the active SAGA baseline and V9 experiment.
+"""Small public CLI for the active SAGA baseline and V10 experiment.
 
 Retired B2/class-first/prior-v2/V3-V6 experiment entry points intentionally do
 not live here; their exact implementations remain available through Git.
@@ -34,6 +34,9 @@ from .v9_runner import (
     run_v9_banks,
 )
 from .v9_metrics import evaluate_v9_candidate_banks, evaluate_v9_predictions
+from .v10_evaluation import audit_v10_associations, evaluate_v10_replays
+from .v10_replay import V10_CLASSIFIERS, V10_PRIOR_CONDITIONS, replay_v10_priors
+from .v10_runner import V10_STRUCTURE_CONDITIONS, run_v10_banks
 
 
 def _fit(args: argparse.Namespace) -> None:
@@ -229,6 +232,72 @@ def _evaluate_object_system(args: argparse.Namespace) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+def _audit_v10_association(args: argparse.Namespace) -> None:
+    payload = audit_v10_associations(
+        runtime_manifest=Path(args.runtime_manifest),
+        gt_dir=Path(args.gt_dir),
+        bank_root=Path(args.bank_root),
+        scene_ids=args.scene,
+        conditions=args.condition,
+        classifiers=args.classifier or V10_CLASSIFIERS,
+        taxonomy=load_taxonomy(args.taxonomy),
+        rows_output=Path(args.rows_output),
+        analysis_output=Path(args.analysis_output),
+        size_bins=Path(args.size_bins) if args.size_bins else None,
+        radius_m=args.radius_m,
+        min_region_size=args.min_region_size,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _run_v10_view_consensus(args: argparse.Namespace) -> None:
+    payload = run_v10_banks(
+        lifting_root=args.lifting_root,
+        output_root=args.output_root,
+        scene_ids=args.scene,
+        conditions=args.condition or V10_STRUCTURE_CONDITIONS,
+        git_commit=args.git_commit,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _replay_v10(args: argparse.Namespace) -> None:
+    payload = replay_v10_priors(
+        bank_root=args.bank_root,
+        output_root=args.output_root,
+        scene_ids=args.scene,
+        structure_conditions=args.structure_condition,
+        prior_conditions=args.condition or V10_PRIOR_CONDITIONS,
+        classifier=args.classifier,
+        category_priors=args.category_priors,
+        acceptance_threshold=args.acceptance_threshold,
+        git_commit=args.git_commit,
+        nms_core_iou=args.nms_core_iou,
+        min_points=args.min_points,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _evaluate_v10(args: argparse.Namespace) -> None:
+    payload = evaluate_v10_replays(
+        runtime_manifest=Path(args.runtime_manifest),
+        gt_dir=Path(args.gt_dir),
+        replay_root=Path(args.replay_root),
+        structure_condition=args.structure_condition,
+        classifier=args.classifier,
+        scene_ids=args.scene,
+        conditions=args.condition or V10_PRIOR_CONDITIONS,
+        taxonomy=load_taxonomy(args.taxonomy),
+        metrics_output=Path(args.metrics_output),
+        analysis_output=Path(args.analysis_output),
+        size_bins=Path(args.size_bins) if args.size_bins else None,
+        radius_m=args.radius_m,
+        min_region_size=args.min_region_size,
+        viewer_output=Path(args.viewer_output) if args.viewer_output else None,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="SAGA category-prior utilities")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -409,6 +478,92 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_v9.add_argument("--radius-m", type=float, default=0.05)
     evaluate_v9.add_argument("--min-region-size", type=int, default=100)
     evaluate_v9.set_defaults(func=_evaluate_object_system)
+
+    audit_v10 = commands.add_parser(
+        "audit-v10-association",
+        help="audit real accepted V10 pairs and the persisted eight-stage funnel",
+    )
+    audit_v10.add_argument("--runtime-manifest", required=True)
+    audit_v10.add_argument("--gt-dir", required=True)
+    audit_v10.add_argument("--bank-root", required=True)
+    audit_v10.add_argument("--scene", action="append", required=True)
+    audit_v10.add_argument(
+        "--condition",
+        action="append",
+        choices=V10_STRUCTURE_CONDITIONS,
+        required=True,
+    )
+    audit_v10.add_argument("--taxonomy")
+    audit_v10.add_argument(
+        "--classifier", action="append", choices=V10_CLASSIFIERS
+    )
+    audit_v10.add_argument("--size-bins")
+    audit_v10.add_argument("--rows-output", required=True)
+    audit_v10.add_argument("--analysis-output", required=True)
+    audit_v10.add_argument("--radius-m", type=float, default=0.05)
+    audit_v10.add_argument("--min-region-size", type=int, default=100)
+    audit_v10.set_defaults(func=_audit_v10_association)
+
+    bank_v10 = commands.add_parser(
+        "run-v10-view-consensus",
+        help="build the frozen V10 pair/reconstruction arms and VC1 bank",
+    )
+    bank_v10.add_argument("--lifting-root", required=True)
+    bank_v10.add_argument("--output-root", required=True)
+    bank_v10.add_argument("--scene", action="append", required=True)
+    bank_v10.add_argument(
+        "--condition", action="append", choices=V10_STRUCTURE_CONDITIONS
+    )
+    bank_v10.add_argument("--git-commit", required=True)
+    bank_v10.set_defaults(func=_run_v10_view_consensus)
+
+    replay_v10 = commands.add_parser(
+        "replay-v10-priors",
+        help="replay the frozen V10 2^3 category-prior factorial",
+    )
+    replay_v10.add_argument("--bank-root", required=True)
+    replay_v10.add_argument("--output-root", required=True)
+    replay_v10.add_argument("--category-priors", required=True)
+    replay_v10.add_argument("--scene", action="append", required=True)
+    replay_v10.add_argument(
+        "--structure-condition",
+        action="append",
+        choices=V10_STRUCTURE_CONDITIONS,
+        required=True,
+    )
+    replay_v10.add_argument(
+        "--condition", action="append", choices=V10_PRIOR_CONDITIONS
+    )
+    replay_v10.add_argument("--acceptance-threshold", type=float, required=True)
+    replay_v10.add_argument("--classifier", choices=V10_CLASSIFIERS, required=True)
+    replay_v10.add_argument("--nms-core-iou", type=float, default=0.50)
+    replay_v10.add_argument("--min-points", type=int, default=10)
+    replay_v10.add_argument("--git-commit", required=True)
+    replay_v10.set_defaults(func=_replay_v10)
+
+    evaluate_v10 = commands.add_parser(
+        "evaluate-v10",
+        help="run official AP and Gaussian diagnostics on strict V10 replays",
+    )
+    evaluate_v10.add_argument("--runtime-manifest", required=True)
+    evaluate_v10.add_argument("--gt-dir", required=True)
+    evaluate_v10.add_argument("--replay-root", required=True)
+    evaluate_v10.add_argument(
+        "--structure-condition", choices=V10_STRUCTURE_CONDITIONS, required=True
+    )
+    evaluate_v10.add_argument("--classifier", choices=V10_CLASSIFIERS, required=True)
+    evaluate_v10.add_argument("--scene", action="append", required=True)
+    evaluate_v10.add_argument(
+        "--condition", action="append", choices=V10_PRIOR_CONDITIONS
+    )
+    evaluate_v10.add_argument("--taxonomy")
+    evaluate_v10.add_argument("--metrics-output", required=True)
+    evaluate_v10.add_argument("--analysis-output", required=True)
+    evaluate_v10.add_argument("--size-bins")
+    evaluate_v10.add_argument("--viewer-output")
+    evaluate_v10.add_argument("--radius-m", type=float, default=0.05)
+    evaluate_v10.add_argument("--min-region-size", type=int, default=100)
+    evaluate_v10.set_defaults(func=_evaluate_v10)
     return parser
 
 
