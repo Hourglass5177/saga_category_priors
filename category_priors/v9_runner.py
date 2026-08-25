@@ -221,6 +221,13 @@ def object_bank_is_complete(
         source_identity = metadata.get("source_lifting_identity")
         if not isinstance(source_identity, Mapping):
             return False
+        lifting_producer_commit = str(source_identity.get("git_commit", "")).strip()
+        if (
+            not lifting_producer_commit
+            or metadata.get("lifting_producer_git_commit")
+            != lifting_producer_commit
+        ):
+            return False
         if (
             expected_lifting_identity is not None
             and dict(source_identity) != dict(expected_lifting_identity)
@@ -290,12 +297,16 @@ def build_v9_object_bank(
     output_dir: str | Path,
     *,
     association_mode: str,
+    git_commit: str,
     config: V9Config = V9Config(),
 ) -> dict[str, Any]:
     """Build both late-classifier views over one frozen association bank."""
 
     if association_mode not in ASSOCIATION_MODES:
         raise ValueError(f"unknown V9 association mode: {association_mode}")
+    consumer_commit = str(git_commit).strip()
+    if not consumer_commit:
+        raise ValueError("object-bank git_commit must be non-empty")
     source = Path(lifting_dir).resolve()
     target = Path(output_dir).resolve()
     lifting = load_json(source / "lifting_bank.json")
@@ -304,14 +315,16 @@ def build_v9_object_bank(
     lifting_identity = lifting.get("identity")
     if not isinstance(lifting_identity, Mapping):
         raise ValueError("V9 object bank requires an identified source lifting bank")
-    lifting_commit = str(lifting_identity.get("git_commit", ""))
+    lifting_commit = str(lifting_identity.get("git_commit", "")).strip()
+    if not lifting_commit:
+        raise ValueError("V9 object bank requires a registered lifting producer")
     if object_bank_is_complete(
         target,
         expected_scene_id=str(lifting["scene_id"]),
         expected_mode=association_mode,
         expected_source_lifting=source,
         expected_config=config.as_json(),
-        expected_git_commit=lifting_commit,
+        expected_git_commit=consumer_commit,
         expected_lifting_identity=lifting_identity,
     ):
         return load_json(target / "object_bank.json")
@@ -374,7 +387,8 @@ def build_v9_object_bank(
         "frame_count": int(lifting["frame_count"]),
         "fragment_count": len(fragments),
         "association_mode": association_mode,
-        "git_commit": lifting_commit,
+        "git_commit": consumer_commit,
+        "lifting_producer_git_commit": lifting_commit,
         "source_lifting_bank": str(source),
         "source_lifting_identity": dict(lifting_identity),
         "config": config.as_json(),
@@ -416,7 +430,7 @@ def build_v9_object_bank(
         expected_mode=association_mode,
         expected_source_lifting=source,
         expected_config=config.as_json(),
-        expected_git_commit=lifting_commit,
+        expected_git_commit=consumer_commit,
         expected_lifting_identity=lifting_identity,
     ):
         raise RuntimeError(f"incomplete V9 object bank: {target}")
@@ -547,13 +561,14 @@ def run_v9_banks(
             if (
                 lifting_metadata.get("schema") != "saga-v9-native-lifting-bank-v1"
                 or not isinstance(lifting_identity, Mapping)
-                or lifting_identity.get("git_commit") != git_commit
+                or not str(lifting_identity.get("git_commit", "")).strip()
             ):
-                raise ValueError(f"{scene_id}: lifting bank is not from current commit")
+                raise ValueError(f"{scene_id}: lifting bank has no registered producer")
             metadata = build_v9_object_bank(
                 lifting_dir,
                 target / mode / scene_id,
                 association_mode=mode,
+                git_commit=git_commit,
             )
             records.append(
                 {

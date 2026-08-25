@@ -50,6 +50,7 @@ def _bank(tmp_path: Path) -> Path:
         "point_count": 13,
         "association_mode": "A1",
         "git_commit": "commit",
+        "lifting_producer_git_commit": "commit",
         "source_lifting_bank": str(tmp_path / "lifting"),
         "source_lifting_identity": {"git_commit": "commit", "scene_id": "scene0000_00"},
         "config": {},
@@ -138,6 +139,9 @@ def test_complete_object_bank_resume_does_not_load_lifting_arrays(
     metadata_path = target / "object_bank.json"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     metadata["config"] = V9Config().as_json()
+    metadata["git_commit"] = "consumer-commit"
+    metadata["lifting_producer_git_commit"] = "producer-commit"
+    metadata["source_lifting_identity"]["git_commit"] = "producer-commit"
     metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
     lifting = tmp_path / "lifting"
     lifting.mkdir()
@@ -156,5 +160,10 @@ def test_complete_object_bank_resume_does_not_load_lifting_arrays(
         raise AssertionError("complete-bank resume must not load lifting arrays")
 
     monkeypatch.setattr(v9_runner, "_load_lifting_bank", forbidden_load)
-    resumed = build_v9_object_bank(lifting, target, association_mode="A1")
+    resumed = build_v9_object_bank(
+        lifting,
+        target,
+        association_mode="A1",
+        git_commit="consumer-commit",
+    )
     assert resumed == metadata
