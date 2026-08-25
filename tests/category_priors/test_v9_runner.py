@@ -5,7 +5,10 @@ from pathlib import Path
 
 import numpy as np
 
+import category_priors.v9_runner as v9_runner
+from category_priors.v9_objectbank import V9Config
 from category_priors.v9_runner import (
+    build_v9_object_bank,
     load_v9_candidate_bank,
     object_bank_is_complete,
     replay_v9_scene,
@@ -126,3 +129,32 @@ def test_v9_replay_writes_one_strict_output(tmp_path: Path) -> None:
     assert output["instances"]["0"]["class"] == "book"
     assert 0.05 <= output["instances"]["0"]["score"] <= 0.9
     assert diagnostics["coverage"] == 12 / 13
+
+
+def test_complete_object_bank_resume_does_not_load_lifting_arrays(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    target = _bank(tmp_path)
+    metadata_path = target / "object_bank.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["config"] = V9Config().as_json()
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    lifting = tmp_path / "lifting"
+    lifting.mkdir()
+    (lifting / "lifting_bank.json").write_text(
+        json.dumps(
+            {
+                "schema": "saga-v9-native-lifting-bank-v1",
+                "scene_id": "scene0000_00",
+                "identity": metadata["source_lifting_identity"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def forbidden_load(_source):
+        raise AssertionError("complete-bank resume must not load lifting arrays")
+
+    monkeypatch.setattr(v9_runner, "_load_lifting_bank", forbidden_load)
+    resumed = build_v9_object_bank(lifting, target, association_mode="A1")
+    assert resumed == metadata

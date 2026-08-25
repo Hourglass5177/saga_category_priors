@@ -43,6 +43,7 @@ SAGA20 = frozenset(
 )
 
 AssociationMode = Literal["A0", "A1", "A2", "A3"]
+_NEIGHBOR_QUERY_CHUNK = 8192
 
 
 @dataclass(frozen=True)
@@ -314,18 +315,98 @@ def _normalise_rows(values: np.ndarray, *, name: str) -> np.ndarray:
     return np.divide(array, norms, out=np.zeros_like(array), where=norms > 1e-12)
 
 
-def weighted_core_overlap(left: Fragment, right: Fragment) -> tuple[int, float]:
+def _weighted_core_overlap_arrays(
+    left_ids: np.ndarray,
+    left_mass: np.ndarray,
+    right_ids: np.ndarray,
+    right_mass: np.ndarray,
+) -> tuple[int, float]:
     shared, li, ri = np.intersect1d(
-        left.core_ids,
-        right.core_ids,
+        left_ids,
+        right_ids,
         assume_unique=True,
         return_indices=True,
     )
-    denominator = min(float(left.core_mass.sum()), float(right.core_mass.sum()))
+    denominator = min(float(left_mass.sum()), float(right_mass.sum()))
     if denominator <= 0:
         return int(len(shared)), 0.0
-    numerator = float(np.minimum(left.core_mass[li], right.core_mass[ri]).sum())
+    numerator = float(np.minimum(left_mass[li], right_mass[ri]).sum())
     return int(len(shared)), float(np.clip(numerator / denominator, 0.0, 1.0))
+
+
+def weighted_core_overlap(left: Fragment, right: Fragment) -> tuple[int, float]:
+    return _weighted_core_overlap_arrays(
+        left.core_ids,
+        left.core_mass,
+        right.core_ids,
+        right.core_mass,
+    )
+
+
+def _shared_core_candidate_pairs(
+    fragments: Sequence[Fragment], minimum_shared: int
+) -> np.ndarray:
+    """Return exact fragment-position pairs sharing enough unique core IDs.
+
+    Direct association used to call ``intersect1d`` for every cross-frame
+    fragment pair.  The two Stage-2 scenes contain more than 57 million such
+    pairs, although only pairs co-occurring in at least three point postings
+    can pass the registered gate.  This inverted index materializes one int64
+    code per actual posting co-occurrence, sorts it, and retains the exact
+    qualifying pair set.  It changes neither overlap weights nor edge order.
+    """
+
+    count = len(fragments)
+    if count < 2:
+        return np.empty((0, 2), dtype=np.int32)
+    lengths = np.fromiter(
+        (len(fragment.core_ids) for fragment in fragments),
+        dtype=np.int64,
+        count=count,
+    )
+    membership_count = int(lengths.sum())
+    if not membership_count:
+        return np.empty((0, 2), dtype=np.int32)
+    point_ids = np.concatenate(
+        [np.asarray(fragment.core_ids, dtype=np.int32) for fragment in fragments]
+    )
+    fragment_positions = np.repeat(np.arange(count, dtype=np.int32), lengths)
+    order = np.argsort(point_ids, kind="stable")
+    point_ids = point_ids[order]
+    fragment_positions = fragment_positions[order]
+    starts = np.flatnonzero(
+        np.r_[True, point_ids[1:] != point_ids[:-1]]
+    )
+    stops = np.r_[starts[1:], len(point_ids)]
+    degrees = stops - starts
+    pair_occurrences = int(np.sum(degrees * (degrees - 1) // 2, dtype=np.int64))
+    if not pair_occurrences:
+        return np.empty((0, 2), dtype=np.int32)
+    codes = np.empty(pair_occurrences, dtype=np.int64)
+    offset = 0
+    for start, stop in zip(starts, stops):
+        postings = fragment_positions[start:stop]
+        degree = len(postings)
+        if degree < 2:
+            continue
+        left, right = np.triu_indices(degree, 1)
+        size = len(left)
+        codes[offset : offset + size] = (
+            postings[left].astype(np.int64) * count + postings[right]
+        )
+        offset += size
+    if offset != pair_occurrences:
+        raise RuntimeError("fragment posting pair count is inconsistent")
+    codes.sort()
+    run_starts = np.flatnonzero(np.r_[True, codes[1:] != codes[:-1]])
+    run_stops = np.r_[run_starts[1:], len(codes)]
+    shared = run_stops - run_starts
+    qualified = codes[run_starts[shared >= int(minimum_shared)]]
+    if not len(qualified):
+        return np.empty((0, 2), dtype=np.int32)
+    return np.column_stack((qualified // count, qualified % count)).astype(
+        np.int32
+    )
 
 
 @dataclass
@@ -333,17 +414,35 @@ class _Component:
     fragment_ids: set[int]
     frame_ids: set[int]
     merge_scores: list[float] = field(default_factory=list)
+    core_ids: np.ndarray | None = field(default=None, repr=False)
+    core_mass: np.ndarray | None = field(default=None, repr=False)
 
 
 def _component_core(
     component: _Component, fragment_by_id: Mapping[int, Fragment]
 ) -> tuple[np.ndarray, np.ndarray]:
+    if component.core_ids is not None and component.core_mass is not None:
+        return component.core_ids, component.core_mass
     ids = np.empty(0, dtype=np.int32)
     mass = np.empty(0, dtype=np.float32)
     for fragment_id in sorted(component.fragment_ids):
         fragment = fragment_by_id[fragment_id]
         ids, mass = _max_union(ids, mass, fragment.core_ids, fragment.core_mass)
+    component.core_ids = ids
+    component.core_mass = mass
     return ids, mass
+
+
+def _merge_component_core(
+    target: _Component,
+    source: _Component,
+    fragment_by_id: Mapping[int, Fragment],
+) -> None:
+    target_ids, target_mass = _component_core(target, fragment_by_id)
+    source_ids, source_mass = _component_core(source, fragment_by_id)
+    target.core_ids, target.core_mass = _max_union(
+        target_ids, target_mass, source_ids, source_mass
+    )
 
 
 def _tracks_from_components(
@@ -367,24 +466,25 @@ def _direct_edges(
 ) -> list[AssociationEdge]:
     output: list[AssociationEdge] = []
     ordered = sorted(fragments, key=lambda fragment: int(fragment.fragment_id))
-    for index, left in enumerate(ordered):
-        for right in ordered[index + 1 :]:
-            if int(left.frame_id) == int(right.frame_id):
-                continue
-            shared, overlap = weighted_core_overlap(left, right)
-            if (
-                shared >= int(config.direct_min_shared_core)
-                and overlap >= float(config.direct_min_overlap)
-            ):
-                output.append(
-                    AssociationEdge(
-                        int(left.fragment_id),
-                        int(right.fragment_id),
-                        "direct",
-                        overlap,
-                        shared,
-                    )
+    candidates = _shared_core_candidate_pairs(
+        ordered, int(config.direct_min_shared_core)
+    )
+    for left_position, right_position in candidates:
+        left = ordered[int(left_position)]
+        right = ordered[int(right_position)]
+        if int(left.frame_id) == int(right.frame_id):
+            continue
+        shared, overlap = weighted_core_overlap(left, right)
+        if overlap >= float(config.direct_min_overlap):
+            output.append(
+                AssociationEdge(
+                    int(left.fragment_id),
+                    int(right.fragment_id),
+                    "direct",
+                    overlap,
+                    shared,
                 )
+            )
     return output
 
 
@@ -421,6 +521,7 @@ def _constrained_components(
         keep, remove = sorted((left_root, right_root))
         target = components[keep]
         source = components[remove]
+        _merge_component_core(target, source, fragment_by_id)
         target.fragment_ids.update(source.fragment_ids)
         target.frame_ids.update(source.frame_ids)
         target.merge_scores.extend(source.merge_scores)
@@ -450,16 +551,12 @@ def _associate_a0(
             if int(fragment.frame_id) in component.frame_ids:
                 continue
             core_ids, core_mass = _component_core(component, fragment_by_id)
-            proxy = Fragment(
-                -1,
-                -1,
-                -1,
+            shared, overlap = _weighted_core_overlap_arrays(
+                fragment.core_ids,
+                fragment.core_mass,
                 core_ids,
-                core_ids,
-                core_mass,
                 core_mass,
             )
-            shared, overlap = weighted_core_overlap(fragment, proxy)
             if (
                 shared >= int(config.direct_min_shared_core)
                 and overlap >= float(config.direct_min_overlap)
@@ -482,6 +579,10 @@ def _associate_a0(
             "direct",
             float(scored[0][0]),
             int(scored[0][1]),
+        )
+        core_ids, core_mass = _component_core(component, fragment_by_id)
+        component.core_ids, component.core_mass = _max_union(
+            core_ids, core_mass, fragment.core_ids, fragment.core_mass
         )
         component.fragment_ids.add(int(fragment.fragment_id))
         component.frame_ids.add(int(fragment.frame_id))
@@ -753,6 +854,7 @@ def associate_fragments(
         if target_best.get(target_id) is not proposal:
             continue
         source, target = proposal[3], proposal[4]
+        _merge_component_core(target, source, fragment_by_id)
         target.fragment_ids.update(source.fragment_ids)
         target.frame_ids.update(source.frame_ids)
         target.merge_scores.extend(source.merge_scores)
@@ -804,7 +906,26 @@ def build_consensus_core(
 
     visible_views = np.zeros(point_count, dtype=np.int32)
     positive_counters = {int(track.track_id): Counter() for track in association.tracks}
-    conflict_counters = {int(track.track_id): Counter() for track in association.tracks}
+    # A conflict is queried only for points that have positive support for the
+    # same track.  The former implementation nevertheless copied every
+    # foreground point in every frame into every other track's Counter.  With
+    # thousands of lifted fragments that is O(tracks x visible foreground)
+    # Python objects and can exceed the 90 GiB cgroup before the first bank is
+    # written.  Count the equivalent sufficient statistics instead:
+    #
+    #   conflict(t, p) = frames_with_any_track(p)
+    #                    - frames_where_only_track_t_contains(p)
+    #
+    # Per-frame ``by_track`` rows are already unique, so a point that occurs
+    # once is exclusive to that track and a point that occurs more than once
+    # has an other-track conflict for every owning track.  Tracks absent from
+    # the frame are handled by the global presence count.  This preserves the
+    # registered per-physical-view semantics while bounding stored evidence by
+    # the positive support instead of by all track/point combinations.
+    foreground_views = np.zeros(point_count, dtype=np.int32)
+    exclusive_counters = {
+        int(track.track_id): Counter() for track in association.tracks
+    }
     for frame in frames:
         if frame.abstain:
             continue
@@ -816,21 +937,41 @@ def build_consensus_core(
             by_track[track_id] = np.union1d(previous, fragment.core_ids).astype(np.int32)
         for track_id, own_ids in by_track.items():
             positive_counters[track_id].update(map(int, own_ids))
-        for track in association.tracks:
-            track_id = int(track.track_id)
-            other_chunks = [ids for other_id, ids in by_track.items() if other_id != track_id]
-            if other_chunks:
-                other_ids = np.unique(np.concatenate(other_chunks))
-                conflict_counters[track_id].update(map(int, other_ids))
+        if by_track:
+            track_chunks = [
+                np.full(len(ids), track_id, dtype=np.int32)
+                for track_id, ids in by_track.items()
+            ]
+            point_chunks = list(by_track.values())
+            all_points = np.concatenate(point_chunks)
+            all_tracks = np.concatenate(track_chunks)
+            unique_points, first, owner_count = np.unique(
+                all_points, return_index=True, return_counts=True
+            )
+            foreground_views[unique_points] += 1
+            exclusive = owner_count == 1
+            if np.any(exclusive):
+                exclusive_points = unique_points[exclusive]
+                exclusive_tracks = all_tracks[first[exclusive]]
+                for track_id in np.unique(exclusive_tracks):
+                    ids = exclusive_points[exclusive_tracks == track_id]
+                    exclusive_counters[int(track_id)].update(map(int, ids))
 
     positive = {
         track_id: SparseCounts.from_counter(counter, point_count)
         for track_id, counter in positive_counters.items()
     }
-    conflict = {
-        track_id: SparseCounts.from_counter(counter, point_count)
-        for track_id, counter in conflict_counters.items()
-    }
+    conflict: dict[int, SparseCounts] = {}
+    for track_id, support in positive.items():
+        ids = support.ids
+        exclusive = SparseCounts.from_counter(
+            exclusive_counters[track_id], point_count
+        ).take(ids)
+        values = foreground_views[ids] - exclusive
+        nonzero = values > 0
+        conflict[track_id] = SparseCounts(
+            ids[nonzero], values[nonzero], point_count
+        )
     eligible: dict[int, np.ndarray] = {}
     for track in association.tracks:
         track_id = int(track.track_id)
@@ -918,26 +1059,31 @@ def attach_local_halo(
     # Query every anchor inside the registered physical radius.  A fixed-k
     # truncation made the result depend on unrelated nearby tracks and could
     # hide the third anchor of the correct object in dense regions.
-    neighborhoods = cKDTree(xyz[anchors]).query_ball_point(
-        xyz[queries], r=float(config.attach_radius_m)
-    )
-    for point_id, positions in zip(queries, neighborhoods):
-        neighbor_ids = anchors[np.asarray(positions, dtype=np.int64)]
-        choices: list[tuple[float, int]] = []
-        for track_id in np.unique(labels[neighbor_ids]):
-            same = neighbor_ids[labels[neighbor_ids] == track_id]
-            if len(same) < int(config.attach_min_anchors):
-                continue
-            prototype = features[same].mean(axis=0)
-            norm = float(np.linalg.norm(prototype))
-            similarity = float(features[point_id] @ (prototype / max(norm, 1e-12)))
-            if similarity >= float(config.attach_min_affinity):
-                choices.append((similarity, int(track_id)))
-        choices.sort(key=lambda item: (-item[0], item[1]))
-        if choices:
-            runner_up = choices[1][0] if len(choices) > 1 else -1.0
-            if choices[0][0] - runner_up >= float(config.attach_min_margin):
-                output[point_id] = choices[0][1]
+    tree = cKDTree(xyz[anchors])
+    for start in range(0, len(queries), _NEIGHBOR_QUERY_CHUNK):
+        query_ids = queries[start : start + _NEIGHBOR_QUERY_CHUNK]
+        neighborhoods = tree.query_ball_point(
+            xyz[query_ids], r=float(config.attach_radius_m)
+        )
+        for point_id, positions in zip(query_ids, neighborhoods):
+            neighbor_ids = anchors[np.asarray(positions, dtype=np.int64)]
+            choices: list[tuple[float, int]] = []
+            for track_id in np.unique(labels[neighbor_ids]):
+                same = neighbor_ids[labels[neighbor_ids] == track_id]
+                if len(same) < int(config.attach_min_anchors):
+                    continue
+                prototype = features[same].mean(axis=0)
+                norm = float(np.linalg.norm(prototype))
+                similarity = float(
+                    features[point_id] @ (prototype / max(norm, 1e-12))
+                )
+                if similarity >= float(config.attach_min_affinity):
+                    choices.append((similarity, int(track_id)))
+            choices.sort(key=lambda item: (-item[0], item[1]))
+            if choices:
+                runner_up = choices[1][0] if len(choices) > 1 else -1.0
+                if choices[0][0] - runner_up >= float(config.attach_min_margin):
+                    output[point_id] = choices[0][1]
     return output
 
 
@@ -1052,13 +1198,16 @@ def _boundary_ratio(
     inside[member_ids] = True
     boundary_edges = 0
     total_edges = 0
-    for point_id, neighbors in zip(
-        member_ids, tree.query_ball_point(xyz[member_ids], r=float(radius_m))
-    ):
-        neighbor_ids = np.asarray(neighbors, dtype=np.int64)
-        neighbor_ids = neighbor_ids[neighbor_ids != int(point_id)]
-        total_edges += len(neighbor_ids)
-        boundary_edges += int(np.count_nonzero(~inside[neighbor_ids]))
+    for start in range(0, len(member_ids), _NEIGHBOR_QUERY_CHUNK):
+        query_ids = member_ids[start : start + _NEIGHBOR_QUERY_CHUNK]
+        neighborhoods = tree.query_ball_point(
+            xyz[query_ids], r=float(radius_m)
+        )
+        for point_id, neighbors in zip(query_ids, neighborhoods):
+            neighbor_ids = np.asarray(neighbors, dtype=np.int64)
+            neighbor_ids = neighbor_ids[neighbor_ids != int(point_id)]
+            total_edges += len(neighbor_ids)
+            boundary_edges += int(np.count_nonzero(~inside[neighbor_ids]))
     return float(boundary_edges / total_edges) if total_edges else 0.0
 
 

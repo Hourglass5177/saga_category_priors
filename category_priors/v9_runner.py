@@ -298,7 +298,9 @@ def build_v9_object_bank(
         raise ValueError(f"unknown V9 association mode: {association_mode}")
     source = Path(lifting_dir).resolve()
     target = Path(output_dir).resolve()
-    lifting, arrays = _load_lifting_bank(source)
+    lifting = load_json(source / "lifting_bank.json")
+    if lifting.get("schema") != "saga-v9-native-lifting-bank-v1":
+        raise ValueError("V9 object bank requires native lifting metadata")
     lifting_identity = lifting.get("identity")
     if not isinstance(lifting_identity, Mapping):
         raise ValueError("V9 object bank requires an identified source lifting bank")
@@ -313,6 +315,13 @@ def build_v9_object_bank(
         expected_lifting_identity=lifting_identity,
     ):
         return load_json(target / "object_bank.json")
+
+    # Only a missing bank needs the large lifting arrays.  This keeps a normal
+    # resume path O(metadata) and avoids decompressing 0.5--0.6 GiB NPZ files
+    # merely to discover that the registered scene/mode is already complete.
+    loaded_lifting, arrays = _load_lifting_bank(source)
+    if loaded_lifting != lifting:
+        raise ValueError("lifting metadata changed while building the object bank")
 
     started = time.monotonic()
     fragments = _load_fragments(arrays)
@@ -533,10 +542,11 @@ def run_v9_banks(
             if shutil.disk_usage(target).free / 1024**3 < 80.0:
                 raise RuntimeError("V9 requires at least 80 GiB free")
             lifting_dir = Path(lifting_root) / scene_id
-            lifting_metadata, _ = load_lifting_bank(lifting_dir)
+            lifting_metadata = load_json(lifting_dir / "lifting_bank.json")
             lifting_identity = lifting_metadata.get("identity")
             if (
-                not isinstance(lifting_identity, Mapping)
+                lifting_metadata.get("schema") != "saga-v9-native-lifting-bank-v1"
+                or not isinstance(lifting_identity, Mapping)
                 or lifting_identity.get("git_commit") != git_commit
             ):
                 raise ValueError(f"{scene_id}: lifting bank is not from current commit")

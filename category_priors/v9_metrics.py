@@ -8,6 +8,7 @@ predictions in stages 3--6.  Ground truth is read only here, never by feature,
 lifting, bank, or replay workers.
 """
 
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -970,6 +971,48 @@ def _mapped_support(
     return support if len(support) else np.asarray([sentinel], dtype=np.int64)
 
 
+def _inverse_nearest_index(
+    nearest: np.ndarray, valid: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build a compact Gaussian->GT-point CSR for repeated support queries."""
+
+    nearest_ids = np.asarray(nearest, dtype=np.int64)
+    valid_mask = np.asarray(valid, dtype=bool)
+    if nearest_ids.shape != valid_mask.shape:
+        raise ValueError("nearest and valid must have matching shapes")
+    gt_ids = np.flatnonzero(valid_mask).astype(np.int64)
+    gaussian_ids = nearest_ids[valid_mask]
+    if not len(gaussian_ids):
+        return np.zeros(1, dtype=np.int64), np.empty(0, dtype=np.int64)
+    if np.any(gaussian_ids < 0):
+        raise ValueError("valid nearest Gaussian IDs must be non-negative")
+    counts = np.bincount(gaussian_ids)
+    indptr = np.concatenate((np.zeros(1, dtype=np.int64), np.cumsum(counts)))
+    order = np.argsort(gaussian_ids, kind="stable")
+    return indptr, gt_ids[order]
+
+
+def _mapped_support_from_inverse(
+    gaussian_ids: np.ndarray,
+    indptr: np.ndarray,
+    gt_ids: np.ndarray,
+    *,
+    sentinel: int,
+) -> np.ndarray:
+    query = np.asarray(gaussian_ids, dtype=np.int64)
+    query = query[(query >= 0) & (query + 1 < len(indptr))]
+    if not len(query):
+        return np.asarray([sentinel], dtype=np.int64)
+    starts = indptr[query]
+    stops = indptr[query + 1]
+    chunks = [gt_ids[start:stop] for start, stop in zip(starts, stops) if stop > start]
+    if not chunks:
+        return np.asarray([sentinel], dtype=np.int64)
+    # Each GT point has one nearest Gaussian, so chunks are disjoint.  Sorting
+    # restores the exact flatnonzero order returned by ``_mapped_support``.
+    return np.sort(np.concatenate(chunks)).astype(np.int64, copy=False)
+
+
 def _gt_supports(
     scene_id: str,
     gt_xyz: np.ndarray,
@@ -1050,12 +1093,13 @@ def _association_diagnostics(
         frames = np.asarray(arrays["fragment_frame"], dtype=np.int64)
         indptr = np.asarray(arrays["fragment_full_indptr"], dtype=np.int64)
         values = np.asarray(arrays["fragment_full_ids"], dtype=np.int64)
+    inverse_indptr, inverse_gt_ids = _inverse_nearest_index(nearest, valid)
     best_gt: dict[int, tuple[str, int] | None] = {}
     for index, fragment_id in enumerate(fragment_ids):
-        support = _mapped_support(
+        support = _mapped_support_from_inverse(
             values[indptr[index] : indptr[index + 1]],
-            nearest,
-            valid,
+            inverse_indptr,
+            inverse_gt_ids,
             sentinel=len(nearest) + 1_000_000 + index,
         )
         best_gt[int(fragment_id)] = _qualifying_association_gt(
@@ -1065,22 +1109,36 @@ def _association_diagnostics(
         int(fragment_id): int(frame)
         for fragment_id, frame in zip(fragment_ids, frames)
     }
-    positive: set[tuple[int, int]] = set()
-    ordered = sorted(map(int, fragment_ids))
-    for index, left in enumerate(ordered):
-        for right in ordered[index + 1 :]:
-            if frame_by_fragment[left] != frame_by_fragment[right] and best_gt[left] is not None and best_gt[left] == best_gt[right]:
-                positive.add((left, right))
     predicted = {
         tuple(sorted((int(row["left_fragment_id"]), int(row["right_fragment_id"]))))
         for row in bank_metadata.get("accepted_edges", ())
     }
-    true_positive = len(predicted & positive)
+    # The former diagnostic materialized every truth-positive fragment pair.
+    # Thousands of fragments can yield tens of millions of Python tuples even
+    # though evaluation only needs the total count and membership for the
+    # comparatively small predicted edge set.  Count all cross-frame pairs in
+    # closed form per dominant GT identity and test predicted edges directly.
+    truth_groups: dict[tuple[str, int], list[int]] = {}
+    for fragment_id, identity in best_gt.items():
+        if identity is not None:
+            truth_groups.setdefault(identity, []).append(fragment_id)
+    positive_count = 0
+    for fragment_group in truth_groups.values():
+        count = len(fragment_group)
+        positive_count += count * (count - 1) // 2
+        per_frame = Counter(frame_by_fragment[item] for item in fragment_group)
+        positive_count -= sum(value * (value - 1) // 2 for value in per_frame.values())
+    true_positive = sum(
+        frame_by_fragment[left] != frame_by_fragment[right]
+        and best_gt.get(left) is not None
+        and best_gt.get(left) == best_gt.get(right)
+        for left, right in predicted
+    )
     precision = true_positive / len(predicted) if predicted else 0.0
-    recall = true_positive / len(positive) if positive else 0.0
+    recall = true_positive / positive_count if positive_count else 0.0
     return {
         "predicted_pair_count": len(predicted),
-        "oracle_positive_pair_count": len(positive),
+        "oracle_positive_pair_count": positive_count,
         "true_positive_pair_count": true_positive,
         "association_pair_precision": precision,
         "association_pair_recall": recall,
