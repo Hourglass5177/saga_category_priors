@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from copy import deepcopy
 from pathlib import Path
 
 import numpy as np
@@ -8,7 +9,10 @@ import pytest
 
 from category_priors.io import load_json, write_json
 from category_priors.prompt_prior_experiment import (
+    SIMILARITY_THRESHOLD,
+    _complete_prompt_result,
     _condition_scale,
+    _mask_change_count,
     _mark_mechanical,
     _materialize_parameters,
     _parser,
@@ -121,6 +125,97 @@ def test_unknown_category_is_exact_global_scale_fallback() -> None:
     assert _condition_scale(parameters, "scene", "chair", "U-global") == 0.75
     assert _condition_scale(parameters, "scene", "chair", "D-class") == 0.25
     assert _condition_scale(parameters, "scene", "unknown", "D-class") == 0.75
+
+
+def test_complete_prompt_result_rejects_every_stale_identity_field(
+    tmp_path: Path,
+) -> None:
+    result_path = tmp_path / "p0000.npz"
+    feature_ply = tmp_path / "feature.ply"
+    scale_gate = tmp_path / "scale_gate.pt"
+    expected_prompt = {
+        "scene_id": "scene0000_00",
+        "prompt_id": "p0000",
+        "image_name": "frame-000000",
+        "x": 11,
+        "y": 17,
+        "class_name": "chair",
+        "mechanical_selected": True,
+    }
+    expected_scales = {"U-global": 0.75, "D-class": 0.25}
+    np.savez_compressed(
+        result_path,
+        U_global=np.asarray([1, 0, 1, 0], dtype=np.uint8),
+        D_class=np.asarray([1, 1, 1, 0], dtype=np.uint8),
+    )
+    valid_metadata = {
+        "status": "complete",
+        "prompt": expected_prompt,
+        "similarity_threshold": SIMILARITY_THRESHOLD,
+        "feature_ply": str(feature_ply),
+        "scale_gate": str(scale_gate),
+        "conditions": {
+            "U-global": {"scale_input": expected_scales["U-global"]},
+            "D-class": {"scale_input": expected_scales["D-class"]},
+        },
+    }
+
+    def complete() -> bool:
+        return _complete_prompt_result(
+            result_path,
+            4,
+            expected_prompt=expected_prompt,
+            feature_ply=feature_ply,
+            scale_gate=scale_gate,
+            expected_scales=expected_scales,
+        )
+
+    write_json(result_path.with_suffix(".json"), valid_metadata)
+    assert complete() is True
+
+    stale_variants = []
+    stale = deepcopy(valid_metadata)
+    stale["prompt"]["x"] += 1
+    stale_variants.append(stale)
+    stale = deepcopy(valid_metadata)
+    stale["similarity_threshold"] = SIMILARITY_THRESHOLD - 0.01
+    stale_variants.append(stale)
+    stale = deepcopy(valid_metadata)
+    stale["feature_ply"] = str(tmp_path / "other-feature.ply")
+    stale_variants.append(stale)
+    stale = deepcopy(valid_metadata)
+    stale["scale_gate"] = str(tmp_path / "other-gate.pt")
+    stale_variants.append(stale)
+    stale = deepcopy(valid_metadata)
+    stale["conditions"]["U-global"]["scale_input"] += 0.01
+    stale_variants.append(stale)
+    stale = deepcopy(valid_metadata)
+    stale["conditions"]["D-class"]["scale_input"] += 0.01
+    stale_variants.append(stale)
+
+    for stale_metadata in stale_variants:
+        write_json(result_path.with_suffix(".json"), stale_metadata)
+        assert complete() is False
+
+
+def test_one_changed_point_in_a_million_is_a_mechanical_intervention() -> None:
+    uniform = np.zeros(1_000_000, dtype=np.uint8)
+    data = uniform.copy()
+
+    assert _mask_change_count(uniform, data) == 0
+
+    data[-1] = 1
+    assert _mask_change_count(uniform, data) == 1
+    assert _mask_change_count(uniform, data) > 0
+    assert np.mean(uniform != data) == pytest.approx(1e-6)
+
+
+def test_mask_change_count_rejects_mismatched_shapes() -> None:
+    with pytest.raises(ValueError, match="same shape"):
+        _mask_change_count(
+            np.zeros(4, dtype=np.uint8),
+            np.zeros(5, dtype=np.uint8),
+        )
 
 
 def test_gaussian_precision_and_gt_recall_use_opposite_nearest_directions() -> None:

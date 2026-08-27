@@ -542,7 +542,24 @@ def _condition_scale(
     )
 
 
-def _complete_prompt_result(path: Path, expected_points: int) -> bool:
+def _mask_change_count(uniform: np.ndarray, data: np.ndarray) -> int:
+    """Count exact pointwise treatment changes, independent of scene size."""
+    uniform_array = np.asarray(uniform, dtype=bool)
+    data_array = np.asarray(data, dtype=bool)
+    if uniform_array.shape != data_array.shape:
+        raise ValueError("uniform and data masks must have the same shape")
+    return int(np.count_nonzero(uniform_array != data_array))
+
+
+def _complete_prompt_result(
+    path: Path,
+    expected_points: int,
+    *,
+    expected_prompt: Mapping[str, Any],
+    feature_ply: Path,
+    scale_gate: Path,
+    expected_scales: Mapping[str, float],
+) -> bool:
     metadata = path.with_suffix(".json")
     try:
         with np.load(path) as payload:
@@ -554,7 +571,33 @@ def _complete_prompt_result(path: Path, expected_points: int) -> bool:
         row = load_json(metadata)
     except (OSError, ValueError, KeyError, json.JSONDecodeError):
         return False
-    return valid and row.get("status") == "complete"
+    if not valid or row.get("status") != "complete":
+        return False
+    if row.get("prompt") != dict(expected_prompt):
+        return False
+    if not math.isclose(
+        float(row.get("similarity_threshold", float("nan"))),
+        SIMILARITY_THRESHOLD,
+        rel_tol=0.0,
+        abs_tol=0.0,
+    ):
+        return False
+    if Path(str(row.get("feature_ply", ""))).resolve() != feature_ply.resolve():
+        return False
+    if Path(str(row.get("scale_gate", ""))).resolve() != scale_gate.resolve():
+        return False
+    try:
+        return all(
+            math.isclose(
+                float(row["conditions"][condition]["scale_input"]),
+                float(expected_scales[condition]),
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+            for condition in CONDITIONS
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 def segment_prompts(
@@ -610,7 +653,23 @@ def segment_prompts(
         for prompt in prompts:
             prompt_id = str(prompt["prompt_id"])
             target = scene_output / f"{prompt_id}.npz"
-            if _complete_prompt_result(target, len(point_features)):
+            expected_scales = {
+                condition: _condition_scale(
+                    parameters,
+                    scene_id,
+                    str(prompt["class_name"]),
+                    condition,
+                )
+                for condition in CONDITIONS
+            }
+            if _complete_prompt_result(
+                target,
+                len(point_features),
+                expected_prompt=prompt,
+                feature_ply=assets["feature_ply"],
+                scale_gate=assets["scale_gate"],
+                expected_scales=expected_scales,
+            ):
                 skipped += 1
                 continue
             image_name = str(prompt["image_name"])
@@ -731,7 +790,10 @@ def segment_prompts(
                     D_class=masks["D_class"],
                 )
                 temporary.replace(target)
-                change = float(np.mean(masks["U_global"] != masks["D_class"]))
+                change_count = _mask_change_count(
+                    masks["U_global"], masks["D_class"]
+                )
+                change = float(change_count / len(masks["U_global"]))
                 write_json(
                     target.with_suffix(".json"),
                     {
@@ -743,6 +805,7 @@ def segment_prompts(
                         "scale_gate": str(assets["scale_gate"]),
                         "similarity_threshold": SIMILARITY_THRESHOLD,
                         "conditions": diagnostics,
+                        "mask_change_count": change_count,
                         "mask_change_fraction": change,
                     },
                 )
@@ -985,6 +1048,12 @@ def evaluate_prompts(
             mask_path = masks_root / scene_id / f"{prompt_id}.npz"
             metadata = load_json(mask_path.with_suffix(".json"))
             with np.load(mask_path) as masks:
+                mask_change_count = _mask_change_count(
+                    masks["U_global"], masks["D_class"]
+                )
+                mask_union_count = int(
+                    np.count_nonzero(masks["U_global"] | masks["D_class"])
+                )
                 condition_results = {
                     "U-global": evaluate_prompt_pair_arrays(
                         mask=masks["U_global"],
@@ -1019,7 +1088,29 @@ def evaluate_prompts(
                 "bbox_diagonal_m": float(prompt["bbox_diagonal_m"]),
                 "size_bin": _size_bin(float(prompt["bbox_diagonal_m"]), size_spec),
                 "mechanical_selected": bool(prompt.get("mechanical_selected")),
-                "mask_change_fraction": float(metadata["mask_change_fraction"]),
+                "mask_change_count": mask_change_count,
+                "mask_change_fraction": float(
+                    mask_change_count / len(gaussian_xyz)
+                ),
+                "mask_change_fraction_of_union": float(
+                    mask_change_count / mask_union_count
+                )
+                if mask_union_count
+                else 0.0,
+                "gate_delta_linf": float(
+                    np.max(
+                        np.abs(
+                            np.asarray(
+                                metadata["conditions"]["D-class"]["gate"],
+                                dtype=np.float64,
+                            )
+                            - np.asarray(
+                                metadata["conditions"]["U-global"]["gate"],
+                                dtype=np.float64,
+                            )
+                        )
+                    )
+                ),
                 "scale_input_u": float(
                     metadata["conditions"]["U-global"]["scale_input"]
                 ),
@@ -1063,7 +1154,21 @@ def evaluate_prompts(
         abs(float(row["scale_input_d"]) - float(row["scale_input_u"])) >= 0.05
         for row in rows
     )
-    mask_changed = sum(float(row["mask_change_fraction"]) >= 0.01 for row in rows)
+    gate_changed = sum(float(row["gate_delta_linf"]) > 1e-6 for row in rows)
+    # This is an implementation-activation check, not an effect-size screen.
+    # A small prompted object may contain far fewer than 1% of all scene
+    # Gaussians, so a full-scene 1% denominator would make it impossible for
+    # precisely the small objects under study to pass.  Effect magnitude is
+    # assessed later with object IoU at the physical-scene level.
+    mask_changed = sum(int(row["mask_change_count"]) > 0 for row in rows)
+    changed_scene_ids = {
+        str(row["scene_id"])
+        for row in rows
+        if int(row["mask_change_count"]) > 0
+    }
+    large_full_scene_changes = sum(
+        float(row["mask_change_fraction"]) >= 0.01 for row in rows
+    )
     classes = sorted({str(row["class_name"]) for row in rows})
     mean_delta = float(np.mean([row["mean_delta_iou"] for row in scene_rows])) if scene_rows else 0.0
     precision_delta = (
@@ -1176,7 +1281,11 @@ def evaluate_prompts(
             scene_object_counts.get(scene_id, 0) >= 4 for scene_id in scene_ids
         ),
         "scale_changed_objects_at_least_4": scale_changed >= 4,
+        "gate_changed_objects_at_least_4": gate_changed >= 4,
         "mask_changed_objects_at_least_2": mask_changed >= 2,
+        "each_registered_scene_has_changed_object": all(
+            scene_id in changed_scene_ids for scene_id in scene_ids
+        ),
         "all_outputs_nonempty": nonempty_outputs,
         "all_query_self_similarities_are_one": query_self_valid,
         "all_repeat_masks_are_pointwise_identical": repeat_masks_valid,
@@ -1225,6 +1334,20 @@ def evaluate_prompts(
         "tiny_small_delta_iou": tiny_iou_delta,
         "tiny_small_delta_gt_recall": tiny_recall_delta,
         "tiny_small_scene_results": tiny_small_scene_rows,
+        "mechanical_intervention_audit": {
+            "definition": "at_least_one_pointwise_mask_difference",
+            "changed_object_count": mask_changed,
+            "changed_scene_ids": sorted(changed_scene_ids),
+            "gate_changed_object_count": gate_changed,
+            "deprecated_full_scene_1pct_changed_object_count": (
+                large_full_scene_changes
+            ),
+            "amendment_reason": (
+                "the former full-scene 1% denominator was invalid for small "
+                "prompted objects; this gate only verifies that the treatment "
+                "entered the output, while IoU measures effect magnitude"
+            ),
+        },
         "component_count_diagnostic": {
             "status": "not_applicable",
             "reason": (
