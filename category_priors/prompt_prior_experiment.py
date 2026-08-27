@@ -183,7 +183,11 @@ def _feature_model(path: Path) -> Any:
 
 
 def _pipeline() -> SimpleNamespace:
-    return SimpleNamespace(compute_cov3D_python=False, debug=False)
+    return SimpleNamespace(
+        compute_cov3D_python=False,
+        convert_SHs_python=False,
+        debug=False,
+    )
 
 
 def _nearest(query: np.ndarray, reference: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

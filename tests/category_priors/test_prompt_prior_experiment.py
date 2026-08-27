@@ -12,6 +12,7 @@ from category_priors.prompt_prior_experiment import (
     _mark_mechanical,
     _materialize_parameters,
     _parser,
+    _pipeline,
     choose_interior_prompt,
     evaluate_prompt_pair_arrays,
 )
@@ -51,6 +52,14 @@ def test_segment_command_has_no_ground_truth_argument() -> None:
 
     assert args.command == "segment"
     assert not hasattr(args, "gt_dir")
+
+
+def test_native_render_pipeline_declares_all_renderer_switches() -> None:
+    pipeline = _pipeline()
+
+    assert pipeline.compute_cov3D_python is False
+    assert pipeline.convert_SHs_python is False
+    assert pipeline.debug is False
 
 
 def test_parameter_materialization_uses_flat_prior_contract(
