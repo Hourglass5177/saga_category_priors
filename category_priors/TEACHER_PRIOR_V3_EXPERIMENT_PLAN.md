@@ -1,13 +1,13 @@
-# SAGA 类别先验与小物体保护实验计划（当前权威：V10）
+# SAGA 类别先验与小物体保护实验计划（当前权威：提示式最小机理重置）
 
-> **权威状态：V9 已在类别先验介入前停止；第 23 节 V10 证据保真的多视角共识 ObjectBank 与类别先验终局验证是当前唯一执行路径。** 旧 B2、class-first、
+> **权威状态：V10 已在类别先验介入前停止；第 24 节“提示式最小机理重置”是当前唯一执行路径。V10B 身份头与任何新 ObjectBank 均未获授权。** 旧 B2、class-first、
 > prior-v2、teacher-preservation 和 selective-restore 文档与代码只作为失败审计记录，
 > 不得覆盖本文件的研究问题、条件定义、阶段门槛或结论边界。
 
-- 版本：V10.0
-- 冻结日期：2026-08-25
+- 版本：PMR-1.0
+- 冻结日期：2026-08-27
 - V3 起点代码检查点：`f1367fa58c8f50df75f80b86f67bab469af06531`
-- 当前状态：**正在实现 V10 Stage 0–1：真实 edge/证据漏斗、P×R 因果闭环和 view-consensus ObjectBank**
+- 当前状态：**正在纠正 V10 历史评价口径，并实现“固定对象提示、只替换类别参数”的最小配对实验**
 - 适用范围：现有 24 个 tune 场景、原 48 个内部评估场景及现有训练资产
 - 独立实验单位：physical scene
 - 技术重复：seed `42`、`3407`、`20260804`
@@ -1199,3 +1199,185 @@ bank，只CPU replay U/best-D；10,000次physical-scene paired bootstrap，ΔmAP
   本地无云端CUDA/Torch条件）。
 - [ ] commit/push、云端部署、只读复用两场lifting并启动Stage 0–1。
 - [ ] runner健康后创建并回读核验绑定当前任务的每小时自动化；停止或完成后删除。
+
+## 24. 当前权威：提示式最小机理重置（PMR-1）
+
+### 24.1 为什么停止继续扩建自动 ObjectBank
+
+V10 Stage 1 的实际停止值为：
+
+- geometric IoU≥.50 匹配数：`0`（门槛 `6`）；
+- geometric candidate precision@.25：`0.0005730659`（约 `0.0573%`，门槛 `10%`）；
+- official-valid tiny/small Recall@.25：`0.0454545`（门槛 `20%`）；
+- identifiable association precision：`0.9285317`（该项通过）；
+- candidate 数：`1745`，而 P0R0 为 `107`。
+
+V10 因此按预注册门槛停止，V10B 没有启动，类别先验没有运行。候选数量爆炸是真实结构
+故障；但后续静态审计又确认 V8/V9/V10 使用了彼此不一致的诊断投影，V10 的极低精度
+和零 IoU 还受到评价定义错误的严重影响，不能作为训练新身份头的充分依据。
+
+V10 的 `GaussianGTIndex` 先让每个 GT 点只选择一个最近 Gaussian，再把所有未被任何 GT
+点选中的预测 Gaussian 各自变成唯一 FP sentinel。当 Gaussian 数远多于 GT 点时，多个真实
+贴在同一物体表面的 Gaussian 也会被结构性地判成 FP。该定义不是老师要求的
+“预测 Gaussian→最近 GT 点精度”。历史诊断现在必须分成三个互不替代的空间：
+
+1. **官方点空间 AP/IoU**：把预测投影到官方 GT 点上，保持现有官方 evaluator；
+2. **Gaussian 精度/纯度**：每个预测 Gaussian 查询 2/5/10 cm 内最近 GT 点，未映射者才计 FP；
+3. **GT 覆盖/召回**：每个 GT 点查询最近预测 Gaussian。
+
+V10 raw bank 保持只读；只允许按上述三种定义零 GPU 重评。旧 V8/V9/V10 的 candidate
+precision/IoU 不再跨版本直接比较。
+
+更根本的研究纠正是：老师的问题是“已知物体大致位置和类别后，类别的一般大小、平滑程度
+和小物体属性能否改善分割”，而 V5–V10 实际在同时解决全场自动提案、跨视角身份、对象补全、
+分类、打分和去重。后者远大于原问题，并使类别先验多次在介入前就被上游门槛阻断。因此当前
+禁止继续 V10B、V11 或新的自动对象跟踪主干，先做下述最小、可判别的机理实验。
+
+### 24.2 唯一研究问题、处理和统计单位
+
+研究问题固定为：
+
+> 对同一个已知对象，使用完全相同的正提示和类别，在同一份 SAGA feature 上，只把共享全局
+> 参数替换成 ScanNet-train 得到的逐类参数，分割质量是否稳定提高？
+
+首轮条件只保留：
+
+- `U-global`：把 train-only global 典型包围盒对角线映射为该场景的原生 scale-gate 输入；
+- `D-class`：只把 global 典型对角线替换成该类别的 train-only shrunk 典型对角线；无类别
+  统计时回退 global。
+
+两组必须共享场景、对象、正提示、类别、feature、Gaussian、原始相似度定义、阈值候选、连通
+结构和评价点。D 不得新增候选来源、身份跟踪、学习器、融合器或另一个后处理框架。
+
+实验处理在对象内配对；对象嵌套于 physical scene。对象级差异用于机制描述，physical scene
+才是独立统计单位：先在每个场景内平均对象差异，再跨场景汇总；不得把同一场景的多个对象
+或重复扫描伪装成独立样本。
+
+GT 的使用边界固定：只允许离线选择预先定义的对象、生成一个确定性的正提示、提供已知类别
+并评价输出。GT 不得参与候选生长、参数拟合、阈值搜索、连通性或 U/D 所有权判断。
+
+首轮只检验最贴近 SAGA 原生接口的 **size gate（类别典型尺寸）**。不得同时加入 smooth、
+support、HDBSCAN、最小簇过滤或 rescue；否则又无法知道收益来自哪一层。平滑程度和小物最小
+支持只有在 size gate 的最小机理结果形成后，才能作为后续单独假设提出。
+
+### 24.3 提示式最小主干
+
+主干直接复用公开 SAGA 的提示式分割机制，不建立 ObjectBank：
+
+1. 对 official-valid SAGA20 GT 实例离线生成一个确定性像素正提示：先用修正后的最大贡献
+   Gaussian 找到该实例可见 footprint 最大的已有训练视角，再取 footprint 中离边界最远的
+   内部像素。运行 JSON 只保存 scene、camera、`(x,y)` 和 class；GT instance ID 单独放入
+   evaluation-only 文件。U/D 共用逐字相同的运行提示。
+2. 以公开 SAGA `prompt_segmenting.ipynb` 为权威核：
+
+   ```text
+   gate = scale_gate(s)
+   query = normalize(rendered_affinity[y,x] * gate)
+   points = normalize(gaussian_affinity * gate)
+   similarity = points @ query
+   mask = similarity > 0.75
+   ```
+
+   查询特征固定 `render_contrastive_feature(..., norm_point_features=True)`；不得混用 GUI 的
+   隐式默认。输出就是 Boolean Gaussian mask，不再做连通组件、HDBSCAN 或 KNN。
+3. 训练时 mask 的物理尺度经过场景分位数变换后才送入 gate。运行时必须复用同一语义：
+
+   ```text
+   d_global = exp(global.shrunk.geometry.log_bbox_diag_m.q50)
+   d_class  = exp(class.shrunk.geometry.log_bbox_diag_m.q50)
+   s_U = scene_mask_scale_CDF(d_global)
+   s_D = scene_mask_scale_CDF(d_class)
+   ```
+
+   场景 CDF 只读现有 `saga/mask_scales/*.pt`；U/D 共享同一 feature PLY、scale gate 和提示。
+4. D 唯一允许改变的是标量 `s` 及其产生的32维 gate 向量。类别不能参与 query、阈值或 mask
+   的其他部分。小物体在首轮只通过更小的典型尺寸改变原生 scale gate，不加强制保留旁路。
+
+正式实现前必须做机械干预审计：记录物理尺度、场景分位数输入、32维 gate、相似度分布、
+预测 Gaussian 数和最终 mask。若 D 参数数值发生变化但候选与输出没有变化，只能判为“参数没有
+有效介入”，不能判类别先验无效。
+
+### 24.4 分阶段实验与停止规则
+
+**Stage A：V10 历史口径闭环（零 GPU）**
+
+- 只读复用两场 V10 bank；并列输出官方点空间 IoU、Gaussian→GT 2/5/10 cm 精度/纯度、
+  GT→Gaussian 2/5/10 cm 召回。
+- 保存旧定义与纠正定义的差值；撤销由旧 unique-FP-sentinel 直接推出的结论。
+- 本阶段只纠正历史归因，不选择 PMR 参数。
+
+**Stage B：两场景机械验证**
+
+固定 `scene0645_00`、`scene0025_01`，只复用现有 3DGS、feature 和 GT，不训练、不下载。
+
+必须同时满足：
+
+- 同一对象的 U/D 正提示、类别、feature、gate 权重和相似度阈值完全一致；
+- global/class 参数表均可解析，缺失类严格回退 global；
+- 两场各选择至少2个大物体和2个小物体，总计≥8个目标；
+- `scale=0.5` 时新 worker 与 Notebook 参考核逐点等价；worker 的分割调用链没有 GT 路径；
+- RGB/feature PLY 的 Gaussian 数与 XYZ 顺序一致；查询像素自身相似度约为1且必被选中；
+- 至少4个目标 `|s_D-s_U|≥0.05`，至少2个目标的 Gaussian mask 变化达到全场 Gaussian 数的1%；
+- 输出非空、长度正确，重复运行逐点一致。
+
+若提示无法形成有效候选，停止并归因当前 SAGA feature/提示接口不足；若参数变化不进入输出，
+只修机械实现。不得在这两场景上按结果搜索阈值或逐类公式。
+
+**Stage C：8 个 physical scenes 的配对机理检验**
+
+固定：
+
+```text
+scene0645_00  scene0025_01  scene0046_00  scene0474_01
+scene0591_02  scene0329_02  scene0164_03  scene0064_01
+```
+
+每个 official-valid SAGA20 对象只运行一次确定性提示，并配对比较 U/D。主响应为对象 mask 的
+官方 GT 点空间 IoU；诊断响应为 Gaussian precision、GT recall、组件数、是否被过滤和
+tiny/small 分层结果。physical scene 内先平均，再报告8场景的均值、正向场景数和配对区间。
+
+支持当前类别先验映射继续集成的预注册条件为：
+
+- 跨场景平均 `ΔIoU ≥ 0.02`；
+- 至少 5/8 个 physical scenes 方向为正；
+- Gaussian precision 不下降超过 1 个百分点；
+- tiny/small 平均 IoU 或召回至少一项提高，且另一项不下降超过 2 个百分点。
+
+若 D 不通过：结论是“在对象身份和类别已知、提示完全相同的条件下，当前 train-derived
+典型尺寸经 SAGA 原生 scale gate 没有稳定改善分割”，这才是对**当前类别尺寸机理**的直接
+负证据；不得外推为平滑/支持等所有类别知识都无效，也不得再用
+自动 ObjectBank 解释或继续扩建身份模型。
+
+若 D 通过：老师的类别先验机理获得直接支持；下一阶段只把同一组逐类参数替换进最简单的
+B1 路径，比较共享参数 B1 与逐类参数 B1，不再建立新主干。
+
+### 24.5 实现、产物和当前检查点
+
+实现必须是独立小模块，禁止向巨型 `postprocess.py` 继续加实验分支。最多保留一个纯算法模块、
+一个场景运行/评价模块和一个轻量 CLI。必须测试：U/D 同参逐点恒等；提示逐点一致；GT 不进入
+分割函数；类别参数只改变已登记参数；三种评价空间方向正确；对象嵌套场景的统计不发生伪重复；
+重复运行确定；完整结果跳过、损坏结果只重跑当前对象。
+
+验收产物固定为：
+
+```text
+v10_metric_closeout.json
+prompt_prior_params.json
+prompt_prior_mechanical2.parquet
+prompt_prior_paired8.parquet
+prompt_prior_analysis.json
+viewer/
+```
+
+资源约束：不下载、不训练、不重训 3DGS；单 GPU、单进程；磁盘≥80GB；内存只看90GiB
+cgroup；不生成 SHA 文件、lock、schedule hash 或 contributor cache。预计本地实现与测试
+3–5小时，两场景1–2小时，8场景3–8小时。云端 runner 健康启动后才创建绑定当前任务
+`01a0018b-d00d-7bb2-a64d-bcaa3cbd3bbe`的每小时自动化，并回读核对；停止或完成后删除。
+
+- [x] V10 按预注册门槛停止；V10B 未启动，旧自动化已删除。
+- [x] 发现并静态确认 V10 unique-FP-sentinel 评价定义错误。
+- [x] 用户批准停止扩建自动系统，转为提示式最小机理实验。
+- [x] 实现三空间 V10 只读重评。
+- [x] 审计并冻结提示接口、正提示生成规则和 U/D 物化参数表。
+- [ ] 本地测试、commit/push、云端两场机械验证。
+- [ ] 通过后运行8场配对机理检验并形成结论。
