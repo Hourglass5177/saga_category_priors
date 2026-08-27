@@ -1,13 +1,14 @@
-# SAGA 类别先验与小物体保护实验计划（当前权威：提示式最小机理重置）
+# SAGA 类别先验与小物体保护实验计划（当前权威：原生尺度门控容量与映射归因）
 
-> **权威状态：V10 已在类别先验介入前停止；第 24 节“提示式最小机理重置”是当前唯一执行路径。V10B 身份头与任何新 ObjectBank 均未获授权。** 旧 B2、class-first、
+> **权威状态：V10 已在类别先验介入前停止；第 24 节的 PMR-1 已完成并形成负结果，
+> 第 25 节“原生尺度门控容量与映射归因（PMR-2）”是当前唯一执行路径。V10B 身份头与任何新 ObjectBank 均未获授权。** 旧 B2、class-first、
 > prior-v2、teacher-preservation 和 selective-restore 文档与代码只作为失败审计记录，
 > 不得覆盖本文件的研究问题、条件定义、阶段门槛或结论边界。
 
-- 版本：PMR-1.0
+- 版本：PMR-2.0
 - 冻结日期：2026-08-27
 - V3 起点代码检查点：`f1367fa58c8f50df75f80b86f67bab469af06531`
-- 当前状态：**正在纠正 V10 历史评价口径，并实现“固定对象提示、只替换类别参数”的最小配对实验**
+- 当前状态：**PMR-1 八场配对实验已完成；正在以变化方向审计和原生 scale-gate 容量正控区分“统计映射错误”与“门控接口无实用能力”**
 - 适用范围：现有 24 个 tune 场景、原 48 个内部评估场景及现有训练资产
 - 独立实验单位：physical scene
 - 技术重复：seed `42`、`3407`、`20260804`
@@ -1388,5 +1389,140 @@ cgroup；不生成 SHA 文件、lock、schedule hash 或 contributor cache。预
 - [x] 用户批准停止扩建自动系统，转为提示式最小机理实验。
 - [x] 实现三空间 V10 只读重评。
 - [x] 审计并冻结提示接口、正提示生成规则和 U/D 物化参数表。
-- [ ] 本地测试、commit/push、云端两场机械验证。
-- [ ] 通过后运行8场配对机理检验并形成结论。
+- [x] 本地测试、commit/push、云端两场机械验证。
+- [x] 运行8场配对机理检验并形成结论（commit `da22c5f`）。
+
+## 25. 当前权威：原生尺度门控容量与映射归因（PMR-2）
+
+### 25.1 PMR-1 已完成事实与结论边界
+
+固定8个physical scenes、124个对象、相同正提示、原生2k feature、scale gate和相似度阈值
+`0.75`的U/D配对已完成。D唯一把global train-only典型bbox对角线替换为class-shrunk典型
+bbox对角线。机械干预确实生效：122/124个gate向量改变、119/124个Boolean Gaussian mask
+改变；U/D并非同一输出。
+
+以physical scene等权的主结果为：
+
+- mean `D-class − U-global` IoU = `-0.0000474341`；
+- 8场景paired bootstrap 95%区间=`[-0.00106548,+0.00063856]`；
+- Gaussian precision差=`-0.0003428140`；
+- tiny/small IoU差=`+0.0000973715`，recall差=`-0.0000728759`；
+- 5/8场景为正，但实际幅度距离登记的`+0.02`门槛超过两个数量级。
+
+因此已经可靠否定的是：
+
+> 完整3D GT物体的逐类典型bbox对角线，经场景mask-scale分位数映射后直接控制当前SAGA
+> scale gate，不能在当前原生2k feature和固定提示下形成稳定、实用的分割收益。
+
+该结论不能外推为所有类别先验、平滑/支持先验或小物体保护均无效。PMR-1还留下一个必须
+闭环的歧义：是“类别物理量选错了”，还是“当前2k feature的scale gate本身几乎没有可用
+控制容量”。PMR-2只回答这个歧义，不再建立自动候选、聚类或对象跟踪主干。
+
+### 25.2 已确认的尺度定义错位
+
+`get_scale.py`训练gate时的原生尺度不是完整物体bbox。它对某一训练视角的某一2D mask：
+
+1. 渲染历史定义的累计depth；
+2. mask双线性放大后做3×3邻域和`>=5`的多数滤波；
+3. 将保留像素反投影为三维点；
+4. 计算样本标准差：
+
+```text
+native_scale = ||2 * std(x,y,z)||_2
+```
+
+5. 再由场景全部mask scales拟合的`QuantileTransformer`映射到`[0,1]`后输入gate。
+
+它描述的是“特定视角、遮挡和SAM层级下的可见mask三维扩散”，而PMR-1的bbox对角线描述完整
+物体。二者虽然都以米为单位，却不是同一个随机变量。另有公开上游已存在的历史定义瑕疵：
+像素行列与`cx/cy`配对互换、depth未除总alpha、所有视角沿用首相机FoV、主点固定中心。
+当前gate正是按这套历史定义训练，因此主正控必须按历史数值定义等价复现；几何修正版只能作旁路
+静态诊断，不得直接喂给旧gate并冒充同接口实验。
+
+### 25.3 诊断A：既有U/D变化方向审计
+
+只读复用124个U/D masks。每个`U XOR D` Gaussian在5cm最近GT映射下固定分为：
+
+- D新增且属于目标GT实例：有益；
+- D删除且不属于目标实例（同类其他实例、异类、无GT支持）：有益；
+- D删除且属于目标实例：有害；
+- D新增且不属于目标实例：有害。
+
+每对象计算：
+
+```text
+help_ratio = helpful / (helpful + harmful)
+direction = (helpful - harmful) / (helpful + harmful)
+```
+
+无变化对象的`direction=0`、`help_ratio=null`。主统计先在场景内让对象等权，再让8个physical
+scenes等权；点数加权只作诊断。2cm/10cm是敏感性分析，5cm是唯一主口径。
+
+冻结解释：场景等权`help_ratio>=0.60`且至少5/8场景`direction>0`为方向一致有益；
+`help_ratio<=0.40`且至少5/8场景`direction<0`为方向一致有害；其余为混合/近似随机边界扰动。
+诊断A不得作为是否运行容量正控的早停门槛。
+
+### 25.4 诊断B：原生scale-gate容量正控
+
+继续使用完全相同的124个对象、提示、原生2k feature、gate和阈值。固定运行归一化gate输入：
+
+```text
+0, .25, .50, .75, 1.0
+```
+
+若五点网格未显示容量，预先登记且只允许补`.125/.375/.625/.875`，形成九点网格；不再依据
+结果增加其他点。`GridOracle`用GT在`{s_U, 固定网格}`内为每对象选最高IoU；精确并列优先
+离`s_U`最近，再选更小scale。它只表示gate能力上界，不是可部署方法。
+
+广泛且实用的容量必须同时满足：
+
+- 8场景等权`GridOracle−U`平均`>=0.02`；
+- 至少5/8场景的平均增益`>=0.01`；
+- 至少25%对象自身增益`>=0.02`。
+
+同时计算`O-instance`原生尺度正控。它固定使用对象已登记的提示相机和该视角目标GT footprint，
+按历史数值定义等价复现`get_scale.py`的depth、像素坐标、多数滤波和样本标准差，再经同场景
+QuantileTransformer得到gate输入。footprint不足或scale非有限时标记ineligible，不得换视角。
+`O-instance`是GT-derived oracle，不可部署；成功门槛沿用PMR-1 Stage C：scene-equal
+`DeltaIoU>=0.02`、至少5/8为正、precision下降不超过1个百分点，且tiny/small IoU或recall
+至少一项提高、另一项下降不超过2个百分点。为避免只剩少量“容易计算”的对象造成选择偏差，
+还必须有总体至少80%的对象可计算，且每个场景至少50%的对象可计算；否则只能判为
+`O-instance`覆盖不足，不能判物理尺度映射有效或无效。
+
+### 25.5 冻结决策树与下一步边界
+
+1. 九点`GridOracle`无广泛容量：停止“类别尺寸→当前2k scale gate”路线。结论是该接口无
+   实用尺度控制能力，不是否定所有类别知识。
+2. Grid有容量、`O-instance`不通过：gate可改变结果，但有益位置与原生物理尺度无稳定关系；
+   类别平均尺寸不适合控制当前gate，停止继续校准bbox公式。
+3. Grid和`O-instance`都通过：确认PMR-1失败根因是尺度统计定义错位。下一步只允许从
+   ScanNet-train按相同原生visible-mask公式统计global/class-shrunk中位数，并在未用于构造
+   映射的holdout scenes做一次`U-global-native`与`D-class-native`配对。
+4. 只有第3步的holdout比较稳定通过，才支持老师的“简单类别尺寸先验”有效；若它仍失败，
+   才有力说明实例/视角差异压过类别均值，逐类平均原生尺度没有额外预测价值。
+
+现有8场已被反复查看，只作机理开发。不得用容量oracle选择新阈值、逐类公式或对象。GT不得
+进入分割核心；`prepare-capacity`只物化明确标注的oracle计划，`segment-capacity`不接收GT路径。
+
+### 25.6 工程、产物与当前检查点
+
+新增独立小模块和runner，不修改PMR-1 U/D产物、不修改`postprocess.py`、不启用ObjectBank。
+运行前逐项验证旧124结果可解析、mask为二值、metadata gate与重算gate一致。容量按scene加载
+feature/gate一次、camera query一次；固定scale按scene共享point feature gate，避免重复归一化。
+
+验收产物：
+
+```text
+prompt_prior_direction_audit.parquet
+prompt_prior_direction_audit.json
+prompt_prior_scale_capacity_plan.json
+prompt_prior_scale_capacity.parquet
+prompt_prior_scale_capacity.json
+```
+
+- [x] PMR-1八场124对象配对实验完成，当前bbox-diagonal映射未通过。
+- [x] 静态确认训练mask-scale与完整3D bbox的定义错位。
+- [x] 冻结变化方向、固定网格、O-instance和决策门槛。
+- [ ] 实现独立诊断模块、测试、commit/push。
+- [ ] 云端复用既有资产运行方向审计与容量正控。
+- [ ] 按冻结决策树停止或进入唯一的train-only native class-scale holdout检验。
