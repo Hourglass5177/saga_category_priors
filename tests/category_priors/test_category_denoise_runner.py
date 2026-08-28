@@ -191,7 +191,9 @@ def test_command_is_fixed_to_legacy_postprocess_without_training_or_gt(
     scene = {
         "base_path": str(tmp_path / "scene"),
         "scene_scale_m_per_unit": 1.25,
+        "python_bin": str(tmp_path / "registered-python"),
     }
+    override_python = tmp_path / "gpu-compatible-python"
     command = _build_command(
         pipeline_path=pipeline,
         priors_path=priors,
@@ -204,6 +206,7 @@ def test_command_is_fixed_to_legacy_postprocess_without_training_or_gt(
         action="replay",
         mode="class",
         seed=42,
+        python_bin=override_python,
     )
 
     assert _option(command, "--category-denoise-action") == "replay"
@@ -211,6 +214,7 @@ def test_command_is_fixed_to_legacy_postprocess_without_training_or_gt(
     assert _option(command, "--seed") == "42"
     assert _option(command, "--prior-mode") == "off"
     assert _option(command, "--clustering-mode") == "legacy"
+    assert _option(command, "--python") == str(override_python.resolve())
     assert "--disable-other-classes" in command
     forbidden = {
         "--gt-dir",

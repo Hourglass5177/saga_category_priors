@@ -207,6 +207,7 @@ def _build_command(
     action: str,
     mode: str,
     seed: int,
+    python_bin: str | Path | None = None,
 ) -> list[str]:
     command = [
         "bash",
@@ -244,9 +245,9 @@ def _build_command(
         "--category-priors",
         str(priors_path),
     ]
-    python_bin = scene.get("python_bin")
-    if python_bin:
-        command.extend(("--python", str(Path(str(python_bin)).resolve())))
+    selected_python = python_bin if python_bin is not None else scene.get("python_bin")
+    if selected_python:
+        command.extend(("--python", str(Path(str(selected_python)).resolve())))
     for keys, option in _SCENE_PATH_OPTIONS:
         path = _resolved_scene_path(scene, keys)
         if path is not None:
@@ -301,6 +302,7 @@ def run_category_denoise_bank(
     scene_ids: str | Sequence[str] | None = None,
     *,
     seed: int = 42,
+    python_bin: str | Path | None = None,
 ) -> dict[str, Any]:
     """Generate one shared candidate bank and a B0 output per selected scene."""
 
@@ -336,6 +338,7 @@ def run_category_denoise_bank(
             action="bank",
             mode="uniform",
             seed=seed,
+            python_bin=python_bin,
         )
         return_code = _run_command(command, cwd=pipeline.parent, log_path=scene_root / "bank.log")
         if return_code != 0 or not _bank_complete(
@@ -365,6 +368,7 @@ def replay_category_denoise(
     mode: str | Sequence[str] = ("uniform", "class"),
     *,
     seed: int = 42,
+    python_bin: str | Path | None = None,
 ) -> dict[str, Any]:
     """Replay uniform and/or class statistics over immutable scene banks."""
 
@@ -410,6 +414,7 @@ def replay_category_denoise(
                 action="replay",
                 mode=replay_mode,
                 seed=seed,
+                python_bin=python_bin,
             )
             return_code = _run_command(
                 command, cwd=pipeline.parent, log_path=scene_root / "postprocess.log"
@@ -446,6 +451,7 @@ def run_category_denoise_b0_control(
     scene_ids: str | Sequence[str] | None = None,
     *,
     seed: int = 42,
+    python_bin: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run the category-denoising code path fully disabled for DEV2 parity.
 
@@ -484,6 +490,7 @@ def run_category_denoise_b0_control(
             action="off",
             mode="uniform",
             seed=seed,
+            python_bin=python_bin,
         )
         return_code = _run_command(
             command, cwd=pipeline.parent, log_path=scene_root / "postprocess.log"

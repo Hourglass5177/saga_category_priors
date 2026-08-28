@@ -390,10 +390,16 @@ def _run_batch(
     runs_root: Path,
     repo_root: Path,
     priors: Path,
+    python_bin: Path | None,
 ) -> None:
     _assert_resources(runs_root)
     run_category_denoise_bank(
-        runtime_manifest, runs_root, repo_root, priors, scene_ids
+        runtime_manifest,
+        runs_root,
+        repo_root,
+        priors,
+        scene_ids,
+        python_bin=python_bin,
     )
     replay_category_denoise(
         runtime_manifest,
@@ -403,6 +409,7 @@ def _run_batch(
         priors,
         scene_ids,
         mode=("uniform", "class"),
+        python_bin=python_bin,
     )
 
 
@@ -416,6 +423,10 @@ def run_category_denoise_experiment(args: argparse.Namespace) -> dict[str, Any]:
     size_bins = Path(args.size_bins).resolve()
     tune_gt = Path(args.gt_dir).resolve()
     locked_gt = Path(args.locked_gt_dir).resolve()
+    python_override = getattr(args, "python_bin", None)
+    python_bin = Path(python_override).resolve() if python_override else None
+    if python_bin is not None and not python_bin.is_file():
+        raise FileNotFoundError(python_bin)
     for path in (runs_root, artifacts_root):
         path.mkdir(parents=True, exist_ok=True)
     status_path = artifacts_root / "category_denoise_status.json"
@@ -436,7 +447,12 @@ def run_category_denoise_experiment(args: argparse.Namespace) -> dict[str, Any]:
             resources=_assert_resources(runs_root),
         )
         run_category_denoise_b0_control(
-            tune_manifest, runs_root, repo_root, priors, DEV2
+            tune_manifest,
+            runs_root,
+            repo_root,
+            priors,
+            DEV2,
+            python_bin=python_bin,
         )
         _run_batch(
             runtime_manifest=tune_manifest,
@@ -444,6 +460,7 @@ def run_category_denoise_experiment(args: argparse.Namespace) -> dict[str, Any]:
             runs_root=runs_root,
             repo_root=repo_root,
             priors=priors,
+            python_bin=python_bin,
         )
         shutil.copyfile(
             runs_root / "category_denoise_params.json",
@@ -477,6 +494,7 @@ def run_category_denoise_experiment(args: argparse.Namespace) -> dict[str, Any]:
             runs_root=runs_root,
             repo_root=repo_root,
             priors=priors,
+            python_bin=python_bin,
         )
         analysis8 = _evaluate(
             runtime_manifest=tune_manifest,
@@ -523,6 +541,7 @@ def run_category_denoise_experiment(args: argparse.Namespace) -> dict[str, Any]:
             runs_root=runs_root,
             repo_root=repo_root,
             priors=priors,
+            python_bin=python_bin,
         )
         holdout_analysis = _evaluate(
             runtime_manifest=tune_manifest,
@@ -562,6 +581,7 @@ def run_category_denoise_experiment(args: argparse.Namespace) -> dict[str, Any]:
             runs_root=runs_root,
             repo_root=repo_root,
             priors=priors,
+            python_bin=python_bin,
         )
         tune_analysis = _evaluate(
             runtime_manifest=tune_manifest,
@@ -602,6 +622,7 @@ def run_category_denoise_experiment(args: argparse.Namespace) -> dict[str, Any]:
             runs_root=final_root,
             repo_root=repo_root,
             priors=priors,
+            python_bin=python_bin,
         )
         final_analysis = _evaluate(
             runtime_manifest=locked_manifest,
@@ -668,6 +689,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--artifacts-root", required=True)
     parser.add_argument("--category-priors", required=True)
     parser.add_argument("--size-bins", required=True)
+    parser.add_argument(
+        "--python-bin",
+        help="override per-scene Python only when the registered environment cannot run the current GPU",
+    )
     return parser
 
 
