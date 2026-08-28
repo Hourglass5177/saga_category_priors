@@ -39,6 +39,55 @@ from .v10_replay import V10_CLASSIFIERS, V10_PRIOR_CONDITIONS, replay_v10_priors
 from .v10_runner import V10_STRUCTURE_CONDITIONS, run_v10_banks
 
 
+def _run_category_denoise_bank(args: argparse.Namespace) -> None:
+    from .category_denoise_runner import run_category_denoise_bank
+
+    payload = run_category_denoise_bank(
+        runtime_manifest=Path(args.runtime_manifest),
+        output_root=Path(args.output_root),
+        repo_root=Path(args.repo_root),
+        category_priors=Path(args.category_priors),
+        scene_ids=args.scene,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _replay_category_denoise(args: argparse.Namespace) -> None:
+    from .category_denoise_runner import replay_category_denoise
+
+    payload = replay_category_denoise(
+        runtime_manifest=Path(args.runtime_manifest),
+        bank_root=Path(args.bank_root),
+        output_root=Path(args.output_root),
+        repo_root=Path(args.repo_root),
+        category_priors=Path(args.category_priors),
+        scene_ids=args.scene,
+        mode=args.mode,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _evaluate_category_denoise(args: argparse.Namespace) -> None:
+    from .category_denoise_evaluation import evaluate_category_denoise
+
+    payload = evaluate_category_denoise(
+        runtime_manifest=Path(args.runtime_manifest),
+        gt_dir=Path(args.gt_dir),
+        bank_root=Path(args.bank_root),
+        prediction_root=Path(args.prediction_root),
+        scene_ids=args.scene,
+        conditions=args.condition,
+        taxonomy=load_taxonomy(args.taxonomy),
+        metrics_output=Path(args.metrics_output),
+        analysis_output=Path(args.analysis_output),
+        radius_m=args.radius_m,
+        min_region_size=args.min_region_size,
+        size_bins=Path(args.size_bins) if args.size_bins else None,
+        viewer_output=Path(args.viewer_output) if args.viewer_output else None,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
 def _fit(args: argparse.Namespace) -> None:
     payload = fit_priors(
         read_rows(args.stats), load_taxonomy(args.taxonomy), args.stats,
@@ -564,6 +613,49 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_v10.add_argument("--radius-m", type=float, default=0.05)
     evaluate_v10.add_argument("--min-region-size", type=int, default=100)
     evaluate_v10.set_defaults(func=_evaluate_v10)
+
+    denoise_bank = commands.add_parser(
+        "run-category-denoise-bank",
+        help="build one immutable all-category candidate bank per scene",
+    )
+    denoise_bank.add_argument("--runtime-manifest", required=True)
+    denoise_bank.add_argument("--output-root", required=True)
+    denoise_bank.add_argument("--repo-root", default=".")
+    denoise_bank.add_argument("--category-priors", required=True)
+    denoise_bank.add_argument("--scene", action="append", required=True)
+    denoise_bank.set_defaults(func=_run_category_denoise_bank)
+
+    denoise_replay = commands.add_parser(
+        "replay-category-denoise",
+        help="replay uniform or class statistics over an immutable denoising bank",
+    )
+    denoise_replay.add_argument("--runtime-manifest", required=True)
+    denoise_replay.add_argument("--bank-root", required=True)
+    denoise_replay.add_argument("--output-root", required=True)
+    denoise_replay.add_argument("--repo-root", default=".")
+    denoise_replay.add_argument("--category-priors", required=True)
+    denoise_replay.add_argument("--mode", choices=("uniform", "class"), required=True)
+    denoise_replay.add_argument("--scene", action="append", required=True)
+    denoise_replay.set_defaults(func=_replay_category_denoise)
+
+    denoise_evaluate = commands.add_parser(
+        "evaluate-category-denoise",
+        help="official AP and candidate diagnostics for all-category denoising",
+    )
+    denoise_evaluate.add_argument("--runtime-manifest", required=True)
+    denoise_evaluate.add_argument("--gt-dir", required=True)
+    denoise_evaluate.add_argument("--bank-root", required=True)
+    denoise_evaluate.add_argument("--prediction-root", required=True)
+    denoise_evaluate.add_argument("--scene", action="append", required=True)
+    denoise_evaluate.add_argument("--condition", action="append", required=True)
+    denoise_evaluate.add_argument("--taxonomy")
+    denoise_evaluate.add_argument("--metrics-output", required=True)
+    denoise_evaluate.add_argument("--analysis-output", required=True)
+    denoise_evaluate.add_argument("--viewer-output")
+    denoise_evaluate.add_argument("--size-bins")
+    denoise_evaluate.add_argument("--radius-m", type=float, default=0.05)
+    denoise_evaluate.add_argument("--min-region-size", type=int, default=100)
+    denoise_evaluate.set_defaults(func=_evaluate_category_denoise)
     return parser
 
 

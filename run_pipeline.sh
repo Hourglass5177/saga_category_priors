@@ -68,6 +68,10 @@ v6_candidate_labels_output=""
 v6_git_commit=""
 v6_scene_id=""
 v7_causal_ablation="L0"
+category_denoise_action="off"
+category_denoise_bank_path=""
+category_denoise_mode="uniform"
+category_denoise_scene_id=""
 
 sam_checkpoint_path="${SCRIPT_DIR}/weights/sam_vit_h_4b8939.pth"
 groundingdino_checkpoint_path="${SCRIPT_DIR}/weights/groundingdino_swint_ogc.pth"
@@ -169,6 +173,12 @@ V6 affinity-first proposal-bank options:
   --v6-candidate-labels-output PATH
   --v6-git-commit COMMIT
   --v6-scene-id SCENE
+
+All-category denoising options:
+  --category-denoise-action MODE  off|bank|replay
+  --category-denoise-bank-path PATH
+  --category-denoise-mode MODE    uniform|class
+  --category-denoise-scene-id SCENE
 
 Model options:
   --sam-checkpoint-path PATH
@@ -422,6 +432,12 @@ preflight_stage() {
                     ensure_parent_dir "$v6_candidate_output"
                     ensure_parent_dir "$v6_candidate_labels_output"
                 fi
+                if [[ "$category_denoise_action" != "off" ]]; then
+                    require_file "$label_features_path" "Label features file"
+                    require_file "$category_priors" "Category priors"
+                    [[ -n "$category_denoise_bank_path" ]] || err "--category-denoise-bank-path is required"
+                    ensure_parent_dir "$category_denoise_bank_path"
+                fi
             fi
             ;;
         render)
@@ -506,7 +522,16 @@ run_postprocess() {
         --teacher-prior-mode "$teacher_prior_mode"
         --teacher-evidence-protection "$teacher_evidence_protection"
         --v7-causal-ablation "$v7_causal_ablation"
+        --category-denoise-action "$category_denoise_action"
+        --category-denoise-mode "$category_denoise_mode"
     )
+    if [[ "$category_denoise_action" != "off" ]]; then
+        prior_args+=(
+            --category-denoise-bank-path "$category_denoise_bank_path"
+            --category-denoise-scene-id "$category_denoise_scene_id"
+            --category-priors "$category_priors"
+        )
+    fi
     if [[ "$prior_mode" != "off" ]]; then
         prior_args+=(
             --prior_config "$prior_config"
@@ -777,6 +802,22 @@ while [[ $# -gt 0 ]]; do
             ;;
         --v7-causal-ablation)
             v7_causal_ablation="$2"
+            shift 2
+            ;;
+        --category-denoise-action)
+            category_denoise_action="$2"
+            shift 2
+            ;;
+        --category-denoise-bank-path)
+            category_denoise_bank_path="$2"
+            shift 2
+            ;;
+        --category-denoise-mode)
+            category_denoise_mode="$2"
+            shift 2
+            ;;
+        --category-denoise-scene-id)
+            category_denoise_scene_id="$2"
             shift 2
             ;;
         --v3-shadow-mode)

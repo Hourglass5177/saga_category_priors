@@ -802,6 +802,16 @@ def main():
     parser.add_argument("--v6-candidate-labels-output", type=str, default=None)
     parser.add_argument("--v6-git-commit", type=str, default=None)
     parser.add_argument("--v6-scene-id", type=str, default=None)
+    parser.add_argument(
+        "--category-denoise-action",
+        choices=("off", "bank", "replay"),
+        default="off",
+    )
+    parser.add_argument("--category-denoise-bank-path", type=str, default=None)
+    parser.add_argument(
+        "--category-denoise-mode", choices=("uniform", "class"), default="uniform"
+    )
+    parser.add_argument("--category-denoise-scene-id", type=str, default=None)
     args = parser.parse_args(sys.argv[1:])
     if args.v3_shadow_mode != 'off':
         if not args.v3_shadow_output or not args.v3_branch_labels_output:
@@ -844,6 +854,19 @@ def main():
             parser.error("V6 candidate bank requires the unchanged legacy main path")
         if args.scene_scale_m_per_unit <= 0:
             parser.error("V6 candidate bank requires positive --scene_scale_m_per_unit")
+    if args.category_denoise_action != "off":
+        if not args.category_denoise_bank_path or not args.category_denoise_scene_id:
+            parser.error(
+                "category denoising requires --category-denoise-bank-path and scene ID"
+            )
+        if not args.category_priors:
+            parser.error("category denoising requires --category-priors")
+        if not args.disable_other_classes:
+            parser.error("category denoising requires --disable-other-classes")
+        if args.prior_mode != "off" or args.clustering_mode != "legacy":
+            parser.error("category denoising requires the unchanged legacy global path")
+        if args.scene_scale_m_per_unit <= 0:
+            parser.error("category denoising requires a positive scene scale")
     prior_resolver = None
     if args.prior_mode != 'off':
         if not args.prior_config or not args.prior_mapping_config:
@@ -1029,6 +1052,14 @@ def main():
     point_features = feat_gs_model.get_point_features.detach().cpu()
     point_semantic_features = feat_gs_model.get_point_semantic_features.detach().cpu()
     point_xyz = feat_gs_model.get_xyz.detach().cpu()
+    if args.category_denoise_action != "off":
+        rgb_xyz = gs_model.get_xyz.detach().cpu()
+        if rgb_xyz.shape != point_xyz.shape or not torch.allclose(
+            rgb_xyz, point_xyz, rtol=0.0, atol=1e-6
+        ):
+            raise ValueError(
+                "category denoising requires RGB and feature Gaussians in identical order"
+            )
     point_scales = feat_gs_model.get_scaling.detach().cpu()
     is_big_gaussian = point_scales.max(dim=-1).values>point_scales.max(dim=-1).values.median()*args.scale_threshold
     point_opacities = feat_gs_model.get_opacity.detach().cpu().squeeze()
@@ -1147,6 +1178,48 @@ def main():
     fallback_point_labels = point_labels.detach().cpu().clone()
     global_full_assignment_trace = fallback_point_labels.clone()
     fallback_assignment_confidence = point_assignment_confidence.detach().cpu().clone()
+    category_denoise_bank = None
+    category_denoise_decisions = []
+    category_denoise_classes = {}
+    category_denoise_scores = {}
+    category_denoise_diagnostics = {}
+    if args.category_denoise_action == "bank":
+        from category_priors.category_denoise import build_candidate_bank
+        from category_priors.teacher_prior import saga20_branch_classes
+
+        category_denoise_bank = build_candidate_bank(
+            normed_point_features,
+            normed_point_semantic_features,
+            point_xyz,
+            F.normalize(label_features.detach().cpu(), dim=-1, p=2),
+            args.classes,
+            saga20_branch_classes(class_to_idx),
+            fallback_point_labels,
+            args.scene_scale_m_per_unit,
+            seed=args.seed,
+        )
+        category_denoise_bank.diagnostics["scene_id"] = (
+            args.category_denoise_scene_id
+        )
+        print(
+            "category-denoise bank captured "
+            f"{len(category_denoise_bank.candidates)} frozen candidates"
+        )
+    elif args.category_denoise_action == "replay":
+        from category_priors.category_denoise import load_candidate_bank
+
+        category_denoise_bank = load_candidate_bank(args.category_denoise_bank_path)
+        if category_denoise_bank.class_names != tuple(args.classes):
+            raise ValueError("category-denoise bank class table does not match runtime")
+        if category_denoise_bank.seed != int(args.seed):
+            raise ValueError("category-denoise bank seed does not match runtime")
+        if not np.array_equal(
+            category_denoise_bank.global_pre_knn,
+            fallback_point_labels.numpy(),
+        ):
+            raise ValueError(
+                "category-denoise replay does not reproduce the bank global-pre-KNN labels"
+            )
     prior_overlay = None
     if prior_resolver is not None:
         if label_features is None:
@@ -1622,13 +1695,47 @@ def main():
                 'after_filter': shadow_after_filter,
                 'merged_ids': merged_ids,
             }
-        if args.k>0 and args.v7_causal_ablation == "L0":
-            point_labels = filter3d(point_xyz, point_labels, args.k)
-        teacher_after_knn = point_labels.detach().cpu().clone()
-        point_labels = filter_num(point_labels, min_num=10)
-        # This snapshot belongs exactly to filter_num.  Later local attachment
-        # and branch-preservation operations must not overwrite its meaning.
-        post_filter_trace = point_labels.detach().cpu().clone()
+        if args.category_denoise_action == "replay":
+            from category_priors.category_denoise import (
+                replay_protected_denoise,
+                score_bank_candidates,
+            )
+            from category_priors.io import load_json
+
+            category_denoise_decisions = score_bank_candidates(
+                category_denoise_bank,
+                load_json(args.category_priors),
+                args.category_denoise_mode,
+            )
+            replayed, category_denoise_classes, category_denoise_scores, replay_diag = (
+                replay_protected_denoise(
+                    point_xyz.numpy(),
+                    category_denoise_bank,
+                    category_denoise_decisions,
+                    k=args.k,
+                    min_count=10,
+                )
+            )
+            point_labels = torch.from_numpy(np.asarray(replayed, dtype=np.int64))
+            teacher_after_knn = point_labels.detach().cpu().clone()
+            post_filter_trace = point_labels.detach().cpu().clone()
+            category_denoise_diagnostics = {
+                **replay_diag,
+                "mode": args.category_denoise_mode,
+                "candidate_count": len(category_denoise_decisions),
+                "accepted_candidate_count": int(
+                    sum(bool(row["accepted"]) for row in category_denoise_decisions)
+                ),
+                "decisions": category_denoise_decisions,
+            }
+        else:
+            if args.k>0 and args.v7_causal_ablation == "L0":
+                point_labels = filter3d(point_xyz, point_labels, args.k)
+            teacher_after_knn = point_labels.detach().cpu().clone()
+            point_labels = filter_num(point_labels, min_num=10)
+            # This snapshot belongs exactly to filter_num.  Later local attachment
+            # and branch-preservation operations must not overwrite its meaning.
+            post_filter_trace = point_labels.detach().cpu().clone()
         if args.v7_causal_ablation == "L3":
             from category_priors.v7_objects import attach_local_labels
             point_labels = torch.from_numpy(attach_local_labels(
@@ -1749,6 +1856,26 @@ def main():
     # point_labels = torch.load(os.path.join(args.model_path, 'point_labels.pth'))
 
     instance_ratio = compute_instance_ratios(point_labels, update_progress=True)
+    if args.category_denoise_action == "bank":
+        from category_priors.category_denoise import (
+            attach_candidate_votes,
+            save_candidate_bank,
+        )
+
+        branch_vote_ratios = compute_instance_ratios(
+            torch.from_numpy(category_denoise_bank.branch_full_labels.copy()),
+            update_progress=False,
+        )
+        category_denoise_bank = attach_candidate_votes(
+            category_denoise_bank, branch_vote_ratios, args.classes
+        )
+        save_candidate_bank(
+            category_denoise_bank, args.category_denoise_bank_path
+        )
+        print(
+            "category-denoise bank saved: "
+            f"{args.category_denoise_bank_path}"
+        )
     if args.v5_candidate_source != 'off':
         from category_priors.teacher_prior import saga20_branch_classes
         from category_priors.v3_shadow import target_top1_masks, vote_summary
@@ -2268,6 +2395,9 @@ def main():
         return merged
     bbox = get_bbox(point_labels.cpu(), point_xyz, is_big_gaussian)
     clazz = {instance: get_class(args.classes, ratio) for instance, ratio in instance_ratio.items()}
+    for instance_id, branch_class in category_denoise_classes.items():
+        if instance_id in clazz:
+            clazz[instance_id] = branch_class
     teacher_vote_class_mismatches = 0
     teacher_vote_class_matches = 0
     teacher_vote_class_total = 0
@@ -2284,6 +2414,9 @@ def main():
             teacher_vote_class_mismatches += 1
         clazz[instance_id] = branch_class
     raw_instances = combine_prop(bbox, clazz)
+    for instance_id, score in category_denoise_scores.items():
+        if instance_id in raw_instances:
+            raw_instances[instance_id]["score"] = float(score)
     raw_instances = {
         key: value
         for key, value in raw_instances.items()
@@ -2439,6 +2572,21 @@ def main():
                     if len(point_labels) else 0.0
                 ),
             }
+        if args.category_denoise_action != "off":
+            metadata.pop("content_sha256", None)
+            metadata["category_denoise"] = {
+                "action": args.category_denoise_action,
+                "mode": args.category_denoise_mode,
+                "scene_id": args.category_denoise_scene_id,
+                "bank_path": os.path.abspath(args.category_denoise_bank_path),
+                **category_denoise_diagnostics,
+            }
+            for instance_id, branch_class in category_denoise_classes.items():
+                values = metadata["instances"].get(str(instance_id))
+                if values is None:
+                    continue
+                values["class"] = branch_class
+                values["score"] = float(category_denoise_scores[instance_id])
         write_instance_metadata(args.prior_metadata_path, metadata)
     if(args.clean):
         if os.path.isdir(args.masks_path):
