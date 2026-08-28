@@ -69,6 +69,11 @@ def _assert_resources(root: Path) -> dict[str, Any]:
     current = int((cgroup / "memory.current").read_text().strip())
     maximum_text = (cgroup / "memory.max").read_text().strip()
     maximum = int(maximum_text) if maximum_text != "max" else None
+    expected_maximum = 90 * 1024**3
+    if maximum != expected_maximum:
+        raise RuntimeError(
+            f"expected cgroup memory.max=90GiB; found {maximum_text}"
+        )
     if maximum is not None and current >= maximum:
         raise RuntimeError("cgroup memory.current has reached memory.max")
     return {
@@ -346,7 +351,7 @@ def _final_gate(analysis: Mapping[str, Any], bootstrap: Mapping[str, Any]) -> di
         "ap50_not_regressed": float(data["ap50"]) - float(uniform["ap50"]) >= -0.002,
         "gaussian_precision_not_regressed": float(data["gaussian_micro_precision"])
         - float(uniform["gaussian_micro_precision"])
-        >= -0.05,
+        >= -0.01,
         "fp_tp_degradation_within_20_percent": _fp_tp_ratio(data)
         <= 1.20 * _fp_tp_ratio(uniform) + 1e-12,
     }
