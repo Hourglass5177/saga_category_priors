@@ -214,7 +214,7 @@ def test_command_is_fixed_to_legacy_postprocess_without_training_or_gt(
     assert _option(command, "--seed") == "42"
     assert _option(command, "--prior-mode") == "off"
     assert _option(command, "--clustering-mode") == "legacy"
-    assert _option(command, "--python") == str(override_python.resolve())
+    assert _option(command, "--python") == str(override_python.absolute())
     assert "--disable-other-classes" in command
     forbidden = {
         "--gt-dir",

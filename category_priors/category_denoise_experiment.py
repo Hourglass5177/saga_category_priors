@@ -424,7 +424,9 @@ def run_category_denoise_experiment(args: argparse.Namespace) -> dict[str, Any]:
     tune_gt = Path(args.gt_dir).resolve()
     locked_gt = Path(args.locked_gt_dir).resolve()
     python_override = getattr(args, "python_bin", None)
-    python_bin = Path(python_override).resolve() if python_override else None
+    python_bin = (
+        Path(python_override).expanduser().absolute() if python_override else None
+    )
     if python_bin is not None and not python_bin.is_file():
         raise FileNotFoundError(python_bin)
     for path in (runs_root, artifacts_root):

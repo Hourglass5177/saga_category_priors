@@ -247,7 +247,10 @@ def _build_command(
     ]
     selected_python = python_bin if python_bin is not None else scene.get("python_bin")
     if selected_python:
-        command.extend(("--python", str(Path(str(selected_python)).resolve())))
+        python_path = Path(str(selected_python)).expanduser()
+        if not python_path.is_absolute():
+            python_path = python_path.absolute()
+        command.extend(("--python", str(python_path)))
     for keys, option in _SCENE_PATH_OPTIONS:
         path = _resolved_scene_path(scene, keys)
         if path is not None:
