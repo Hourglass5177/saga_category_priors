@@ -88,6 +88,98 @@ def _evaluate_category_denoise(args: argparse.Namespace) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+def _diagnose_category_denoise_funnel(args: argparse.Namespace) -> None:
+    from .category_denoise_diagnostic_runner import (
+        diagnose_category_denoise_funnel,
+    )
+
+    payload = diagnose_category_denoise_funnel(
+        runtime_manifest=Path(args.runtime_manifest),
+        gt_dir=Path(args.gt_dir),
+        bank_root=Path(args.bank_root),
+        category_priors=Path(args.category_priors),
+        size_bins=Path(args.size_bins) if args.size_bins else None,
+        output_dir=Path(args.output_dir),
+        scene_ids=args.scene,
+        taxonomy=load_taxonomy(args.taxonomy),
+        radius_m=args.radius_m,
+        min_region_size=args.min_region_size,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _prepare_category_denoise_knn_oracle(args: argparse.Namespace) -> None:
+    from .category_denoise_diagnostic_runner import (
+        prepare_category_denoise_knn_oracle,
+    )
+
+    payload = prepare_category_denoise_knn_oracle(
+        runtime_manifest=Path(args.runtime_manifest),
+        gt_dir=Path(args.gt_dir),
+        bank_root=Path(args.bank_root),
+        output=Path(args.output),
+        scene_ids=args.scene,
+        taxonomy=load_taxonomy(args.taxonomy),
+        iou_threshold=args.iou_threshold,
+        radius_m=args.radius_m,
+        min_region_size=args.min_region_size,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _replay_category_denoise_knn_oracle(args: argparse.Namespace) -> None:
+    from .category_denoise_diagnostic_runner import (
+        replay_category_denoise_knn_oracle,
+    )
+
+    payload = replay_category_denoise_knn_oracle(
+        runtime_manifest=Path(args.runtime_manifest),
+        bank_root=Path(args.bank_root),
+        b0_root=Path(args.b0_root),
+        oracle_plan=Path(args.oracle_plan),
+        output_root=Path(args.output_root),
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _evaluate_category_denoise_knn_oracle(args: argparse.Namespace) -> None:
+    from .category_denoise_diagnostic_evaluation import (
+        evaluate_category_denoise_knn_oracle,
+    )
+
+    payload = evaluate_category_denoise_knn_oracle(
+        runtime_manifest=Path(args.runtime_manifest),
+        gt_dir=Path(args.gt_dir),
+        prediction_root=Path(args.prediction_root),
+        oracle_plan=Path(args.oracle_plan),
+        output_dir=Path(args.output_dir),
+        taxonomy=load_taxonomy(args.taxonomy),
+        size_bins=Path(args.size_bins) if args.size_bins else None,
+        radius_m=args.radius_m,
+        min_region_size=args.min_region_size,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _diagnose_category_prior_oracle(args: argparse.Namespace) -> None:
+    from .category_denoise_diagnostic_runner import (
+        diagnose_category_prior_oracle,
+    )
+
+    payload = diagnose_category_prior_oracle(
+        runtime_manifest=Path(args.runtime_manifest),
+        gt_dir=Path(args.gt_dir),
+        category_priors=Path(args.category_priors),
+        size_bins=Path(args.size_bins) if args.size_bins else None,
+        output_dir=Path(args.output_dir),
+        scene_ids=args.scene,
+        taxonomy=load_taxonomy(args.taxonomy),
+        radius_m=args.radius_m,
+        min_region_size=args.min_region_size,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
 def _fit(args: argparse.Namespace) -> None:
     payload = fit_priors(
         read_rows(args.stats), load_taxonomy(args.taxonomy), args.stats,
@@ -656,6 +748,78 @@ def build_parser() -> argparse.ArgumentParser:
     denoise_evaluate.add_argument("--radius-m", type=float, default=0.05)
     denoise_evaluate.add_argument("--min-region-size", type=int, default=100)
     denoise_evaluate.set_defaults(func=_evaluate_category_denoise)
+
+    funnel = commands.add_parser(
+        "diagnose-category-denoise-funnel",
+        help="diagnose semantic, core, full-candidate, and score bottlenecks",
+    )
+    funnel.add_argument("--runtime-manifest", required=True)
+    funnel.add_argument("--gt-dir", required=True)
+    funnel.add_argument("--bank-root", required=True)
+    funnel.add_argument("--category-priors", required=True)
+    funnel.add_argument("--size-bins")
+    funnel.add_argument("--output-dir", required=True)
+    funnel.add_argument("--scene", action="append", required=True)
+    funnel.add_argument("--taxonomy")
+    funnel.add_argument("--radius-m", type=float, default=0.05)
+    funnel.add_argument("--min-region-size", type=int, default=100)
+    funnel.set_defaults(func=_diagnose_category_denoise_funnel)
+
+    prepare_knn = commands.add_parser(
+        "prepare-category-denoise-knn-oracle",
+        help="select evaluation-only same-class IoU>=0.50 candidates",
+    )
+    prepare_knn.add_argument("--runtime-manifest", required=True)
+    prepare_knn.add_argument("--gt-dir", required=True)
+    prepare_knn.add_argument("--bank-root", required=True)
+    prepare_knn.add_argument("--output", required=True)
+    prepare_knn.add_argument("--scene", action="append", required=True)
+    prepare_knn.add_argument("--taxonomy")
+    prepare_knn.add_argument("--iou-threshold", type=float, default=0.50)
+    prepare_knn.add_argument("--radius-m", type=float, default=0.05)
+    prepare_knn.add_argument("--min-region-size", type=int, default=100)
+    prepare_knn.set_defaults(func=_prepare_category_denoise_knn_oracle)
+
+    replay_knn = commands.add_parser(
+        "replay-category-denoise-knn-oracle",
+        help="GT-free O1/O2 replay of a frozen oracle candidate plan",
+    )
+    replay_knn.add_argument("--runtime-manifest", required=True)
+    replay_knn.add_argument("--bank-root", required=True)
+    replay_knn.add_argument("--b0-root", required=True)
+    replay_knn.add_argument("--oracle-plan", required=True)
+    replay_knn.add_argument("--output-root", required=True)
+    replay_knn.set_defaults(func=_replay_category_denoise_knn_oracle)
+
+    evaluate_knn = commands.add_parser(
+        "evaluate-category-denoise-knn-oracle",
+        help="evaluate fixed B0 metadata and O1/O2 KNN counterfactuals",
+    )
+    evaluate_knn.add_argument("--runtime-manifest", required=True)
+    evaluate_knn.add_argument("--gt-dir", required=True)
+    evaluate_knn.add_argument("--prediction-root", required=True)
+    evaluate_knn.add_argument("--oracle-plan", required=True)
+    evaluate_knn.add_argument("--output-dir", required=True)
+    evaluate_knn.add_argument("--size-bins")
+    evaluate_knn.add_argument("--taxonomy")
+    evaluate_knn.add_argument("--radius-m", type=float, default=0.05)
+    evaluate_knn.add_argument("--min-region-size", type=int, default=100)
+    evaluate_knn.set_defaults(func=_evaluate_category_denoise_knn_oracle)
+
+    prior_oracle = commands.add_parser(
+        "diagnose-category-prior-oracle",
+        help="test prior calibration on complete GT-derived Gaussian objects",
+    )
+    prior_oracle.add_argument("--runtime-manifest", required=True)
+    prior_oracle.add_argument("--gt-dir", required=True)
+    prior_oracle.add_argument("--category-priors", required=True)
+    prior_oracle.add_argument("--size-bins")
+    prior_oracle.add_argument("--output-dir", required=True)
+    prior_oracle.add_argument("--scene", action="append", required=True)
+    prior_oracle.add_argument("--taxonomy")
+    prior_oracle.add_argument("--radius-m", type=float, default=0.05)
+    prior_oracle.add_argument("--min-region-size", type=int, default=100)
+    prior_oracle.set_defaults(func=_diagnose_category_prior_oracle)
     return parser
 
 

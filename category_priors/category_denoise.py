@@ -57,6 +57,19 @@ class Top1Assignment:
 
 
 @dataclass(frozen=True)
+class LegacyKNNFilterResult:
+    """Exact CPU replay of the historical global KNN and count filter."""
+
+    after_knn: np.ndarray
+    after_filter: np.ndarray
+    k_effective: int
+    min_count: int
+    instance_count_before_filter: int
+    instance_count_after_filter: int
+    removed_instance_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True)
 class CandidateBank:
     """One frozen candidate pool shared byte-for-byte by U and D replay."""
 
@@ -927,6 +940,72 @@ def _majority_vote_nearest_tie(
     return output
 
 
+def legacy_knn_filter(
+    xyz_scene: Any,
+    source_labels: Any,
+    k: int = GLOBAL_KNN_K,
+    min_count: int = GLOBAL_MIN_COUNT,
+    *,
+    chunk_size: int = 8_192,
+) -> LegacyKNNFilterResult:
+    """Replay the historical ``filter3d`` then ``filter_num`` path exactly.
+
+    The legacy implementation uses :class:`scipy.spatial.KDTree`, retains the
+    query point itself, and resolves a majority-label tie by the first label in
+    nearest-neighbour order.  Those details are intentionally preserved here;
+    callers needing pointwise B0 parity must also supply the original PLY
+    coordinates in their original order.
+    """
+
+    # Do not replace this with cKDTree.  Equidistant-neighbour ordering is part
+    # of the historical behaviour through the first-neighbour tie rule.
+    from scipy.spatial import KDTree
+
+    xyz = _as_numpy(xyz_scene, np.float64)
+    labels = _as_numpy(source_labels, np.int64)
+    if xyz.ndim != 2 or xyz.shape[1:] != (3,) or labels.shape != (len(xyz),):
+        raise ValueError("xyz_scene and source_labels must describe the same 3D points")
+    if not np.isfinite(xyz).all():
+        raise ValueError("xyz_scene must be finite")
+    if np.any(labels < -1):
+        raise ValueError("source_labels may only use -1 as its negative label")
+
+    point_count = len(xyz)
+    k_effective = min(max(int(k), 1), point_count) if point_count else 0
+    voted = np.empty(point_count, dtype=np.int64)
+    if point_count:
+        tree = KDTree(xyz)
+        label_values = np.unique(labels)
+        chunk = max(int(chunk_size), 1)
+        for start in range(0, point_count, chunk):
+            stop = min(start + chunk, point_count)
+            _, neighbor_indices = tree.query(xyz[start:stop], k=k_effective)
+            neighbor_indices = np.asarray(neighbor_indices, dtype=np.int64).reshape(
+                stop - start, k_effective
+            )
+            voted[start:stop] = _majority_vote_nearest_tie(
+                labels[neighbor_indices], label_values
+            )
+
+    filtered = voted.copy()
+    values, counts = np.unique(voted[voted >= 0], return_counts=True)
+    removed: list[int] = []
+    for value, count in zip(values, counts):
+        if int(count) < int(min_count):
+            filtered[voted == value] = -1
+            removed.append(int(value))
+    after_count = int(len(np.unique(filtered[filtered >= 0])))
+    return LegacyKNNFilterResult(
+        after_knn=_readonly(voted),
+        after_filter=_readonly(filtered),
+        k_effective=int(k_effective),
+        min_count=int(min_count),
+        instance_count_before_filter=int(len(values)),
+        instance_count_after_filter=after_count,
+        removed_instance_ids=tuple(removed),
+    )
+
+
 def replay_protected_denoise(
     xyz_scene: Any,
     bank: CandidateBank,
@@ -937,12 +1016,6 @@ def replay_protected_denoise(
     chunk_size: int = 8_192,
 ) -> tuple[np.ndarray, dict[int, str], dict[int, float], dict[str, Any]]:
     """Run global KNN/filter only on unprotected points, then insert branches."""
-
-    # Use the exact same neighbour implementation as the historical B0
-    # ``filter3d`` path.  Different KD-tree implementations may order
-    # equidistant neighbours differently, which would break the required
-    # pointwise equivalence through B0's first-neighbour tie rule.
-    from scipy.spatial import KDTree
 
     _validate_bank(bank)
     xyz = _as_numpy(xyz_scene, np.float64)
@@ -963,31 +1036,14 @@ def replay_protected_denoise(
     protected = np.isin(bank.branch_full_labels, np.asarray(sorted(accepted), dtype=np.int64))
     active_indices = np.flatnonzero(~protected)
     source_labels = bank.global_pre_knn[active_indices]
-    voted = np.empty(len(active_indices), dtype=np.int64)
-    if len(active_indices):
-        k_effective = min(max(int(k), 1), len(active_indices))
-        tree = KDTree(xyz[active_indices])
-        label_values = np.unique(source_labels)
-        chunk = max(int(chunk_size), 1)
-        for start in range(0, len(active_indices), chunk):
-            stop = min(start + chunk, len(active_indices))
-            _, neighbor_indices = tree.query(
-                xyz[active_indices[start:stop]], k=k_effective
-            )
-            neighbor_indices = np.asarray(neighbor_indices, dtype=np.int64).reshape(
-                stop - start, k_effective
-            )
-            voted[start:stop] = _majority_vote_nearest_tie(
-                source_labels[neighbor_indices], label_values
-            )
-
-    # The historical filter_num(10) is applied only to the unprotected global
-    # path.  Rejected branch points remain active and therefore fall back to it.
-    filtered = voted.copy()
-    values, counts = np.unique(voted[voted >= 0], return_counts=True)
-    for value, count in zip(values, counts):
-        if int(count) < int(min_count):
-            filtered[voted == value] = -1
+    legacy = legacy_knn_filter(
+        xyz[active_indices],
+        source_labels,
+        k=k,
+        min_count=min_count,
+        chunk_size=chunk_size,
+    )
+    filtered = legacy.after_filter
     output = np.full(bank.point_count, -1, dtype=np.int64)
     output[active_indices] = filtered
     next_instance = int(output[output >= 0].max()) + 1 if np.any(output >= 0) else 0
@@ -1018,14 +1074,12 @@ def replay_protected_denoise(
         "accepted_candidate_ids": sorted(accepted),
         "protected_gaussian_count": int(np.count_nonzero(protected)),
         "active_global_gaussian_count": len(active_indices),
-        "global_instance_count_before_filter": len(values),
-        "global_instance_count_after_filter": len(np.unique(filtered[filtered >= 0])),
+        "global_instance_count_before_filter": legacy.instance_count_before_filter,
+        "global_instance_count_after_filter": legacy.instance_count_after_filter,
         "inserted_candidate_to_instance": inserted,
         "protected_instance_survival_rate": 1.0 if accepted else None,
         "protected_class_rewrite_rate": 0.0 if accepted else None,
-        "knn_k_effective": int(min(max(int(k), 1), len(active_indices)))
-        if len(active_indices)
-        else 0,
+        "knn_k_effective": legacy.k_effective,
         "global_min_count": int(min_count),
     }
     return _readonly(output), class_by_id, score_by_id, diagnostics
@@ -1095,12 +1149,14 @@ __all__ = [
     "SCORE_THRESHOLD",
     "SEMANTIC_THRESHOLD",
     "CandidateBank",
+    "LegacyKNNFilterResult",
     "Top1Assignment",
     "attach_candidate_votes",
     "boundary_fixed_ratio_5cm",
     "build_candidate_bank",
     "build_strict_prediction_metadata",
     "load_candidate_bank",
+    "legacy_knn_filter",
     "materialize_category_denoise_params",
     "normalized_top1_32",
     "pca_sorted_extents_m",
