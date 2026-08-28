@@ -78,6 +78,8 @@ feature_dim=32
 downsample=1
 num_sampled_rays=1000
 feature_iterations=0
+feature_snapshot_root=""
+feature_seed=0
 
 usage() {
     cat <<EOF
@@ -179,6 +181,8 @@ Tunables:
   --downsample INT         Default: 1
   --num-sampled-rays INT   Default: 1000
   --feature-iterations INT Default: 0 (adaptive: min(10 * cameras, 10000))
+  --feature-snapshot-root PATH Save the native-budget checkpoint during a longer feature run
+  --feature-seed INT       Default: 0 (the historical trainer default)
   -h, --help               Show this help message
 
 Examples:
@@ -293,6 +297,8 @@ Resolved configuration:
   downsample: $downsample
   num_sampled_rays: $num_sampled_rays
   feature_iterations: $feature_iterations
+  feature_snapshot_root: $feature_snapshot_root
+  feature_seed: $feature_seed
 EOF
 }
 
@@ -465,6 +471,10 @@ run_scale() {
 
 run_train() {
     echo "Running stage: train"
+    local snapshot_args=()
+    if [[ -n "$feature_snapshot_root" ]]; then
+        snapshot_args+=(--feature_snapshot_root "$feature_snapshot_root")
+    fi
     "$python_bin" "${SCRIPT_DIR}/train_contrastive_feature.py" \
         --progress_path "$progress_path" \
         --sh_degree "$sh_degree" \
@@ -479,7 +489,9 @@ run_train() {
         --contrastive_feature_point_cloud_path "$contrastive_feature_point_cloud_path" \
         --scale_gate_path "$scale_gate_path" \
         --num_sampled_rays "$num_sampled_rays" \
-        --iterations "$feature_iterations"
+        --iterations "$feature_iterations" \
+        --seed "$feature_seed" \
+        "${snapshot_args[@]}"
 }
 
 run_postprocess() {
@@ -879,6 +891,14 @@ while [[ $# -gt 0 ]]; do
             feature_iterations="$2"
             shift 2
             ;;
+        --feature-snapshot-root)
+            feature_snapshot_root="$2"
+            shift 2
+            ;;
+        --feature-seed)
+            feature_seed="$2"
+            shift 2
+            ;;
         -h|--help)
             usage
             exit 0
@@ -891,6 +911,7 @@ done
 
 resolve_defaults
 [[ "$feature_iterations" =~ ^[0-9]+$ ]] || err "--feature-iterations must be nonnegative"
+[[ "$feature_seed" =~ ^[0-9]+$ ]] || err "--feature-seed must be nonnegative"
 [[ "$clustering_mode" == "legacy" || "$clustering_mode" == "class-first" \
     || "$clustering_mode" == "legacy-prior" ]] \
     || err "--clustering-mode must be legacy, class-first, or legacy-prior"

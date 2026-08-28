@@ -1,14 +1,15 @@
-# SAGA 类别先验与小物体保护实验计划（当前权威：原生尺度门控容量与映射归因）
+# SAGA 类别先验与小物体保护实验计划（当前权威：10k 尺度门控容量正控）
 
-> **权威状态：V10 已在类别先验介入前停止；第 24 节的 PMR-1 已完成并形成负结果，
-> 第 25 节“原生尺度门控容量与映射归因（PMR-2）”是当前唯一执行路径。V10B 身份头与任何新 ObjectBank 均未获授权。** 旧 B2、class-first、
+> **权威状态：V10 已在类别先验介入前停止；第 24 节的 PMR-1 与第 25 节的
+> PMR-2 均已完成。用户已于 2026-08-28 明确授权第 26 节“10k 尺度门控容量正控
+> （PMR-3）”，这是当前唯一执行路径。V10B 身份头与任何新 ObjectBank 均未获授权。** 旧 B2、class-first、
 > prior-v2、teacher-preservation 和 selective-restore 文档与代码只作为失败审计记录，
 > 不得覆盖本文件的研究问题、条件定义、阶段门槛或结论边界。
 
-- 版本：PMR-2.0
-- 冻结日期：2026-08-27
+- 版本：PMR-3.0
+- 冻结日期：2026-08-28
 - V3 起点代码检查点：`f1367fa58c8f50df75f80b86f67bab469af06531`
-- 当前状态：**PMR-2 已完成并触发预注册停止条件：当前原生 2k scale-gate 没有广泛、实用的尺度控制容量；不进入 train-only 原生逐类尺度 holdout**
+- 当前状态：**PMR-3 已预注册，正在先验不介入的两场景同轨迹 2k/10k 尺度容量正控；尚无 10k 结果**
 - 适用范围：现有 24 个 tune 场景、原 48 个内部评估场景及现有训练资产
 - 独立实验单位：physical scene
 - 技术重复：seed `42`、`3407`、`20260804`
@@ -1565,3 +1566,118 @@ PMR-2 在固定8个physical scenes、124个对象上完成。没有下载、训�
 该结论有力否定的是“类别尺寸通过当前冻结2k scale-gate带来显著提升”这条具体机制，不是否定
 类别语义、类别形状、类别支持度或在重新训练的尺度条件表示中使用类别知识。若继续研究，必须
 更换能力不足的表示/门控接口并单独获得授权，不能继续微调bbox公式或门控标量。
+
+## 26. 当前权威：10k 尺度门控容量正控（PMR-3）
+
+### 26.1 唯一问题与授权边界
+
+PMR-2 已证明冻结的原生约2k feature/scale-gate缺少广泛、实用的尺度控制容量，但没有回答
+公开SAGA与老师交付命令所用的10k训练预算是否能学出这种容量。用户于2026-08-28明确授权
+启动10k正控。本阶段只回答：
+
+> 在训练数据、30k 3DGS、提示、损失、随机种子和代码均相同的同一训练轨迹中，把训练从
+> 原生自适应预算延长到10,000轮，是否使scale gate获得足以支持类别尺度研究的控制容量？
+
+本阶段不测试类别先验本身，不改变类别映射，不引入ObjectBank、聚类、跟踪、新mask来源或
+额外网络，也不下载数据或重训3DGS。通过只能证明“2k训练不足且10k恢复了尺度容量”；失败
+只能否定“按当前原生训练方法增加到10k即可恢复容量”，不得外推为所有类别知识无效。
+
+### 26.2 冻结场景、训练和快照
+
+只使用两个已经参与机理开发的physical scenes：
+
+```text
+scene0591_02  # PMR-2中容量相对较高，登记对象15个
+scene0645_00  # PMR-2中容量相对较低，登记对象19个，类别更丰富
+```
+
+两场均固定复用原始图像、相机、原生SAM masks、原生mask scales、30k 3DGS和PMR-1登记的
+提示/对象；不切换到SAM-everything或外部语义监督。旧流水线外层虽登记seed 42，但没有把
+该参数传入特征训练器；原生训练器实际使用默认seed 0。因此正控固定seed 0，显式
+`--iterations 10000 --num_sampled_rays 1000`，其余优化参数保持当前老师交付兼容路径。
+
+原生所谓“2k”并非固定2000轮，而是训练器在未显式指定预算时使用：
+
+```text
+native_iteration = min(10 * number_of_train_cameras, 10000)
+```
+
+为排除“两次独立训练的随机差异”，每场只从头训练一条10k轨迹，并在同一轨迹保存：
+
+```text
+iteration native_iteration: affinity/semantic feature PLY + scale_gate.pt
+iteration 10000: affinity/semantic feature PLY + scale_gate.pt
+```
+
+快照写入独立`pmr3-scale-capacity-10k`目录，不覆盖历史2k feature、gate或PMR-1/2产物。
+保存原生预算快照不得重置优化器、随机数、相机栈或训练状态；训练必须连续到10k。历史原生
+结果只作上下文，不作为主配对。若同轨迹原生快照与历史结果的scene-equal容量差超过0.02，
+必须标注“当前轨迹不能复现历史原生预算”，但不据此改变10k结果或门槛。
+
+### 26.3 冻结评价与统计单位
+
+对原生预算和10k快照分别复用PMR-2完全相同的34个对象、正提示、相似度阈值0.75、U输入
+和九点网格：
+
+```text
+0, .125, .25, .375, .50, .625, .75, .875, 1.0
+```
+
+每个快照都必须用自己的feature/gate重新计算`U-global`和九点mask，随后计算
+`GridOracle-U`、对象IoU、Gaussian precision/recall和tiny/small指标。不得拿历史U充当新
+检查点的U。GT只允许进入离线评价和GridOracle选优；训练、特征提取、提示分割均不得读取GT，
+也不得把混有GT-derived `O-instance`字段的旧PMR-2 plan交给分割worker。
+
+物理场景是独立实验单位：先让同一场景内登记对象等权，再让两个场景等权。对象是场景内的
+嵌套观测，不能把34个对象伪装成34个独立样本。本阶段是容量正控和因果诊断，不以两场景
+置信区间声称泛化。
+
+### 26.4 预注册通过与停止门槛
+
+10k被判定为恢复了广泛且实用的尺度容量，必须同时满足：
+
+1. 10k的两场scene-equal `GridOracle-U >= 0.02`；
+2. 两个场景各自的`GridOracle-U >= 0.01`；
+3. 至少25%的登记对象自身`GridOracle-U >= 0.02`；
+4. 同轨迹scene-equal `(10k容量 - 原生预算容量) >= 0.01`；
+5. 10k GridOracle相对10k U的Gaussian precision下降不超过1个百分点。
+
+冻结决策：
+
+- 全部通过：确认当前原生自适应预算训练不足是尺度容量瓶颈。下一步只允许用同一原生visible-mask定义
+  生成train-only global/class-shrunk尺度，再在未参与映射构造的holdout场景比较U/D；本阶段
+  本身不能声称类别先验有效。
+- 任一不通过：停止“仅把当前原生训练延长到10k即可修复类别尺寸→scale-gate”路线；不得
+  继续试20k、改网格或按结果挑场景。结论应是当前损失/表示没有学出足以承载显著类别尺度
+  收益的可控接口，而不是类别先验整体无效。
+
+### 26.5 工程、环境和验收产物
+
+训练脚本只允许增加不改变训练动力学的中途快照能力。新增轻量runner负责：检查输入、启动
+单场10k训练、验证2k/10k双快照、复用PMR-2计划生成固定提示结果并聚合门槛。完整结果跳过，
+损坏或缺失项只重跑当前场景；不生成SHA文件、lock、schedule hash或contributor cache。
+
+新5090云实例必须在运行前完成环境审计：PyTorch/CUDA必须实际支持`sm_120`，自定义CUDA
+扩展必须用CUDA 12.8重编译并通过最小前向/反向测试；不得把旧cu118环境显示的
+`cuda_available=True`误当作可运行。资源继续按实际cgroup读取，当前实例`memory.max=92GiB`；
+不得使用宿主机`free`。磁盘全过程至少保留80GB，单GPU、单训练或单评估。
+
+验收产物：
+
+```text
+pmr3_training_manifest.json
+pmr3/<scene>/iteration_native_<N>/contrastive_feature_point_cloud.ply
+pmr3/<scene>/iteration_native_<N>/scale_gate.pt
+pmr3/<scene>/iteration_10000/contrastive_feature_point_cloud.ply
+pmr3/<scene>/iteration_10000/scale_gate.pt
+pmr3_scale_capacity.parquet
+pmr3_scale_capacity.json
+pmr3_analysis.json
+```
+
+- [x] 用户明确授权10k尺度容量正控。
+- [x] 冻结两场景、同轨迹原生预算/10k快照、九点评价与五条门槛。
+- [ ] 实现快照、runner、聚合器和测试。
+- [ ] 在5090/CUDA12.8环境重编译扩展并通过GPU冒烟。
+- [ ] 完成两场同轨迹10k训练与固定评价。
+- [ ] 按冻结决策树报告结论并停止或进入另行授权的holdout。

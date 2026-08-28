@@ -9,6 +9,7 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+import json
 import os
 import torch
 import random
@@ -121,6 +122,70 @@ from sklearn.preprocessing import QuantileTransformer
 from utils.resource_exit import resource_error_handler
 
 import torch
+
+
+def _write_json_atomic(path, payload):
+    path = os.path.abspath(path)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temporary = path + ".part"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+    os.replace(temporary, path)
+
+
+def _native_snapshot_directory(snapshot_root, iteration):
+    return os.path.join(
+        os.path.abspath(snapshot_root), f"iteration_native_{int(iteration)}"
+    )
+
+
+@torch.no_grad()
+def _save_native_training_snapshot(
+    feature_gaussians,
+    scale_gate,
+    *,
+    snapshot_root,
+    iteration,
+    seed,
+    smooth_k,
+):
+    """Serialize an intermediate state without changing optimizer or RNG state."""
+
+    directory = _native_snapshot_directory(snapshot_root, iteration)
+    os.makedirs(directory, exist_ok=True)
+    raw_feature_path = os.path.join(
+        directory, "contrastive_feature_point_cloud.raw.ply"
+    )
+    feature_part = os.path.join(
+        directory, "contrastive_feature_point_cloud.raw.part.ply"
+    )
+    gate_path = os.path.join(directory, "scale_gate.pt")
+    gate_part = os.path.join(directory, "scale_gate.part.pt")
+    feature_gaussians.save_ply(
+        feature_part,
+        smooth_weights=None,
+        smooth_type=None,
+        smooth_K=int(smooth_k),
+    )
+    os.replace(feature_part, raw_feature_path)
+    torch.save(scale_gate.state_dict(), gate_part)
+    os.replace(gate_part, gate_path)
+    _write_json_atomic(
+        os.path.join(directory, "snapshot.json"),
+        {
+            "kind": "pmr3_scale_training_snapshot",
+            "status": "raw_complete",
+            "iteration": int(iteration),
+            "seed": int(seed),
+            "smooth_k": int(smooth_k),
+            "point_count": int(feature_gaussians.get_xyz.shape[0]),
+            "raw_feature_ply": raw_feature_path,
+            "scale_gate": gate_path,
+            "optimizer_preserved": feature_gaussians.optimizer is not None,
+        },
+    )
+    return raw_feature_path, gate_path
 
 def uniform_sample(xyz, n_samples):
     device = xyz.device
@@ -241,8 +306,20 @@ def training(args, dataset, opt, pipe, iteration, saving_iterations, checkpoint_
     
     first_iter = 0
     viewpoint_stack = None
+    train_camera_count = len(scene.getTrainCameras())
+    native_snapshot_iteration = min(train_camera_count * 10, 10000)
     if not opt.iterations:
-        opt.iterations = min(len(scene.getTrainCameras())*10, 10000)
+        opt.iterations = native_snapshot_iteration
+    if args.feature_snapshot_root and opt.iterations <= native_snapshot_iteration:
+        raise ValueError(
+            "feature snapshot control requires a final budget beyond the native "
+            f"adaptive budget: {opt.iterations} <= {native_snapshot_iteration}"
+        )
+    if args.feature_snapshot_root:
+        print(
+            "PMR-3 native snapshot:", native_snapshot_iteration,
+            "train cameras:", train_camera_count,
+        )
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
 
@@ -532,6 +609,20 @@ def training(args, dataset, opt, pipe, iteration, saving_iterations, checkpoint_
         feature_gaussians.optimizer.step()
         feature_gaussians.optimizer.zero_grad(set_to_none = True)
 
+        if (
+            args.feature_snapshot_root
+            and iteration == native_snapshot_iteration
+            and iteration < opt.iterations
+        ):
+            _save_native_training_snapshot(
+                feature_gaussians,
+                scale_gate,
+                snapshot_root=args.feature_snapshot_root,
+                iteration=iteration,
+                seed=args.seed,
+                smooth_k=opt.smooth_K,
+            )
+
         iter_end.record()
 
         if iteration % 10 == 0:
@@ -552,12 +643,77 @@ def training(args, dataset, opt, pipe, iteration, saving_iterations, checkpoint_
     torch.cuda.empty_cache()
 
     # scene.save_feature(iteration, target = 'contrastive_feature', smooth_weights = torch.softmax(smooth_weights, dim = -1) if smooth_weights is not None else None, smooth_type = 'traditional', smooth_K = opt.smooth_K)
-    scene.feature_gaussians.save_ply(args.contrastive_feature_point_cloud_path, 
-                                     smooth_weights=torch.softmax(smooth_weights, dim = -1) if smooth_weights is not None else None,
-                                     smooth_type = 'traditional', 
-                                     smooth_K = opt.smooth_K)
+    final_feature_path = args.contrastive_feature_point_cloud_path
+    final_gate_path = args.scale_gate_path
+    if args.feature_snapshot_root:
+        final_feature_part = os.path.join(
+            os.path.dirname(final_feature_path),
+            "contrastive_feature_point_cloud.part.ply",
+        )
+        scene.feature_gaussians.save_ply(
+            final_feature_part,
+            smooth_weights=torch.softmax(smooth_weights, dim=-1)
+            if smooth_weights is not None
+            else None,
+            smooth_type="traditional",
+            smooth_K=opt.smooth_K,
+        )
+        os.replace(final_feature_part, final_feature_path)
+    else:
+        scene.feature_gaussians.save_ply(final_feature_path,
+                                         smooth_weights=torch.softmax(smooth_weights, dim = -1) if smooth_weights is not None else None,
+                                         smooth_type = 'traditional',
+                                         smooth_K = opt.smooth_K)
     # torch.save(scale_gate.state_dict(), os.path.join(scene.model_path, "point_cloud/iteration_{}/".format(iteration) + "scale_gate.pt"))
-    torch.save(scale_gate.state_dict(), args.scale_gate_path)
+    if args.feature_snapshot_root:
+        final_gate_part = os.path.join(
+            os.path.dirname(final_gate_path), "scale_gate.part.pt"
+        )
+        torch.save(scale_gate.state_dict(), final_gate_part)
+        os.replace(final_gate_part, final_gate_path)
+        final_directory = os.path.dirname(final_feature_path)
+        _write_json_atomic(
+            os.path.join(final_directory, "snapshot.json"),
+            {
+                "kind": "pmr3_scale_training_snapshot",
+                "status": "complete",
+                "iteration": int(opt.iterations),
+                "seed": int(args.seed),
+                "point_count": int(feature_gaussians.get_xyz.shape[0]),
+                "smooth_k": int(opt.smooth_K),
+                "feature_ply": os.path.abspath(final_feature_path),
+                "scale_gate": os.path.abspath(final_gate_path),
+                "optimizer_preserved": False,
+            },
+        )
+        _write_json_atomic(
+            os.path.join(args.feature_snapshot_root, "training_manifest.json"),
+            {
+                "kind": "pmr3_scale_training_trajectory",
+                "status": "training_complete",
+                "seed": int(args.seed),
+                "train_camera_count": int(train_camera_count),
+                "native_iteration": int(native_snapshot_iteration),
+                "final_iteration": int(opt.iterations),
+                "num_sampled_rays": int(opt.num_sampled_rays),
+                "producer_commit": os.environ.get("SAGA_EXPERIMENT_COMMIT"),
+                "source_path": os.path.abspath(args.source_path),
+                "images_path": os.path.abspath(args.images_path),
+                "sparse_path": os.path.abspath(args.sparse_path),
+                "point_cloud_path": os.path.abspath(args.point_cloud_path),
+                "masks_path": os.path.abspath(args.masks_path),
+                "labels_path": os.path.abspath(args.labels_path),
+                "label_features_path": os.path.abspath(args.label_features_path),
+                "mask_scales_path": os.path.abspath(args.mask_scales_path),
+                "smooth_k": int(opt.smooth_K),
+                "native_snapshot": _native_snapshot_directory(
+                    args.feature_snapshot_root, native_snapshot_iteration
+                ),
+                "final_snapshot": os.path.abspath(final_directory),
+            },
+        )
+    else:
+        torch.save(scale_gate.state_dict(), final_gate_path)
 
 def prepare_output_and_logger(args):    
     if not args.model_path:
@@ -591,6 +747,7 @@ def main():
         pp = PipelineParams(parser)
         parser.add_argument("--progress_path", type=str, required=True)
         parser.add_argument("--seed", type=int, default=0)
+        parser.add_argument("--feature_snapshot_root", type=str, default="")
         parser.add_argument("--semantic_masks_path", type=str, default="")
         parser.add_argument("--semantic_labels_path", type=str, default="")
         parser.add_argument("--semantic_mask_scales_path", type=str, default="")
