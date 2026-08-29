@@ -804,10 +804,17 @@ def main():
     parser.add_argument("--v6-scene-id", type=str, default=None)
     parser.add_argument(
         "--category-denoise-action",
-        choices=("off", "bank", "replay"),
+        choices=("off", "bank", "candidate-repair", "replay", "candidate-replay"),
         default="off",
     )
     parser.add_argument("--category-denoise-bank-path", type=str, default=None)
+    parser.add_argument("--category-candidate-trace-path", type=str, default=None)
+    parser.add_argument(
+        "--category-candidate-sample-cap", type=int, default=5000
+    )
+    parser.add_argument(
+        "--category-candidate-score-threshold", type=float, default=0.20
+    )
     parser.add_argument(
         "--category-denoise-mode", choices=("uniform", "class"), default="uniform"
     )
@@ -867,6 +874,17 @@ def main():
             parser.error("category denoising requires the unchanged legacy global path")
         if args.scene_scale_m_per_unit <= 0:
             parser.error("category denoising requires a positive scene scale")
+        if args.category_candidate_sample_cap <= 0:
+            parser.error("category candidate sample cap must be positive")
+        if not 0.0 <= args.category_candidate_score_threshold <= 1.0:
+            parser.error("category candidate score threshold must be in [0, 1]")
+        if (
+            args.category_denoise_action == "candidate-repair"
+            and not args.category_candidate_trace_path
+        ):
+            parser.error(
+                "candidate repair requires --category-candidate-trace-path"
+            )
     prior_resolver = None
     if args.prior_mode != 'off':
         if not args.prior_config or not args.prior_mapping_config:
@@ -1179,6 +1197,7 @@ def main():
     global_full_assignment_trace = fallback_point_labels.clone()
     fallback_assignment_confidence = point_assignment_confidence.detach().cpu().clone()
     category_denoise_bank = None
+    category_candidate_family = None
     category_denoise_decisions = []
     category_denoise_classes = {}
     category_denoise_scores = {}
@@ -1205,7 +1224,35 @@ def main():
             "category-denoise bank captured "
             f"{len(category_denoise_bank.candidates)} frozen candidates"
         )
-    elif args.category_denoise_action == "replay":
+    elif args.category_denoise_action == "candidate-repair":
+        from category_priors.category_denoise import build_candidate_repair_family
+        from category_priors.teacher_prior import saga20_branch_classes
+
+        category_candidate_family = build_candidate_repair_family(
+            normed_point_features,
+            normed_point_semantic_features,
+            point_xyz,
+            F.normalize(label_features.detach().cpu(), dim=-1, p=2),
+            args.classes,
+            saga20_branch_classes(class_to_idx),
+            fallback_point_labels,
+            args.scene_scale_m_per_unit,
+            scene_id=args.category_denoise_scene_id,
+            seed=args.seed,
+            sample_cap=args.category_candidate_sample_cap,
+        )
+        # The bank side path remains a read-only observer of the B0 output.
+        # C0 is exposed here only so the common metadata path can report the
+        # candidate count; C1/C2 never alter point_labels in this action.
+        category_denoise_bank = category_candidate_family.legacy
+        print(
+            "category candidate repair family captured "
+            + ", ".join(
+                f"{name}={len(bank.candidates)}"
+                for name, bank in category_candidate_family.banks.items()
+            )
+        )
+    elif args.category_denoise_action in {"replay", "candidate-replay"}:
         from category_priors.category_denoise import load_candidate_bank
 
         category_denoise_bank = load_candidate_bank(args.category_denoise_bank_path)
@@ -1695,7 +1742,84 @@ def main():
                 'after_filter': shadow_after_filter,
                 'merged_ids': merged_ids,
             }
-        if args.category_denoise_action == "replay":
+        if args.category_denoise_action == "candidate-replay":
+            from category_priors.category_candidate_legacy_replay import (
+                LegacyReplayCandidate,
+                replay_candidates_through_legacy,
+            )
+            from category_priors.category_candidate_prior_v2 import (
+                score_candidate_prior_v2,
+            )
+            from category_priors.io import load_json
+
+            category_denoise_decisions = list(
+                score_candidate_prior_v2(
+                    category_denoise_bank.candidates,
+                    load_json(args.category_priors),
+                    args.category_denoise_mode,
+                )
+            )
+            threshold = float(args.category_candidate_score_threshold)
+            for decision in category_denoise_decisions:
+                decision["accepted"] = bool(
+                    decision["support_pass"]
+                    and float(decision["S"]) >= threshold
+                )
+                decision["ap_score"] = float(decision["Q"])
+            replay_candidates = []
+            for candidate in category_denoise_bank.candidates:
+                candidate_id = int(candidate["candidate_id"])
+                replay_candidates.append(
+                    LegacyReplayCandidate(
+                        candidate_id=candidate_id,
+                        branch_class=str(candidate["branch_class"]),
+                        q_score=float(candidate["base_score"]),
+                        full_point_indices=np.flatnonzero(
+                            category_denoise_bank.branch_full_labels == candidate_id
+                        ),
+                        trusted_core_indices=np.flatnonzero(
+                            category_denoise_bank.branch_core_labels == candidate_id
+                        ),
+                    )
+                )
+            accepted_ids = [
+                int(row["candidate_id"])
+                for row in category_denoise_decisions
+                if bool(row["accepted"])
+            ]
+            replay_result = replay_candidates_through_legacy(
+                xyz_scene=point_xyz.numpy(),
+                global_pre_knn=category_denoise_bank.global_pre_knn,
+                candidates=replay_candidates,
+                accepted_candidate_ids=accepted_ids,
+                k=args.k,
+                min_count=10,
+            )
+            point_labels = torch.from_numpy(
+                np.asarray(replay_result.after_filter, dtype=np.int64)
+            )
+            teacher_after_knn = torch.from_numpy(
+                np.asarray(replay_result.after_knn, dtype=np.int64)
+            )
+            post_filter_trace = point_labels.detach().cpu().clone()
+            category_denoise_classes = dict(
+                replay_result.candidate_class_by_raw_label
+            )
+            category_denoise_scores = dict(
+                replay_result.candidate_score_by_raw_label
+            )
+            category_denoise_diagnostics = {
+                **dict(replay_result.diagnostics),
+                "mode": args.category_denoise_mode,
+                "score_threshold": threshold,
+                "candidate_count": len(category_denoise_decisions),
+                "accepted_candidate_count": len(accepted_ids),
+                "decisions": category_denoise_decisions,
+                "candidate_survival": [
+                    row.to_dict() for row in replay_result.candidates
+                ],
+            }
+        elif args.category_denoise_action == "replay":
             from category_priors.category_denoise import (
                 replay_protected_denoise,
                 score_bank_candidates,
@@ -1875,6 +1999,42 @@ def main():
         print(
             "category-denoise bank saved: "
             f"{args.category_denoise_bank_path}"
+        )
+    elif args.category_denoise_action == "candidate-repair":
+        from pathlib import Path
+
+        from category_priors.category_candidate_trace import (
+            save_candidate_formation_trace,
+        )
+        from category_priors.category_denoise import (
+            attach_candidate_votes,
+            save_candidate_bank,
+        )
+
+        family_root = Path(args.category_denoise_bank_path)
+        saved_counts = {}
+        for condition, family_bank in category_candidate_family.banks.items():
+            branch_vote_ratios = compute_instance_ratios(
+                torch.from_numpy(family_bank.branch_full_labels.copy()),
+                update_progress=False,
+            )
+            voted_bank = attach_candidate_votes(
+                family_bank, branch_vote_ratios, args.classes
+            )
+            save_candidate_bank(voted_bank, family_root / condition)
+            saved_counts[condition] = len(voted_bank.candidates)
+        save_candidate_formation_trace(
+            category_candidate_family.formation_trace,
+            args.category_candidate_trace_path,
+        )
+        category_denoise_diagnostics = {
+            "candidate_family_counts": saved_counts,
+            "trace_path": os.path.abspath(args.category_candidate_trace_path),
+            "b0_side_path_unchanged": True,
+        }
+        print(
+            "category candidate family and trace saved: "
+            f"{family_root}; {args.category_candidate_trace_path}"
         )
     if args.v5_candidate_source != 'off':
         from category_priors.teacher_prior import saga20_branch_classes
@@ -2423,6 +2583,26 @@ def main():
         if value.get('class') in args.selected_classes
     }
     contracted = normalize_prediction(point_labels.tolist(), raw_instances)
+    export_id_by_raw = {
+        int(raw_id): int(new_id)
+        for new_id, raw_id in enumerate(sorted(int(value) for value in raw_instances))
+    }
+    if category_denoise_diagnostics.get("candidate_survival"):
+        for row in category_denoise_diagnostics["candidate_survival"]:
+            raw_id = row.get("final_id")
+            row["final_instance_id"] = (
+                export_id_by_raw.get(int(raw_id)) if raw_id is not None else None
+            )
+    category_denoise_exported_classes = {
+        export_id_by_raw[raw_id]: branch_class
+        for raw_id, branch_class in category_denoise_classes.items()
+        if raw_id in export_id_by_raw
+    }
+    category_denoise_exported_scores = {
+        export_id_by_raw[raw_id]: score
+        for raw_id, score in category_denoise_scores.items()
+        if raw_id in export_id_by_raw
+    }
     if args.stage_trace_path:
         trace_path = os.path.abspath(args.stage_trace_path)
         os.makedirs(os.path.dirname(trace_path), exist_ok=True)
@@ -2535,6 +2715,16 @@ def main():
                     values["score"] = float(values["semantic_confidence"])
                 else:
                     values["score"] = float(values["mean_assignment_confidence"])
+        # `build_instance_metadata` operates in the internal/raw label space,
+        # whereas output.json is already normalized to contiguous export IDs.
+        # Remap once here so diagnostics and the exported prediction cannot
+        # become two incompatible truths after an inserted/deleted instance.
+        from category_priors.prediction_contract import (
+            remap_instance_metadata_to_export,
+        )
+        metadata["instances"] = remap_instance_metadata_to_export(
+            metadata.get("instances", {}), export_id_by_raw, contracted
+        )
         if args.clustering_mode == 'legacy':
             metadata["teacher_prior"] = {
                 "mode": args.teacher_prior_mode,
@@ -2581,12 +2771,12 @@ def main():
                 "bank_path": os.path.abspath(args.category_denoise_bank_path),
                 **category_denoise_diagnostics,
             }
-            for instance_id, branch_class in category_denoise_classes.items():
+            for instance_id, branch_class in category_denoise_exported_classes.items():
                 values = metadata["instances"].get(str(instance_id))
                 if values is None:
                     continue
                 values["class"] = branch_class
-                values["score"] = float(category_denoise_scores[instance_id])
+                values["score"] = float(category_denoise_exported_scores[instance_id])
         write_instance_metadata(args.prior_metadata_path, metadata)
     if(args.clean):
         if os.path.isdir(args.masks_path):

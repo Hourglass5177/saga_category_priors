@@ -6,6 +6,7 @@ import pytest
 from category_priors.prediction_contract import (
     normalize_prediction,
     normalize_score,
+    remap_instance_metadata_to_export,
     validate_prediction_contract,
 )
 
@@ -64,3 +65,29 @@ def test_shared_validator_accepts_only_the_normalized_contract() -> None:
     validate_prediction_contract(normalized.point_labels, normalized.instances)
     with pytest.raises(ValueError, match="agree exactly"):
         validate_prediction_contract(np.asarray([0, 1]), normalized.instances)
+
+
+def test_auxiliary_metadata_is_remapped_from_raw_to_export_ids() -> None:
+    contracted = normalize_prediction(
+        [10, 3, 10, -1, 3],
+        {
+            "3": {"class": "chair", "score": 0.4},
+            "10": {"class": "table", "score": 0.8},
+        },
+    )
+    remapped = remap_instance_metadata_to_export(
+        {
+            "3": {"class": "wrong-before-contract", "score": 0.1, "raw": 3},
+            "10": {"class": "wrong-before-contract", "score": 0.1, "raw": 10},
+        },
+        {3: 0, 10: 1},
+        contracted,
+    )
+
+    assert list(remapped) == ["0", "1"]
+    assert remapped["0"]["class"] == "chair"
+    assert remapped["1"]["class"] == "table"
+    assert remapped["0"]["raw"] == 3
+    assert remapped["1"]["raw"] == 10
+    assert remapped["0"]["point_count"] == 2
+    assert remapped["1"]["point_count"] == 2

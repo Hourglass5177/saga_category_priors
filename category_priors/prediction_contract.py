@@ -16,6 +16,32 @@ class PredictionContractResult:
     audit: dict[str, Any]
 
 
+def remap_instance_metadata_to_export(
+    raw_instances: Mapping[str | int, Mapping[str, Any]],
+    export_id_by_raw: Mapping[int, int],
+    contracted: PredictionContractResult,
+) -> dict[str, dict[str, Any]]:
+    """Project auxiliary metadata into the sole exported instance-ID space."""
+
+    result: dict[str, dict[str, Any]] = {}
+    labels = np.asarray(contracted.point_labels, dtype=np.int64)
+    for raw_id, export_id in sorted(
+        ((int(raw), int(export)) for raw, export in export_id_by_raw.items()),
+        key=lambda item: item[1],
+    ):
+        values = raw_instances.get(str(raw_id), raw_instances.get(raw_id))
+        exported = contracted.instances.get(str(export_id))
+        if not isinstance(values, Mapping) or not isinstance(exported, Mapping):
+            raise ValueError("raw/export instance metadata mapping is incomplete")
+        normalized = dict(values)
+        normalized.update(dict(exported))
+        normalized["point_count"] = int(np.count_nonzero(labels == export_id))
+        result[str(export_id)] = normalized
+    if set(result) != set(contracted.instances):
+        raise ValueError("metadata export IDs do not match the prediction contract")
+    return result
+
+
 def normalize_score(value: Any, *, context: str = "score") -> float:
     """Return the one canonical representation of an instance score.
 

@@ -70,6 +70,9 @@ v6_scene_id=""
 v7_causal_ablation="L0"
 category_denoise_action="off"
 category_denoise_bank_path=""
+category_candidate_trace_path=""
+category_candidate_sample_cap=5000
+category_candidate_score_threshold="0.20"
 category_denoise_mode="uniform"
 category_denoise_scene_id=""
 
@@ -175,8 +178,11 @@ V6 affinity-first proposal-bank options:
   --v6-scene-id SCENE
 
 All-category denoising options:
-  --category-denoise-action MODE  off|bank|replay
+  --category-denoise-action MODE  off|bank|candidate-repair|replay|candidate-replay
   --category-denoise-bank-path PATH
+  --category-candidate-trace-path PATH
+  --category-candidate-sample-cap INT  Default: 5000; only 10000 in the registered nested-sampling control
+  --category-candidate-score-threshold FLOAT  Frozen DEV2 U threshold for candidate-replay
   --category-denoise-mode MODE    uniform|class
   --category-denoise-scene-id SCENE
 
@@ -437,6 +443,10 @@ preflight_stage() {
                     require_file "$category_priors" "Category priors"
                     [[ -n "$category_denoise_bank_path" ]] || err "--category-denoise-bank-path is required"
                     ensure_parent_dir "$category_denoise_bank_path"
+                    if [[ "$category_denoise_action" == "candidate-repair" ]]; then
+                        [[ -n "$category_candidate_trace_path" ]] || err "--category-candidate-trace-path is required"
+                        ensure_parent_dir "$category_candidate_trace_path"
+                    fi
                 fi
             fi
             ;;
@@ -524,6 +534,7 @@ run_postprocess() {
         --v7-causal-ablation "$v7_causal_ablation"
         --category-denoise-action "$category_denoise_action"
         --category-denoise-mode "$category_denoise_mode"
+        --category-candidate-score-threshold "$category_candidate_score_threshold"
     )
     if [[ "$category_denoise_action" != "off" ]]; then
         prior_args+=(
@@ -531,6 +542,12 @@ run_postprocess() {
             --category-denoise-scene-id "$category_denoise_scene_id"
             --category-priors "$category_priors"
         )
+        if [[ "$category_denoise_action" == "candidate-repair" ]]; then
+            prior_args+=(
+                --category-candidate-trace-path "$category_candidate_trace_path"
+                --category-candidate-sample-cap "$category_candidate_sample_cap"
+            )
+        fi
     fi
     if [[ "$prior_mode" != "off" ]]; then
         prior_args+=(
@@ -810,6 +827,18 @@ while [[ $# -gt 0 ]]; do
             ;;
         --category-denoise-bank-path)
             category_denoise_bank_path="$2"
+            shift 2
+            ;;
+        --category-candidate-trace-path)
+            category_candidate_trace_path="$2"
+            shift 2
+            ;;
+        --category-candidate-sample-cap)
+            category_candidate_sample_cap="$2"
+            shift 2
+            ;;
+        --category-candidate-score-threshold)
+            category_candidate_score_threshold="$2"
             shift 2
             ;;
         --category-denoise-mode)

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-"""Small public CLI for the active SAGA baseline and V10 experiment.
+"""Public CLI for the active SAGA candidate-formation experiment.
 
-Retired B2/class-first/prior-v2/V3-V6 experiment entry points intentionally do
-not live here; their exact implementations remain available through Git.
+Candidate commands are dependency-isolated from historical experiment
+handlers.  The latter remain callable for forensic reproducibility but are
+loaded lazily and are not part of the active runner.
 """
 
 import argparse
@@ -17,26 +18,29 @@ from .gaussian_object_audit import audit_gaussian_object_runs
 from .io import read_rows
 from .priors import fit_priors, write_priors
 from .taxonomy import load_taxonomy
-from .v8_bank import (
-    CLASSIFIERS as V8_CLASSIFIERS,
-    build_v8_object_bank,
-    replay_v8_priors,
+
+# Parser choices are deliberately values, not imports from the retired V8--V10
+# implementations.  Candidate-formation commands must remain usable on a
+# clean machine even when an old experiment's optional CUDA/Python dependency
+# is unavailable.  The corresponding implementation is imported only if that
+# legacy command is actually invoked.
+V8_CLASSIFIERS = ("mv-label", "codebook")
+V8_CONDITIONS = ("U00", "D10", "D01", "D11")
+V9_ASSOCIATION_MODES = ("A0", "A1", "A2", "A3")
+V9_CLASSIFIERS = ("mv-label", "codebook")
+V9_CONDITIONS = (
+    "U000",
+    "D100",
+    "D010",
+    "D001",
+    "D110",
+    "D101",
+    "D011",
+    "D111",
 )
-from .v8_evaluation import evaluate_v8_replays
-from .v8_replay import CONDITIONS as V8_CONDITIONS
-from .v8_runner import run_v8_lifting_banks, run_v8_lifting_factorial
-from .v9_feature_training import execute_v9_feature_training
-from .v9_replay import CONDITION_FACTORS as V9_CONDITIONS
-from .v9_runner import (
-    ASSOCIATION_MODES as V9_ASSOCIATION_MODES,
-    CLASSIFIERS as V9_CLASSIFIERS,
-    replay_v9_priors,
-    run_v9_banks,
-)
-from .v9_metrics import evaluate_v9_candidate_banks, evaluate_v9_predictions
-from .v10_evaluation import audit_v10_associations, evaluate_v10_replays
-from .v10_replay import V10_CLASSIFIERS, V10_PRIOR_CONDITIONS, replay_v10_priors
-from .v10_runner import V10_STRUCTURE_CONDITIONS, run_v10_banks
+V10_STRUCTURE_CONDITIONS = ("P0R0", "P1R0", "P0R1", "P1R1", "VC1")
+V10_CLASSIFIERS = V9_CLASSIFIERS
+V10_PRIOR_CONDITIONS = V9_CONDITIONS
 
 
 def _run_category_denoise_bank(args: argparse.Namespace) -> None:
@@ -48,6 +52,132 @@ def _run_category_denoise_bank(args: argparse.Namespace) -> None:
         repo_root=Path(args.repo_root),
         category_priors=Path(args.category_priors),
         scene_ids=args.scene,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _repair_category_candidates(args: argparse.Namespace) -> None:
+    from .category_candidate_runner import repair_category_candidates
+
+    payload = repair_category_candidates(
+        runtime_manifest=Path(args.runtime_manifest),
+        output_root=Path(args.output_root),
+        repo_root=Path(args.repo_root),
+        category_priors=Path(args.category_priors),
+        scene_ids=args.scene,
+        reference_bank_root=(
+            Path(args.reference_bank_root) if args.reference_bank_root else None
+        ),
+        seed=args.seed,
+        sample_cap=args.sample_cap,
+        python_bin=Path(args.python_bin) if args.python_bin else None,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _diagnose_category_candidates(args: argparse.Namespace) -> None:
+    from .category_candidate_evaluation import diagnose_category_candidates
+
+    payload = diagnose_category_candidates(
+        runtime_manifest=Path(args.runtime_manifest),
+        gt_dir=Path(args.gt_dir),
+        run_root=Path(args.run_root),
+        scene_ids=args.scene,
+        taxonomy=load_taxonomy(args.taxonomy),
+        trace_output=Path(args.trace_output),
+        analysis_output=Path(args.analysis_output),
+        size_bins=Path(args.size_bins) if args.size_bins else None,
+        radius_m=args.radius_m,
+        min_region_size=args.min_region_size,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _evaluate_category_candidates(args: argparse.Namespace) -> None:
+    from .category_candidate_evaluation import evaluate_category_candidates
+
+    payload = evaluate_category_candidates(
+        runtime_manifest=Path(args.runtime_manifest),
+        gt_dir=Path(args.gt_dir),
+        run_root=Path(args.run_root),
+        scene_ids=args.scene,
+        taxonomy=load_taxonomy(args.taxonomy),
+        metrics_output=Path(args.metrics_output),
+        analysis_output=Path(args.analysis_output),
+        phase=args.phase,
+        selected_condition=args.selected_condition,
+        frozen_repair_artifact=(
+            Path(args.frozen_repair_artifact)
+            if args.frozen_repair_artifact
+            else None
+        ),
+        size_bins=Path(args.size_bins) if args.size_bins else None,
+        radius_m=args.radius_m,
+        min_region_size=args.min_region_size,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _diagnose_candidate_representation(args: argparse.Namespace) -> None:
+    from .category_candidate_representation import evaluate_candidate_representation
+
+    payload = evaluate_candidate_representation(
+        runtime_manifest=Path(args.runtime_manifest),
+        gt_dir=Path(args.gt_dir),
+        run_root=Path(args.run_root),
+        scene_ids=args.scene,
+        taxonomy=load_taxonomy(args.taxonomy),
+        metrics_output=Path(args.metrics_output),
+        analysis_output=Path(args.analysis_output),
+        size_bins=Path(args.size_bins) if args.size_bins else None,
+        radius_m=args.radius_m,
+        min_region_size=args.min_region_size,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _replay_category_candidates(args: argparse.Namespace) -> None:
+    from .category_candidate_runner import replay_repaired_category_candidates
+
+    payload = replay_repaired_category_candidates(
+        runtime_manifest=Path(args.runtime_manifest),
+        bank_root=Path(args.bank_root),
+        output_root=Path(args.output_root),
+        repo_root=Path(args.repo_root),
+        category_priors=Path(args.category_priors),
+        scene_ids=args.scene,
+        modes=args.mode,
+        score_threshold=args.score_threshold,
+        selected_condition=args.selected_condition,
+        seed=args.seed,
+        python_bin=Path(args.python_bin) if args.python_bin else None,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _evaluate_category_candidate_final(args: argparse.Namespace) -> None:
+    from .category_candidate_final_evaluation import evaluate_candidate_final_stage
+
+    physical_map = None
+    if args.physical_scene_map:
+        raw = json.loads(Path(args.physical_scene_map).read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise TypeError("physical scene map must be a JSON object")
+        physical_map = {str(key): str(value) for key, value in raw.items()}
+    payload = evaluate_candidate_final_stage(
+        runtime_manifest=Path(args.runtime_manifest),
+        gt_dir=Path(args.gt_dir),
+        b0_root=Path(args.b0_root),
+        replay_root=Path(args.replay_root),
+        scene_ids=args.scene,
+        taxonomy=load_taxonomy(args.taxonomy),
+        stage=args.phase,
+        output_dir=Path(args.output_dir),
+        physical_scene_by_scan=physical_map,
+        size_bins=Path(args.size_bins),
+        radius_m=args.radius_m,
+        min_region_size=args.min_region_size,
+        write_viewer=not args.no_viewer,
     )
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
@@ -218,6 +348,8 @@ def _audit(args: argparse.Namespace) -> None:
 
 
 def _run_v8_lifting_audit(args: argparse.Namespace) -> None:
+    from .v8_runner import run_v8_lifting_factorial
+
     payload = run_v8_lifting_factorial(
         Path(args.runtime_manifest),
         args.scene,
@@ -232,6 +364,9 @@ def _run_v8_lifting_audit(args: argparse.Namespace) -> None:
 
 
 def _run_v8_bank(args: argparse.Namespace) -> None:
+    from .v8_bank import build_v8_object_bank
+    from .v8_runner import run_v8_lifting_banks
+
     lifting_root = Path(args.output_root) / "lifting"
     run_v8_lifting_banks(
         Path(args.runtime_manifest),
@@ -255,6 +390,8 @@ def _run_v8_bank(args: argparse.Namespace) -> None:
 
 
 def _replay_v8(args: argparse.Namespace) -> None:
+    from .v8_bank import replay_v8_priors
+
     payload = replay_v8_priors(
         bank_root=args.bank_root,
         output_root=args.output_root,
@@ -267,6 +404,8 @@ def _replay_v8(args: argparse.Namespace) -> None:
 
 
 def _evaluate_v8(args: argparse.Namespace) -> None:
+    from .v8_evaluation import evaluate_v8_replays
+
     payload = evaluate_v8_replays(
         runtime_manifest=Path(args.runtime_manifest),
         gt_dir=Path(args.gt_dir),
@@ -301,6 +440,8 @@ def _audit_teacher_baseline(args: argparse.Namespace) -> None:
 
 
 def _train_object_features_10k(args: argparse.Namespace) -> None:
+    from .v9_feature_training import execute_v9_feature_training
+
     payload = execute_v9_feature_training(
         scene_manifest=Path(args.scene_manifest),
         output_root=Path(args.output_root),
@@ -315,6 +456,8 @@ def _train_object_features_10k(args: argparse.Namespace) -> None:
 
 
 def _run_object_bank(args: argparse.Namespace) -> None:
+    from .v9_runner import run_v9_banks
+
     payload = run_v9_banks(
         lifting_root=args.lifting_root,
         output_root=args.output_root,
@@ -326,6 +469,8 @@ def _run_object_bank(args: argparse.Namespace) -> None:
 
 
 def _replay_object_priors(args: argparse.Namespace) -> None:
+    from .v9_runner import replay_v9_priors
+
     payload = replay_v9_priors(
         bank_root=Path(args.bank_root) / args.association_mode,
         output_root=args.output_root,
@@ -339,6 +484,8 @@ def _replay_object_priors(args: argparse.Namespace) -> None:
 
 
 def _evaluate_object_system(args: argparse.Namespace) -> None:
+    from .v9_metrics import evaluate_v9_candidate_banks, evaluate_v9_predictions
+
     taxonomy = load_taxonomy(args.taxonomy)
     if args.evaluation_target == "bank":
         payload = evaluate_v9_candidate_banks(
@@ -374,6 +521,8 @@ def _evaluate_object_system(args: argparse.Namespace) -> None:
 
 
 def _audit_v10_association(args: argparse.Namespace) -> None:
+    from .v10_evaluation import audit_v10_associations
+
     payload = audit_v10_associations(
         runtime_manifest=Path(args.runtime_manifest),
         gt_dir=Path(args.gt_dir),
@@ -392,6 +541,8 @@ def _audit_v10_association(args: argparse.Namespace) -> None:
 
 
 def _run_v10_view_consensus(args: argparse.Namespace) -> None:
+    from .v10_runner import run_v10_banks
+
     payload = run_v10_banks(
         lifting_root=args.lifting_root,
         output_root=args.output_root,
@@ -403,6 +554,8 @@ def _run_v10_view_consensus(args: argparse.Namespace) -> None:
 
 
 def _replay_v10(args: argparse.Namespace) -> None:
+    from .v10_replay import replay_v10_priors
+
     payload = replay_v10_priors(
         bank_root=args.bank_root,
         output_root=args.output_root,
@@ -420,6 +573,8 @@ def _replay_v10(args: argparse.Namespace) -> None:
 
 
 def _evaluate_v10(args: argparse.Namespace) -> None:
+    from .v10_evaluation import evaluate_v10_replays
+
     payload = evaluate_v10_replays(
         runtime_manifest=Path(args.runtime_manifest),
         gt_dir=Path(args.gt_dir),
@@ -705,6 +860,126 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_v10.add_argument("--radius-m", type=float, default=0.05)
     evaluate_v10.add_argument("--min-region-size", type=int, default=100)
     evaluate_v10.set_defaults(func=_evaluate_v10)
+
+    candidate_repair = commands.add_parser(
+        "repair-category-candidates",
+        help="trace one HDBSCAN run and build C0/C1/C2 candidate banks",
+    )
+    candidate_repair.add_argument("--runtime-manifest", required=True)
+    candidate_repair.add_argument("--output-root", required=True)
+    candidate_repair.add_argument("--repo-root", default=".")
+    candidate_repair.add_argument("--category-priors", required=True)
+    candidate_repair.add_argument("--reference-bank-root")
+    candidate_repair.add_argument("--python-bin")
+    candidate_repair.add_argument("--seed", type=int, default=42)
+    candidate_repair.add_argument("--sample-cap", type=int, default=5000)
+    candidate_repair.add_argument("--scene", action="append", required=True)
+    candidate_repair.set_defaults(func=_repair_category_candidates)
+
+    candidate_diagnose = commands.add_parser(
+        "diagnose-category-candidates",
+        help="classify sampling, raw clustering, and full assignment failures",
+    )
+    candidate_diagnose.add_argument("--runtime-manifest", required=True)
+    candidate_diagnose.add_argument("--gt-dir", required=True)
+    candidate_diagnose.add_argument("--run-root", required=True)
+    candidate_diagnose.add_argument("--scene", action="append", required=True)
+    candidate_diagnose.add_argument("--taxonomy")
+    candidate_diagnose.add_argument("--size-bins")
+    candidate_diagnose.add_argument("--trace-output", required=True)
+    candidate_diagnose.add_argument("--analysis-output", required=True)
+    candidate_diagnose.add_argument("--radius-m", type=float, default=0.05)
+    candidate_diagnose.add_argument("--min-region-size", type=int, default=100)
+    candidate_diagnose.set_defaults(func=_diagnose_category_candidates)
+
+    candidate_evaluate = commands.add_parser(
+        "evaluate-category-candidates",
+        help="evaluate and gate C0/C1/C2 candidate banks",
+    )
+    candidate_evaluate.add_argument("--runtime-manifest", required=True)
+    candidate_evaluate.add_argument("--gt-dir", required=True)
+    candidate_evaluate.add_argument("--run-root", required=True)
+    candidate_evaluate.add_argument("--scene", action="append", required=True)
+    candidate_evaluate.add_argument("--taxonomy")
+    candidate_evaluate.add_argument("--size-bins")
+    candidate_evaluate.add_argument("--metrics-output", required=True)
+    candidate_evaluate.add_argument("--analysis-output", required=True)
+    candidate_evaluate.add_argument("--phase", choices=("dev2", "dev8"), required=True)
+    candidate_evaluate.add_argument(
+        "--selected-condition",
+        choices=("C1-consistent-envelope", "C2-raw-anchored-envelope"),
+        help="DEV2-frozen repair arm; required for DEV8 and forbidden for DEV2",
+    )
+    candidate_evaluate.add_argument(
+        "--frozen-repair-artifact",
+        help="required for DEV8; binds evaluation to the DEV2-selected arm",
+    )
+    candidate_evaluate.add_argument("--radius-m", type=float, default=0.05)
+    candidate_evaluate.add_argument("--min-region-size", type=int, default=100)
+    candidate_evaluate.set_defaults(func=_evaluate_category_candidates)
+
+    representation = commands.add_parser(
+        "diagnose-candidate-representation",
+        help="measure local affinity AUROC and a GT-seed offline upper control",
+    )
+    representation.add_argument("--runtime-manifest", required=True)
+    representation.add_argument("--gt-dir", required=True)
+    representation.add_argument("--run-root", required=True)
+    representation.add_argument("--scene", action="append", required=True)
+    representation.add_argument("--taxonomy")
+    representation.add_argument("--size-bins")
+    representation.add_argument("--metrics-output", required=True)
+    representation.add_argument("--analysis-output", required=True)
+    representation.add_argument("--radius-m", type=float, default=0.05)
+    representation.add_argument("--min-region-size", type=int, default=100)
+    representation.set_defaults(func=_diagnose_candidate_representation)
+
+    candidate_replay = commands.add_parser(
+        "replay-category-candidates",
+        help="replay accepted repaired candidates through legacy KNN/filter",
+    )
+    candidate_replay.add_argument("--runtime-manifest", required=True)
+    candidate_replay.add_argument("--bank-root", required=True)
+    candidate_replay.add_argument("--output-root", required=True)
+    candidate_replay.add_argument("--repo-root", default=".")
+    candidate_replay.add_argument("--category-priors", required=True)
+    candidate_replay.add_argument("--scene", action="append", required=True)
+    candidate_replay.add_argument(
+        "--mode", action="append", choices=("uniform", "class"), required=True
+    )
+    candidate_replay.add_argument("--score-threshold", type=float, required=True)
+    candidate_replay.add_argument(
+        "--selected-condition",
+        choices=("C1-consistent-envelope", "C2-raw-anchored-envelope"),
+        help=(
+            "read repair-layout banks from bank/<scene>/<condition>; omit only "
+            "when --bank-root is already a flat selected-bank root"
+        ),
+    )
+    candidate_replay.add_argument("--seed", type=int, default=42)
+    candidate_replay.add_argument("--python-bin")
+    candidate_replay.set_defaults(func=_replay_category_candidates)
+
+    candidate_final = commands.add_parser(
+        "evaluate-category-candidate-final",
+        help="evaluate frozen B0/U/D candidate replays at a registered stage",
+    )
+    candidate_final.add_argument("--runtime-manifest", required=True)
+    candidate_final.add_argument("--gt-dir", required=True)
+    candidate_final.add_argument("--b0-root", required=True)
+    candidate_final.add_argument("--replay-root", required=True)
+    candidate_final.add_argument("--scene", action="append", required=True)
+    candidate_final.add_argument(
+        "--phase", choices=("dev8", "holdout", "tune", "final"), required=True
+    )
+    candidate_final.add_argument("--output-dir", required=True)
+    candidate_final.add_argument("--taxonomy")
+    candidate_final.add_argument("--size-bins", required=True)
+    candidate_final.add_argument("--physical-scene-map")
+    candidate_final.add_argument("--radius-m", type=float, default=0.05)
+    candidate_final.add_argument("--min-region-size", type=int, default=100)
+    candidate_final.add_argument("--no-viewer", action="store_true")
+    candidate_final.set_defaults(func=_evaluate_category_candidate_final)
 
     denoise_bank = commands.add_parser(
         "run-category-denoise-bank",

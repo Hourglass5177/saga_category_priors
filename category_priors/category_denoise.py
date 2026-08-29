@@ -92,6 +92,30 @@ class CandidateBank:
         return len(self.global_pre_knn)
 
 
+@dataclass(frozen=True)
+class CandidateBankFamily:
+    """C0/C1/C2 banks and their lossless shared HDBSCAN trace.
+
+    ``formation_trace`` is intentionally typed as ``Any`` here: the trace
+    module imports :class:`CandidateBank` for validation, so importing its
+    concrete dataclass at module import time would create a cycle.  The
+    builder below imports it only after this module is fully initialized.
+    """
+
+    legacy: CandidateBank
+    consistent_envelope: CandidateBank
+    raw_anchored_envelope: CandidateBank
+    formation_trace: Any
+
+    @property
+    def banks(self) -> dict[str, CandidateBank]:
+        return {
+            "C0-legacy": self.legacy,
+            "C1-consistent-envelope": self.consistent_envelope,
+            "C2-raw-anchored-envelope": self.raw_anchored_envelope,
+        }
+
+
 def _as_numpy(value: Any, dtype: np.dtype[Any] | type | None = None) -> np.ndarray:
     """Convert NumPy or CPU/GPU tensor-like input without importing torch."""
 
@@ -490,6 +514,555 @@ def build_candidate_bank(
     )
     _validate_bank(bank)
     return bank
+
+
+def build_candidate_repair_family(
+    instance_features: Any,
+    semantic_features: Any,
+    xyz_scene: Any,
+    label_features: Any,
+    class_names: Sequence[str],
+    saga20_names: Sequence[str],
+    global_pre_knn: Any,
+    scene_scale_m_per_unit: float,
+    *,
+    scene_id: str,
+    seed: int = 42,
+    sample_cap: int = SAMPLE_CAP,
+    hdbscan_factory: Callable[..., Any] | None = None,
+) -> CandidateBankFamily:
+    """Build C0/C1/C2 from one semantic selection and one HDBSCAN run.
+
+    This is the only construction entry used by the candidate-formation
+    experiment.  C0 deliberately repeats :func:`build_candidate_bank`
+    mechanics exactly.  C1 and C2 consume the same raw labels, sample order,
+    distance normalizers, and semantic winners; only the raw-cluster to full
+    assignment rule differs.  No ground truth or category-prior table is
+    accepted by this function.
+    """
+
+    from scipy.spatial import cKDTree
+    from scipy.spatial.distance import cdist
+
+    from .category_candidate_repair import (
+        CONSISTENT_ENVELOPE,
+        RAW_ANCHORED_ENVELOPE,
+        CandidateRepairScene,
+        CandidateRepairTrace,
+        repair_class_candidates,
+    )
+    from .category_candidate_trace import (
+        CandidateFormationClassCapture,
+        build_candidate_formation_trace,
+    )
+
+    classes, branches = _validate_names(class_names, saga20_names)
+    instance = _as_numpy(instance_features, np.float64)
+    semantic = _as_numpy(semantic_features, np.float64)
+    xyz = _as_numpy(xyz_scene, np.float64)
+    global_labels = _as_numpy(global_pre_knn, np.int64)
+    count = len(xyz)
+    if (
+        instance.ndim != 2
+        or semantic.ndim != 2
+        or xyz.shape != (count, 3)
+        or global_labels.shape != (count,)
+        or len(instance) != count
+        or len(semantic) != count
+    ):
+        raise ValueError("features, xyz_scene and global_pre_knn must share a point axis")
+    if not np.isfinite(instance).all() or not np.isfinite(xyz).all():
+        raise ValueError("instance features and xyz must be finite")
+    if np.any(global_labels < -1):
+        raise ValueError("global_pre_knn may only use -1 as its negative label")
+    scale = float(scene_scale_m_per_unit)
+    if not np.isfinite(scale) or scale <= 0:
+        raise ValueError("scene_scale_m_per_unit must be finite and positive")
+    cap = int(sample_cap)
+    if cap <= 0:
+        raise ValueError("sample_cap must be positive")
+    if not str(scene_id):
+        raise ValueError("scene_id must not be empty")
+
+    top1 = normalized_top1_32(
+        semantic, label_features, classes, branches, SEMANTIC_THRESHOLD
+    )
+    normed_instance = _normalize_rows(instance)
+    minimum = xyz.min(axis=0)
+    span = xyz.max(axis=0) - minimum
+    safe_span = np.where(span > 0, span, 1.0)
+    standardized_xyz = (xyz - minimum) / safe_span
+    factory = hdbscan_factory or _default_hdbscan_factory
+
+    condition_keys = (
+        "C0-legacy",
+        "C1-consistent-envelope",
+        "C2-raw-anchored-envelope",
+    )
+    full_by_condition = {
+        key: np.full(count, -1, dtype=np.int64) for key in condition_keys
+    }
+    core_by_condition = {
+        key: np.full(count, -1, dtype=np.int64) for key in condition_keys
+    }
+    confidence_by_condition = {
+        key: np.zeros(count, dtype=np.float64) for key in condition_keys
+    }
+    rows_by_condition: dict[str, list[dict[str, Any]]] = {
+        key: [] for key in condition_keys
+    }
+    diagnostics_by_condition: dict[str, dict[str, dict[str, Any]]] = {
+        key: {} for key in condition_keys
+    }
+    next_candidate_id = {key: 0 for key in condition_keys}
+    captures: list[CandidateFormationClassCapture] = []
+    repair_scene = CandidateRepairScene(
+        instance_features=instance,
+        xyz_scene=xyz,
+        semantic_top1_score=top1.top_score,
+    )
+
+    for class_name in sorted(branches):
+        class_index = classes.index(class_name)
+        selected_indices = np.flatnonzero(
+            top1.eligible_mask & (top1.branch_class_index == class_index)
+        )
+        selected_count = len(selected_indices)
+        common_diagnostic: dict[str, Any] = {
+            "class_index": class_index,
+            "selected_points": selected_count,
+            "sampled_points": 0,
+            "hdbscan_noise_points": 0,
+            "candidate_count": 0,
+        }
+        for key in condition_keys:
+            diagnostics_by_condition[key][class_name] = dict(common_diagnostic)
+
+        if selected_count < MIN_CLUSTER_SIZE:
+            captures.append(
+                CandidateFormationClassCapture(
+                    branch_class=class_name,
+                    branch_class_index=class_index,
+                    selected_indices=selected_indices,
+                    sampled_local_indices=np.asarray([], dtype=np.int64),
+                    hdbscan_labels=np.asarray([], dtype=np.int64),
+                    hdbscan_membership=np.asarray([], dtype=np.float64),
+                    raw_cluster_ids=(),
+                    prethreshold_argmax_center=np.full(
+                        selected_count, -1, dtype=np.int64
+                    ),
+                    prethreshold_assignment_confidence=np.zeros(
+                        selected_count, dtype=np.float64
+                    ),
+                    legacy_assignment_chosen_center=np.full(
+                        selected_count, -1, dtype=np.int64
+                    ),
+                    legacy_assignment_feature_similarity=np.zeros(
+                        selected_count, dtype=np.float64
+                    ),
+                    legacy_assignment_feature_center_norm=np.zeros(
+                        selected_count, dtype=np.float64
+                    ),
+                    legacy_assignment_spatial_distance_standardized=np.zeros(
+                        selected_count, dtype=np.float64
+                    ),
+                    legacy_assignment_spatial_similarity=np.zeros(
+                        selected_count, dtype=np.float64
+                    ),
+                    legacy_assignment_hybrid_similarity=np.zeros(
+                        selected_count, dtype=np.float64
+                    ),
+                    legacy_assignment_xyz_denominator=safe_span.copy(),
+                    legacy_assignment_softmax_temperature=(
+                        ASSIGNMENT_TEMPERATURE
+                    ),
+                    sampled_raw_medoid_local_index=np.asarray([], dtype=np.int64),
+                    sampled_medoid_instance_distance=np.asarray([], dtype=np.float64),
+                    sampled_medoid_spatial_distance=np.asarray([], dtype=np.float64),
+                    sampled_medoid_semantic_distance=np.asarray([], dtype=np.float64),
+                    sampled_medoid_hybrid_distance=np.asarray([], dtype=np.float64),
+                    diagnostics={
+                        "instance_distance_max": 0.0,
+                        "spatial_distance_max": 0.0,
+                        "scene_xyz_min": minimum.tolist(),
+                        "scene_xyz_span": span.tolist(),
+                        "scene_xyz_safe_span": safe_span.tolist(),
+                        "legacy_assignment": {
+                            "center_kind": "normalized-feature-mean-and-standardized-xyz-mean",
+                            "feature_component": "cosine_similarity",
+                            "spatial_component": "exp(-standardized_euclidean_distance)",
+                            "feature_weight": INSTANCE_WEIGHT,
+                            "spatial_weight": 1.0 - INSTANCE_WEIGHT,
+                            "softmax_temperature": ASSIGNMENT_TEMPERATURE,
+                        },
+                    },
+                )
+            )
+            continue
+
+        selected_features = normed_instance[selected_indices]
+        selected_xyz = standardized_xyz[selected_indices]
+        selected_scores = top1.top_score[selected_indices]
+        sample_count = min(selected_count, cap)
+        rng = np.random.default_rng(stable_class_seed(seed, class_name))
+        sampled_local = rng.permutation(selected_count)[:sample_count]
+        sampled_features = selected_features[sampled_local]
+        sampled_xyz = selected_xyz[sampled_local]
+        sampled_scores = selected_scores[sampled_local]
+        for key in condition_keys:
+            diagnostics_by_condition[key][class_name]["sampled_points"] = int(
+                sample_count
+            )
+
+        instance_distance = np.maximum(
+            1.0 - sampled_features @ sampled_features.T, 0.0
+        )
+        spatial_distance = cdist(sampled_xyz, sampled_xyz, metric="euclidean")
+        semantic_distance = np.clip(
+            1.0 - np.outer(sampled_scores, sampled_scores), 0.0, 1.0
+        )
+        instance_max = float(np.max(instance_distance)) if instance_distance.size else 0.0
+        spatial_max = float(np.max(spatial_distance)) if spatial_distance.size else 0.0
+        hybrid_distance = (
+            INSTANCE_WEIGHT * _scaled_distance(instance_distance)
+            + SPATIAL_WEIGHT * _scaled_distance(spatial_distance)
+            + SEMANTIC_WEIGHT * semantic_distance
+        )
+        clusterer = factory(
+            min_cluster_size=MIN_CLUSTER_SIZE,
+            min_samples=MIN_SAMPLES,
+            cluster_selection_epsilon=CLUSTER_SELECTION_EPSILON,
+            allow_single_cluster=False,
+            metric="precomputed",
+        )
+        cluster_labels = np.asarray(
+            clusterer.fit_predict(hybrid_distance.astype(np.float64, copy=False)),
+            dtype=np.int64,
+        )
+        if cluster_labels.shape != (sample_count,):
+            raise ValueError("HDBSCAN returned an invalid label vector")
+        raw_membership = getattr(clusterer, "probabilities_", None)
+        if raw_membership is None:
+            hdbscan_membership = np.where(cluster_labels >= 0, 1.0, 0.0)
+        else:
+            hdbscan_membership = np.asarray(raw_membership, dtype=np.float64)
+            if hdbscan_membership.shape != (sample_count,):
+                raise ValueError("HDBSCAN returned invalid membership probabilities")
+            hdbscan_membership = np.where(
+                cluster_labels >= 0, hdbscan_membership, 0.0
+            )
+        noise_count = int(np.count_nonzero(cluster_labels < 0))
+        for key in condition_keys:
+            diagnostics_by_condition[key][class_name][
+                "hdbscan_noise_points"
+            ] = noise_count
+        raw_cluster_ids = tuple(
+            int(value) for value in np.unique(cluster_labels) if int(value) >= 0
+        )
+        sampled_medoid_local = np.full(sample_count, -1, dtype=np.int64)
+        sampled_medoid_instance = np.zeros(sample_count, dtype=np.float64)
+        sampled_medoid_spatial = np.zeros(sample_count, dtype=np.float64)
+        sampled_medoid_semantic = np.zeros(sample_count, dtype=np.float64)
+        sampled_medoid_hybrid = np.zeros(sample_count, dtype=np.float64)
+        normalized_instance_distance = (
+            instance_distance / instance_max
+            if instance_max > 0.0
+            else np.zeros_like(instance_distance)
+        )
+        normalized_spatial_distance = (
+            spatial_distance / spatial_max
+            if spatial_max > 0.0
+            else np.zeros_like(spatial_distance)
+        )
+        for raw_cluster_id in raw_cluster_ids:
+            member_positions = np.flatnonzero(cluster_labels == raw_cluster_id)
+            member_hybrid = hybrid_distance[np.ix_(member_positions, member_positions)]
+            medoid_position = int(
+                member_positions[int(np.argmin(member_hybrid.sum(axis=1)))]
+            )
+            sampled_medoid_local[member_positions] = medoid_position
+            sampled_medoid_instance[member_positions] = (
+                normalized_instance_distance[member_positions, medoid_position]
+            )
+            sampled_medoid_spatial[member_positions] = (
+                normalized_spatial_distance[member_positions, medoid_position]
+            )
+            sampled_medoid_semantic[member_positions] = (
+                semantic_distance[member_positions, medoid_position]
+            )
+            sampled_medoid_hybrid[member_positions] = (
+                hybrid_distance[member_positions, medoid_position]
+            )
+
+        if raw_cluster_ids:
+            feature_centers: list[np.ndarray] = []
+            feature_center_norms: list[float] = []
+            xyz_centers: list[np.ndarray] = []
+            for raw_cluster_id in raw_cluster_ids:
+                mask = cluster_labels == raw_cluster_id
+                center = sampled_features[mask].mean(axis=0, keepdims=True)
+                feature_center_norms.append(float(np.linalg.norm(center[0])))
+                feature_centers.append(_normalize_rows(center)[0])
+                xyz_centers.append(sampled_xyz[mask].mean(axis=0))
+            feature_centers_array = np.asarray(feature_centers, dtype=np.float64)
+            feature_center_norms_array = np.asarray(
+                feature_center_norms, dtype=np.float64
+            )
+            xyz_centers_array = np.asarray(xyz_centers, dtype=np.float64)
+            feature_similarity = np.clip(
+                selected_features @ feature_centers_array.T, -1.0, 1.0
+            )
+            xyz_distance = cdist(selected_xyz, xyz_centers_array)
+            xyz_similarity = np.exp(-xyz_distance)
+            hybrid_similarity = (
+                INSTANCE_WEIGHT * feature_similarity
+                + (1.0 - INSTANCE_WEIGHT) * xyz_similarity
+            )
+            probability = _softmax(hybrid_similarity * ASSIGNMENT_TEMPERATURE)
+            prethreshold_center = np.argmax(probability, axis=1).astype(np.int64)
+            prethreshold_confidence = probability[
+                np.arange(selected_count), prethreshold_center
+            ]
+            selected_rows = np.arange(selected_count)
+            legacy_feature_similarity = feature_similarity[
+                selected_rows, prethreshold_center
+            ]
+            legacy_feature_center_norm = feature_center_norms_array[
+                prethreshold_center
+            ]
+            legacy_spatial_distance = xyz_distance[
+                selected_rows, prethreshold_center
+            ]
+            legacy_spatial_similarity = xyz_similarity[
+                selected_rows, prethreshold_center
+            ]
+            legacy_hybrid_similarity = hybrid_similarity[
+                selected_rows, prethreshold_center
+            ]
+            assigned_center = prethreshold_center.copy()
+            assigned_center[
+                prethreshold_confidence < ASSIGNMENT_THRESHOLD
+            ] = -1
+        else:
+            prethreshold_center = np.full(selected_count, -1, dtype=np.int64)
+            prethreshold_confidence = np.zeros(selected_count, dtype=np.float64)
+            legacy_feature_similarity = np.zeros(selected_count, dtype=np.float64)
+            legacy_feature_center_norm = np.zeros(selected_count, dtype=np.float64)
+            legacy_spatial_distance = np.zeros(selected_count, dtype=np.float64)
+            legacy_spatial_similarity = np.zeros(selected_count, dtype=np.float64)
+            legacy_hybrid_similarity = np.zeros(selected_count, dtype=np.float64)
+            assigned_center = prethreshold_center.copy()
+
+        captures.append(
+            CandidateFormationClassCapture(
+                branch_class=class_name,
+                branch_class_index=class_index,
+                selected_indices=selected_indices,
+                sampled_local_indices=sampled_local,
+                hdbscan_labels=cluster_labels,
+                hdbscan_membership=hdbscan_membership,
+                raw_cluster_ids=raw_cluster_ids,
+                prethreshold_argmax_center=prethreshold_center,
+                prethreshold_assignment_confidence=prethreshold_confidence,
+                legacy_assignment_chosen_center=prethreshold_center.copy(),
+                legacy_assignment_feature_similarity=legacy_feature_similarity,
+                legacy_assignment_feature_center_norm=legacy_feature_center_norm,
+                legacy_assignment_spatial_distance_standardized=(
+                    legacy_spatial_distance
+                ),
+                legacy_assignment_spatial_similarity=legacy_spatial_similarity,
+                legacy_assignment_hybrid_similarity=legacy_hybrid_similarity,
+                legacy_assignment_xyz_denominator=safe_span.copy(),
+                legacy_assignment_softmax_temperature=ASSIGNMENT_TEMPERATURE,
+                sampled_raw_medoid_local_index=sampled_medoid_local,
+                sampled_medoid_instance_distance=sampled_medoid_instance,
+                sampled_medoid_spatial_distance=sampled_medoid_spatial,
+                sampled_medoid_semantic_distance=sampled_medoid_semantic,
+                sampled_medoid_hybrid_distance=sampled_medoid_hybrid,
+                diagnostics={
+                    "instance_distance_max": instance_max,
+                    "spatial_distance_max": spatial_max,
+                    "scene_xyz_min": minimum.tolist(),
+                    "scene_xyz_span": span.tolist(),
+                    "scene_xyz_safe_span": safe_span.tolist(),
+                    "distance_weights": {
+                        "instance": INSTANCE_WEIGHT,
+                        "spatial": SPATIAL_WEIGHT,
+                        "semantic": SEMANTIC_WEIGHT,
+                    },
+                    "legacy_assignment": {
+                        "center_kind": "normalized-feature-mean-and-standardized-xyz-mean",
+                        "feature_component": "cosine_similarity",
+                        "spatial_component": "exp(-standardized_euclidean_distance)",
+                        "feature_weight": INSTANCE_WEIGHT,
+                        "spatial_weight": 1.0 - INSTANCE_WEIGHT,
+                        "softmax_temperature": ASSIGNMENT_TEMPERATURE,
+                    },
+                },
+            )
+        )
+
+        # C0 is kept byte-for-byte compatible with build_candidate_bank.
+        for center_index, raw_cluster_id in enumerate(raw_cluster_ids):
+            full_local = assigned_center == center_index
+            if int(np.count_nonzero(full_local)) < MIN_CLUSTER_SIZE:
+                continue
+            candidate_id = next_candidate_id["C0-legacy"]
+            next_candidate_id["C0-legacy"] += 1
+            full_indices = selected_indices[full_local]
+            core_local = sampled_local[cluster_labels == raw_cluster_id]
+            core_indices = selected_indices[core_local]
+            full_by_condition["C0-legacy"][full_indices] = candidate_id
+            core_by_condition["C0-legacy"][core_indices] = candidate_id
+            confidence_by_condition["C0-legacy"][full_indices] = (
+                prethreshold_confidence[full_local]
+            )
+            rows_by_condition["C0-legacy"].append(
+                {
+                    "candidate_id": candidate_id,
+                    "branch_class": class_name,
+                    "branch_class_index": class_index,
+                    "hdbscan_cluster_id": raw_cluster_id,
+                    "semantic_selected_point_count": selected_count,
+                    "sampled_point_count": sample_count,
+                    "core_point_count": len(core_indices),
+                    "full_point_count": len(full_indices),
+                    "assignment_confidence_mean": float(
+                        prethreshold_confidence[full_local].mean()
+                    ),
+                    "metric_extents_m": pca_sorted_extents_m(
+                        xyz[full_indices], scale
+                    ).tolist(),
+                }
+            )
+
+        repair_trace = CandidateRepairTrace(
+            selected_global_indices=selected_indices,
+            sampled_local_indices=sampled_local,
+            raw_cluster_labels=cluster_labels,
+            instance_distance_max=instance_max,
+            spatial_distance_max=spatial_max,
+        )
+        for condition, repair_mode in (
+            ("C1-consistent-envelope", CONSISTENT_ENVELOPE),
+            ("C2-raw-anchored-envelope", RAW_ANCHORED_ENVELOPE),
+        ):
+            result = repair_class_candidates(repair_scene, repair_trace, repair_mode)
+            offset = next_candidate_id[condition]
+            full_selected = np.asarray(result.full_candidate_labels, dtype=np.int64)
+            core_selected = np.asarray(result.trusted_core_labels, dtype=np.int64)
+            valid_full = full_selected >= 0
+            valid_core = core_selected >= 0
+            full_by_condition[condition][selected_indices[valid_full]] = (
+                full_selected[valid_full] + offset
+            )
+            core_by_condition[condition][selected_indices[valid_core]] = (
+                core_selected[valid_core] + offset
+            )
+            confidence_by_condition[condition][selected_indices] = np.asarray(
+                result.assignment_confidence, dtype=np.float64
+            )
+            for local_row in result.candidates:
+                local_id = int(local_row["candidate_id"])
+                candidate_id = offset + local_id
+                full_indices = selected_indices[full_selected == local_id]
+                trusted_indices = selected_indices[core_selected == local_id]
+                row = dict(local_row)
+                row.update(
+                    {
+                        "candidate_id": candidate_id,
+                        "branch_class": class_name,
+                        "branch_class_index": class_index,
+                        "hdbscan_cluster_id": int(local_row["raw_cluster_id"]),
+                        "semantic_selected_point_count": selected_count,
+                        "sampled_point_count": sample_count,
+                        "core_point_count": len(trusted_indices),
+                        "trusted_core_point_count": len(trusted_indices),
+                        "full_point_count": len(full_indices),
+                        "metric_extents_m": pca_sorted_extents_m(
+                            xyz[full_indices], scale
+                        ).tolist(),
+                    }
+                )
+                rows_by_condition[condition].append(row)
+            next_candidate_id[condition] += len(result.candidates)
+            diagnostics_by_condition[condition][class_name][
+                "repair"
+            ] = dict(result.diagnostics)
+
+        for condition in condition_keys:
+            diagnostics_by_condition[condition][class_name][
+                "candidate_count"
+            ] = int(
+                sum(
+                    row["branch_class"] == class_name
+                    for row in rows_by_condition[condition]
+                )
+            )
+
+    xyz_m = xyz * scale
+    boundary_tree = cKDTree(xyz_m)
+    banks: dict[str, CandidateBank] = {}
+    for condition in condition_keys:
+        enriched_rows: list[dict[str, Any]] = []
+        for row in rows_by_condition[condition]:
+            candidate_id = int(row["candidate_id"])
+            enriched = dict(row)
+            enriched["boundary_ratio_5cm"] = _boundary_fixed_ratio_with_tree(
+                xyz_m,
+                full_by_condition[condition] == candidate_id,
+                boundary_tree,
+            )
+            enriched_rows.append(enriched)
+        diagnostics: dict[str, Any] = {
+            "semantic_threshold": SEMANTIC_THRESHOLD,
+            "sample_cap": cap,
+            "min_cluster_size": MIN_CLUSTER_SIZE,
+            "min_samples": MIN_SAMPLES,
+            "weights": {
+                "instance": INSTANCE_WEIGHT,
+                "spatial": SPATIAL_WEIGHT,
+                "semantic": SEMANTIC_WEIGHT,
+            },
+            "assignment_threshold": ASSIGNMENT_THRESHOLD,
+            "class_diagnostics": diagnostics_by_condition[condition],
+        }
+        if condition != "C0-legacy":
+            diagnostics["candidate_repair_condition"] = condition
+        diagnostics["scene_id"] = str(scene_id)
+        bank = CandidateBank(
+            class_names=classes,
+            saga20_names=tuple(sorted(branches)),
+            scene_scale_m_per_unit=scale,
+            seed=int(seed),
+            global_pre_knn=_readonly(global_labels.astype(np.int64, copy=True)),
+            semantic_top1=_readonly(top1.top_class_index.astype(np.int64, copy=True)),
+            semantic_top1_score=_readonly(top1.top_score.astype(np.float64, copy=True)),
+            branch_full_labels=_readonly(full_by_condition[condition]),
+            branch_core_labels=_readonly(core_by_condition[condition]),
+            assignment_confidence=_readonly(confidence_by_condition[condition]),
+            candidates=tuple(enriched_rows),
+            diagnostics=diagnostics,
+        )
+        _validate_bank(bank)
+        banks[condition] = bank
+
+    trace = build_candidate_formation_trace(
+        scene_id=str(scene_id),
+        bank=banks["C0-legacy"],
+        class_captures=captures,
+        sample_cap=cap,
+        diagnostics={
+            "distance_components_recorded": True,
+            "construction_conditions": list(condition_keys),
+        },
+    )
+    return CandidateBankFamily(
+        legacy=banks["C0-legacy"],
+        consistent_envelope=banks["C1-consistent-envelope"],
+        raw_anchored_envelope=banks["C2-raw-anchored-envelope"],
+        formation_trace=trace,
+    )
 
 
 def _validate_bank(bank: CandidateBank) -> None:
@@ -1149,11 +1722,13 @@ __all__ = [
     "SCORE_THRESHOLD",
     "SEMANTIC_THRESHOLD",
     "CandidateBank",
+    "CandidateBankFamily",
     "LegacyKNNFilterResult",
     "Top1Assignment",
     "attach_candidate_votes",
     "boundary_fixed_ratio_5cm",
     "build_candidate_bank",
+    "build_candidate_repair_family",
     "build_strict_prediction_metadata",
     "load_candidate_bank",
     "legacy_knn_filter",
