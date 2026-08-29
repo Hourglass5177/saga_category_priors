@@ -1064,7 +1064,7 @@ def build_category_fragment_graphs(
     )
     rows: list[dict[str, Any]] = []
     for scene_id in selected:
-        _, _, _, graph, _, rebuilt = _ensure_scene_graph(
+        _, _, bank, graph, _, rebuilt = _ensure_scene_graph(
             scene_id=scene_id,
             scene=scenes[scene_id],
             category_priors_payload=payload,
@@ -1084,6 +1084,9 @@ def build_category_fragment_graphs(
                 "rebuilt": rebuilt,
                 "raw_fragment_count": len(graph.nodes),
                 "fragment_edge_count": len(graph.edges),
+                "point_axis_validation": dict(
+                    bank.diagnostics["point_axis_validation"]
+                ),
                 "gt_used": False,
             }
         )

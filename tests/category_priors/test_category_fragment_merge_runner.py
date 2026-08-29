@@ -419,6 +419,7 @@ def test_explicit_build_and_mode_replay_stages_write_completion_only_after_both(
     )
     scene_root = output / "scene0645_00"
     assert build["stage"] == "build-fragment-graph"
+    assert build["scenes"][0]["point_axis_validation"]["passed"] is True
     assert (scene_root / "fragment_graph" / "fragment_graph.npz").is_file()
     assert not (scene_root / "replay").exists()
     assert not (scene_root / "scene_complete.json").exists()
