@@ -804,7 +804,14 @@ def main():
     parser.add_argument("--v6-scene-id", type=str, default=None)
     parser.add_argument(
         "--category-denoise-action",
-        choices=("off", "bank", "candidate-repair", "replay", "candidate-replay"),
+        choices=(
+            "off",
+            "bank",
+            "candidate-repair",
+            "cluster-bank",
+            "replay",
+            "candidate-replay",
+        ),
         default="off",
     )
     parser.add_argument("--category-denoise-bank-path", type=str, default=None)
@@ -814,6 +821,25 @@ def main():
     )
     parser.add_argument(
         "--category-candidate-score-threshold", type=float, default=0.20
+    )
+    parser.add_argument(
+        "--category-cluster-condition",
+        action="append",
+        choices=(
+            "R0-legacy",
+            "R1-corrected-distance-legacy-expand",
+            "R2-corrected-distance-anchored-expand",
+            "G1-mutual-local-graph",
+        ),
+    )
+    parser.add_argument("--category-cluster-audit-path", type=str, default=None)
+    parser.add_argument(
+        "--category-cluster-verify-determinism",
+        action="store_true",
+        help=(
+            "independently rebuild the requested cluster family and compare "
+            "every persisted point/candidate; required for registered DEV2"
+        ),
     )
     parser.add_argument(
         "--category-denoise-mode", choices=("uniform", "class"), default="uniform"
@@ -885,6 +911,27 @@ def main():
             parser.error(
                 "candidate repair requires --category-candidate-trace-path"
             )
+        if (
+            args.category_denoise_action == "cluster-bank"
+            and not args.category_cluster_audit_path
+        ):
+            parser.error("cluster bank requires --category-cluster-audit-path")
+        if (
+            args.category_denoise_action == "cluster-bank"
+            and args.category_cluster_condition
+            and len(args.category_cluster_condition)
+            != len(set(args.category_cluster_condition))
+        ):
+            parser.error("cluster bank conditions must not be repeated")
+    if args.category_denoise_action != "cluster-bank" and (
+        args.category_cluster_condition
+        or args.category_cluster_audit_path
+        or args.category_cluster_verify_determinism
+    ):
+        parser.error(
+            "category cluster condition/audit arguments require "
+            "--category-denoise-action cluster-bank"
+        )
     prior_resolver = None
     if args.prior_mode != 'off':
         if not args.prior_config or not args.prior_mapping_config:
@@ -1198,6 +1245,7 @@ def main():
     fallback_assignment_confidence = point_assignment_confidence.detach().cpu().clone()
     category_denoise_bank = None
     category_candidate_family = None
+    category_cluster_family = None
     category_denoise_decisions = []
     category_denoise_classes = {}
     category_denoise_scores = {}
@@ -1250,6 +1298,68 @@ def main():
             + ", ".join(
                 f"{name}={len(bank.candidates)}"
                 for name, bank in category_candidate_family.banks.items()
+            )
+        )
+    elif args.category_denoise_action == "cluster-bank":
+        from category_priors.category_cluster_bank import (
+            R0_LEGACY,
+            R1_METRIC_HDBSCAN,
+            R2_ANCHORED_HDBSCAN,
+            build_cluster_bank_family,
+            measure_cluster_family_determinism,
+        )
+        from category_priors.io import load_json
+        from category_priors.prompt_prior import materialize_prompt_priors
+        from category_priors.teacher_prior import saga20_branch_classes
+
+        cluster_conditions = tuple(
+            args.category_cluster_condition
+            or (R0_LEGACY, R1_METRIC_HDBSCAN, R2_ANCHORED_HDBSCAN)
+        )
+        if R0_LEGACY not in cluster_conditions:
+            cluster_conditions = (R0_LEGACY, *cluster_conditions)
+        prompt_table = materialize_prompt_priors(load_json(args.category_priors))
+        category_cluster_family = build_cluster_bank_family(
+            normed_point_features,
+            normed_point_semantic_features,
+            point_xyz,
+            F.normalize(label_features.detach().cpu(), dim=-1, p=2),
+            args.classes,
+            saga20_branch_classes(class_to_idx),
+            fallback_point_labels,
+            args.scene_scale_m_per_unit,
+            prompt_table.global_typical_diag_m,
+            scene_id=args.category_denoise_scene_id,
+            seed=args.seed,
+            conditions=cluster_conditions,
+        )
+        if args.category_cluster_verify_determinism:
+            # DEV2 performs an observed pointwise repeatability check.  Later
+            # stages reference this measured algorithm contract instead of
+            # silently doubling every holdout/final scene.
+            repeated_cluster_family = build_cluster_bank_family(
+                normed_point_features,
+                normed_point_semantic_features,
+                point_xyz,
+                F.normalize(label_features.detach().cpu(), dim=-1, p=2),
+                args.classes,
+                saga20_branch_classes(class_to_idx),
+                fallback_point_labels,
+                args.scene_scale_m_per_unit,
+                prompt_table.global_typical_diag_m,
+                scene_id=args.category_denoise_scene_id,
+                seed=args.seed,
+                conditions=cluster_conditions,
+            )
+            category_cluster_family = measure_cluster_family_determinism(
+                category_cluster_family, repeated_cluster_family
+            )
+        category_denoise_bank = category_cluster_family.banks[R0_LEGACY]
+        print(
+            "category cluster family captured "
+            + ", ".join(
+                f"{name}={len(bank.candidates)}"
+                for name, bank in category_cluster_family.banks.items()
             )
         )
     elif args.category_denoise_action in {"replay", "candidate-replay"}:
@@ -1985,7 +2095,6 @@ def main():
             attach_candidate_votes,
             save_candidate_bank,
         )
-
         branch_vote_ratios = compute_instance_ratios(
             torch.from_numpy(category_denoise_bank.branch_full_labels.copy()),
             update_progress=False,
@@ -2036,6 +2145,84 @@ def main():
             "category candidate family and trace saved: "
             f"{family_root}; {args.category_candidate_trace_path}"
         )
+    elif args.category_denoise_action == "cluster-bank":
+        from pathlib import Path
+
+        from category_priors.category_cluster_bank import save_cluster_raw_audit
+        from category_priors.category_denoise import (
+            attach_candidate_votes,
+            save_candidate_bank,
+        )
+
+        family_root = Path(args.category_denoise_bank_path)
+        saved_counts = {}
+        for condition, family_bank in category_cluster_family.banks.items():
+            branch_vote_ratios = compute_instance_ratios(
+                torch.from_numpy(family_bank.branch_full_labels.copy()),
+                update_progress=False,
+            )
+            voted_bank = attach_candidate_votes(
+                family_bank, branch_vote_ratios, args.classes
+            )
+            save_candidate_bank(voted_bank, family_root / condition)
+            saved_counts[condition] = len(voted_bank.candidates)
+        raw_audit_path = save_cluster_raw_audit(
+            category_cluster_family, args.category_cluster_audit_path
+        )
+        corrected_conditions = {
+            condition: bool(
+                bank.diagnostics.get(
+                    "corrected_distance_contract_measured", False
+                )
+                and int(bank.diagnostics.get("distance_matrix_count", 0)) > 0
+                and bank.diagnostics.get(
+                    "corrected_distance_contract_passed", False
+                )
+            )
+            for condition, bank in category_cluster_family.banks.items()
+            if condition
+            in {
+                "R1-corrected-distance-legacy-expand",
+                "R2-corrected-distance-anchored-expand",
+            }
+        }
+        corrected_distance_measurements = {
+            condition: {
+                key: bank.diagnostics[key]
+                for key in (
+                    "distance_matrix_count",
+                    "distance_all_finite",
+                    "distance_symmetry_max_abs",
+                    "distance_diagonal_max_abs",
+                    "distance_min",
+                    "distance_max",
+                )
+                if key in bank.diagnostics
+            }
+            for condition, bank in category_cluster_family.banks.items()
+            if condition
+            in {
+                "R1-corrected-distance-legacy-expand",
+                "R2-corrected-distance-anchored-expand",
+            }
+        }
+        category_denoise_diagnostics = {
+            "candidate_family_counts": saved_counts,
+            "global_typical_diag_m": (
+                category_cluster_family.global_typical_diag_m
+            ),
+            "raw_audit_path": str(raw_audit_path.resolve()),
+            "corrected_distance_contracts": corrected_conditions,
+            "corrected_distance_measurements": corrected_distance_measurements,
+            "corrected_distance_contract_passed": bool(
+                corrected_conditions and all(corrected_conditions.values())
+            ),
+            "determinism_measured_this_scene": bool(
+                args.category_cluster_verify_determinism
+            ),
+            "b0_side_path_unchanged": True,
+        }
+        print(f"category cluster family saved: {family_root}")
     if args.v5_candidate_source != 'off':
         from category_priors.teacher_prior import saga20_branch_classes
         from category_priors.v3_shadow import target_top1_masks, vote_summary

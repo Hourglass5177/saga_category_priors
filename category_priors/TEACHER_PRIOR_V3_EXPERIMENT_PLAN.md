@@ -1,14 +1,14 @@
-# SAGA 类别先验与小物体保护实验计划（当前权威：候选形成追踪、完整分配修复与同池先验复测）
+# SAGA 类别先验与小物体保护实验计划（当前权威：原始实例形成结构修复）
 
-> **权威状态：第29节三分诊断已经完成；当前执行第30节的候选形成追踪、完整分配修复与
-> 同一候选池上的类别先验复测。先修候选形成，候选健康后才允许评价类别参数。**
+> **权威状态：第30节候选追踪和事后包络修复已经完成并按门槛停止；当前执行第31节，
+> 直接修正HDBSCAN输入距离和原始实例形成。候选健康后才允许评价类别参数。**
 > 旧B2、class-first、prior-v2、teacher-preservation和selective-restore文档与代码只作为
 > 失败审计记录，不得覆盖本文件的研究问题、条件定义、阶段门槛或结论边界。
 
-- 版本：CFR-1.0
+- 版本：CFR-2.0
 - 冻结日期：2026-08-29
 - V3 起点代码检查点：`f1367fa58c8f50df75f80b86f67bab469af06531`
-- 当前状态：**第29节诊断完成；一般类别先验尚未被否定，正在执行第30节候选形成修复**
+- 当前状态：**第30节C1/C2均未通过；一般类别先验尚未被否定，正在修复原始实例形成**
 - 适用范围：现有 24 个 tune 场景、原 48 个内部评估场景及现有训练资产
 - 独立实验单位：physical scene
 - 技术重复：seed `42`、`3407`、`20260804`
@@ -2125,3 +2125,161 @@ physical scenes等权汇总tune24，宏平均差至少0.002才进入final48。�
 - [x] 本地625项类别先验回归测试通过；DEV8不足8个对象的分流语义及旧停止状态恢复已覆盖测试；
 - [x] 云端已部署固定代码`0a2a418`并启动DEV2，工作区为`/root/autodl-tmp/saga/workspace/category-candidate-0a2a418`；
 - [x] 已创建并回读核验“SAGA 候选形成修复每小时检查”，目标任务为`01a0018b-d00d-7bb2-a64d-bcaa3cbd3bbe`。
+
+### 30.7 第30节实际停止结果（2026-08-29）
+
+第30节已完成并按预注册门槛停止，不能继续解释为“类别先验失败”。可复核事实如下：
+
+- DEV2的B0机械等价逐点通过，两场点数分别为`1,533,098`和`1,459,291`；
+- DEV8 trace全部完成，但124个official-valid GT中仅7个满足既定可诊断条件；其中6个归为
+  `raw_clustering_failed`，1个健康，主要故障已经位于完整分配之前；
+- 充分采样对象的局部affinity边AUROC均值为`0.84515`，oracle-seed Recall@0.25为
+  `0.57143`，没有触发“两场10k表示正控”的双重门槛；现有2k特征至少具备局部区分信号；
+- `C1-consistent-envelope`虽使candidate precision相对提高`43.92%`，但IoU≥0.50匹配数
+  下降，且某GT最佳IoU最大下降`0.06893`，超过`0.05`安全界；
+- `C2-raw-anchored-envelope`使precision相对下降`60.46%`，候选数超过C0的1.25倍，亦未通过；
+- 因此停止原因是“在错误原始聚类之后修补完整分配不能安全恢复实例”，不是“类别尺寸、
+  支持量或一般类别知识已经无效”。第30节没有运行正式U/D类别先验比较。
+
+静态溯源同时确认：最早可见的老师原型`bfc2192`已经包含
+`1-outer(sampled_scores,sampled_scores)`、按场景样本最大值归一化空间距离、HDBSCAN后均值中心
+和全点重新吸附。该组合不是最近实验新增，但它仍只是早期试验代码；本节证据只说明原始实例
+形成存在结构风险，不能把责任扩大到老师的类别先验想法本身。
+
+## 31. 当前权威：修正HDBSCAN输入距离并重建原始实例
+
+### 31.1 研究问题与冻结边界
+
+本节只回答一个更靠前的问题：在现有2k affinity、30k Gaussian和相同语义候选下，修正
+HDBSCAN的距离定义和簇扩张语义，能否形成足够健康的原始实例候选。只有候选健康后，才恢复
+第30.4至30.5节已经冻结的U/D类别先验比较。
+
+禁止下载、训练、重训3DGS、启用ObjectBank、尺度门控或V3–V10复杂主干；GT只进入离线评价。
+不搜索HDBSCAN参数，不依据DEV2/DEV8结果修改本节公式或门槛。
+
+### 31.2 已确认的旧距离问题
+
+旧语义距离为`1-outer(score,score)`。它只比较“各点有多自信”，没有比较两点的affinity
+方向；同一物体的两个低置信点会被人为推远，不同物体的两个高置信点反而会被拉近，而且对角
+通常不为0。旧instance和XYZ距离又分别除以当前样本中的最大距离，使同一物理物体在不同场景、
+不同采样组成下得到不同尺度。HDBSCAN随后聚出的raw簇还会被均值中心和全点softmax重新定义；
+在冻结样例中，4个采样点的raw簇可扩张为约13,027点，raw成员也可能被分给别的中心。
+
+### 31.3 修正距离与固定聚类
+
+对语义top-1阈值`0.7`后同一branch类别内的采样点，定义：
+
+\[
+D_{aff}=\arccos(\operatorname{clip}(\cos(f_i,f_j),-1,1))/\pi
+\]
+
+\[
+D_{xyz}=\min(\lVert x_i-x_j\rVert/d_g,1)
+\]
+
+其中`d_g`只读取冻结ScanNet-train priors的global `log_bbox_diag_m.q50`，不得按场景样本最大值
+重新归一化。最终距离固定为：
+
+\[
+D=0.625D_{aff}+0.375D_{xyz}
+\]
+
+输入矩阵必须有限、对称、非负且对角严格为0。语义置信度只负责top-1和`0.7`准入，不再作为
+两点identity距离。HDBSCAN固定`metric=precomputed`、`min_cluster_size=3`、
+`min_samples=3`、`cluster_selection_epsilon=0.01`；不调参。
+
+### 31.4 冻结的四个候选条件
+
+- `R0-legacy`：第30节冻结C0，作为旧主干负控；
+- `R1-corrected-distance-legacy-expand`：只替换HDBSCAN输入距离，保留旧均值中心全点分配；
+- `R2-corrected-distance-anchored-expand`：修正距离，并保持所有raw非噪声采样成员属于原簇；
+- `G1-mutual-local-graph`：只有R1/R2均未通过DEV2时才允许运行的预注册图后备，不是临时调参。
+
+R2中，未采样点在相同修正距离下查询最近raw成员；每个簇的扩张半径固定为raw成员的
+leave-one-out最近邻距离q95。仅当最近距离不超过该簇半径时附着，多簇精确并列保持背景。
+raw成员为可信core，`core`必须是`full`子集；扩张置信度固定为
+`exp(-d/max(radius,1e-8))`。最终full少于3点的候选删除。实现必须分块，禁止构造全场
+`N×K`稠密矩阵。
+
+G1只在R1/R2失败时运行：先建物理24-NN，每点仅保留affinity cosine最高的4个物理邻居，
+边须互选，连通分量至少3点才成候选；不读取类别统计或GT，不增加半径和阈值搜索。
+
+### 31.5 Stage 0：实现与R0身份门槛
+
+新增独立入口：
+
+```text
+audit-category-cluster-distance
+run-category-cluster-bank
+evaluate-category-cluster-bank
+```
+
+首先用冻结trace重算旧距离，R0的raw labels、full/core、candidate ID、Q必须与第30节产物一致；
+浮点误差不超过`1e-6`。同时验证新距离的对称、有限、零对角、排列等变性和全局尺度来源。
+R0不等价时只修审计/接线，不进入DEV2。
+
+### 31.6 Stage 1：DEV2结构选择
+
+固定`scene0645_00`、`scene0025_01`。R1/R2必须同时满足：
+
+- same-class IoU≥0.25与≥0.50匹配数均不低于R0；
+- candidate precision@0.25相对提高至少25%，或unsupported比例下降至少10个百分点；
+- official-valid tiny/small Recall@0.25不下降；
+- 候选数不超过R0的1.25倍；
+- 至少一个场景改善，另一个场景任一GT最佳IoU下降不超过0.05；
+- raw成员保留率100%、`core⊆full`、orphan和负ID metadata违规均为0；
+- 重复运行逐点确定。
+
+通过者按IoU≥0.50、IoU≥0.25、precision、unsupported、候选数和结构简单度排序。若R1/R2
+均失败，按同一门槛运行一次G1。三者均失败即停止，结论为“当前2k表示加固定无监督聚类仍不足
+以形成原始实例”；不得进入类别先验。
+
+### 31.7 Stage 2：DEV8候选健康门槛
+
+冻结唯一DEV2胜者后运行八个不同物理场景。必须同时满足：
+
+- same-class IoU≥0.50候选不少于12个，覆盖至少4场景；
+- candidate precision@0.25至少5%；
+- official-valid tiny/small Recall@0.25至少0.20；
+- 相对R0正向场景多于负向场景；
+- 候选数不超过R0的1.25倍；
+- raw成员保留、core/full、orphan、metadata和确定性合同全部通过。
+
+未通过即停止，并按语义准入、采样、raw聚类、扩张四级漏斗报告。通过后才恢复第30.4节的
+完美对象能力正控和同bank U/D比较；其门槛、后续legacy接回、holdout/tune/final流程均保持
+第30.4至30.5节不变，不得因本节结果重新设计prior。
+
+### 31.8 测试、产物与资源
+
+必须测试：旧距离R0回归；修正距离零对角/对称/有限/排列等变；全局米制尺度而非样本最大值；
+raw成员不可跨簇；q95半径、单点退化和并列背景；chunked与dense小样例等价；R1仅改变聚类
+输入；R2/G1不读取GT或类别先验；重复运行确定；完整产物跳过、损坏项仅重跑当前场景；官方
+evaluator parity继续通过。
+
+DEV2逐点重复测量的bank固定保存在独立的`dev2_measured_runs`目录；DEV8只能引用其已验证的
+算法合同，不能覆盖这两场直接测量证据。距离审计或DEV2分析损坏时必须从该不可变bank恢复。
+
+验收产物：
+
+```text
+cluster_distance_audit.json
+cluster_repair_dev2.parquet
+cluster_repair_dev2_analysis.json
+cluster_repair_dev8.parquet
+cluster_repair_dev8_analysis.json
+category_denoise_v3_dev8.parquet
+category_denoise_v3_analysis.json
+```
+
+单GPU单进程；数据盘至少80GB；内存只读90GiB cgroup的`memory.current/max/events`；不生成
+SHA文件、lock、schedule hash或contributor cache。
+
+### 31.9 当前执行检查点
+
+- [x] 第30节真实停止结果与结论边界写入权威文档；
+- [x] 用户批准修正HDBSCAN结构，并预注册R1/R2及条件性G1；
+- [x] 实现修正距离、R1、R2、G1及独立离线评价；
+- [x] 完成新增回归和全量本地测试（707项通过、2项跳过）；
+- [ ] commit/push并部署commit绑定的新云端工作区；
+- [ ] R0身份通过后运行DEV2并按门槛选择；
+- [ ] 仅DEV2通过后运行DEV8；仅DEV8健康后恢复类别先验复测。

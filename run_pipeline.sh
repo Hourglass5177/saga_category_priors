@@ -73,6 +73,9 @@ category_denoise_bank_path=""
 category_candidate_trace_path=""
 category_candidate_sample_cap=5000
 category_candidate_score_threshold="0.20"
+category_cluster_audit_path=""
+category_cluster_conditions=()
+category_cluster_verify_determinism=0
 category_denoise_mode="uniform"
 category_denoise_scene_id=""
 
@@ -178,11 +181,17 @@ V6 affinity-first proposal-bank options:
   --v6-scene-id SCENE
 
 All-category denoising options:
-  --category-denoise-action MODE  off|bank|candidate-repair|replay|candidate-replay
+  --category-denoise-action MODE  off|bank|candidate-repair|cluster-bank|replay|candidate-replay
   --category-denoise-bank-path PATH
   --category-candidate-trace-path PATH
   --category-candidate-sample-cap INT  Default: 5000; only 10000 in the registered nested-sampling control
   --category-candidate-score-threshold FLOAT  Frozen DEV2 U threshold for candidate-replay
+  --category-cluster-audit-path PATH  Required raw-label identity sidecar for cluster-bank
+  --category-cluster-condition MODE  Repeatable: R0-legacy|
+                                     R1-corrected-distance-legacy-expand|
+                                     R2-corrected-distance-anchored-expand|
+                                     G1-mutual-local-graph
+  --category-cluster-verify-determinism  Rebuild and compare the full family (DEV2 only)
   --category-denoise-mode MODE    uniform|class
   --category-denoise-scene-id SCENE
 
@@ -272,6 +281,10 @@ resolve_defaults() {
 }
 
 print_config() {
+    local cluster_conditions_display="<default:R0/R1/R2>"
+    if (( ${#category_cluster_conditions[@]} > 0 )); then
+        cluster_conditions_display="${category_cluster_conditions[*]}"
+    fi
     cat <<EOF
 Resolved configuration:
   python_bin: $python_bin
@@ -305,6 +318,12 @@ Resolved configuration:
   class_first_config: $class_first_config
   teacher_prior_mode: $teacher_prior_mode
   teacher_category_params: $teacher_category_params
+  category_denoise_action: $category_denoise_action
+  category_denoise_bank_path: $category_denoise_bank_path
+  category_denoise_scene_id: $category_denoise_scene_id
+  category_cluster_audit_path: $category_cluster_audit_path
+  category_cluster_conditions: $cluster_conditions_display
+  category_cluster_verify_determinism: $category_cluster_verify_determinism
   sam_checkpoint_path: $sam_checkpoint_path
   groundingdino_checkpoint_path: $groundingdino_checkpoint_path
   groundingdino_config_path: $groundingdino_config_path
@@ -447,6 +466,10 @@ preflight_stage() {
                         [[ -n "$category_candidate_trace_path" ]] || err "--category-candidate-trace-path is required"
                         ensure_parent_dir "$category_candidate_trace_path"
                     fi
+                    if [[ "$category_denoise_action" == "cluster-bank" ]]; then
+                        [[ -n "$category_cluster_audit_path" ]] || err "--category-cluster-audit-path is required"
+                        ensure_parent_dir "$category_cluster_audit_path"
+                    fi
                 fi
             fi
             ;;
@@ -547,6 +570,16 @@ run_postprocess() {
                 --category-candidate-trace-path "$category_candidate_trace_path"
                 --category-candidate-sample-cap "$category_candidate_sample_cap"
             )
+        fi
+        if [[ "$category_denoise_action" == "cluster-bank" ]]; then
+            prior_args+=(--category-cluster-audit-path "$category_cluster_audit_path")
+            if [[ "$category_cluster_verify_determinism" -eq 1 ]]; then
+                prior_args+=(--category-cluster-verify-determinism)
+            fi
+            local cluster_condition
+            for cluster_condition in "${category_cluster_conditions[@]}"; do
+                prior_args+=(--category-cluster-condition "$cluster_condition")
+            done
         fi
     fi
     if [[ "$prior_mode" != "off" ]]; then
@@ -841,6 +874,18 @@ while [[ $# -gt 0 ]]; do
             category_candidate_score_threshold="$2"
             shift 2
             ;;
+        --category-cluster-audit-path)
+            category_cluster_audit_path="$2"
+            shift 2
+            ;;
+        --category-cluster-condition)
+            category_cluster_conditions+=("$2")
+            shift 2
+            ;;
+        --category-cluster-verify-determinism)
+            category_cluster_verify_determinism=1
+            shift
+            ;;
         --category-denoise-mode)
             category_denoise_mode="$2"
             shift 2
@@ -1015,6 +1060,20 @@ case "$v6_candidate_mode" in
     off|affinity-first) ;;
     *) err "unsupported --v6-candidate-mode: $v6_candidate_mode" ;;
 esac
+case "$category_denoise_action" in
+    off|bank|candidate-repair|cluster-bank|replay|candidate-replay) ;;
+    *) err "unsupported --category-denoise-action: $category_denoise_action" ;;
+esac
+if [[ "$category_denoise_action" == "cluster-bank" ]]; then
+    for cluster_condition in "${category_cluster_conditions[@]}"; do
+        case "$cluster_condition" in
+            R0-legacy|R1-corrected-distance-legacy-expand|R2-corrected-distance-anchored-expand|G1-mutual-local-graph) ;;
+            *) err "unsupported --category-cluster-condition: $cluster_condition" ;;
+        esac
+    done
+elif [[ -n "$category_cluster_audit_path" || ${#category_cluster_conditions[@]} -gt 0 || "$category_cluster_verify_determinism" -eq 1 ]]; then
+    err "category cluster arguments require --category-denoise-action cluster-bank"
+fi
 if [[ -z "$python_bin" ]]; then
     find_python
 else

@@ -75,6 +75,72 @@ def _repair_category_candidates(args: argparse.Namespace) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+def _run_category_cluster_bank(args: argparse.Namespace) -> None:
+    from .category_cluster_runner import run_category_cluster_bank
+
+    payload = run_category_cluster_bank(
+        runtime_manifest=Path(args.runtime_manifest),
+        output_root=Path(args.output_root),
+        repo_root=Path(args.repo_root),
+        category_priors=Path(args.category_priors),
+        scene_ids=args.scene,
+        conditions=args.condition,
+        reference_bank_root=(
+            Path(args.reference_bank_root) if args.reference_bank_root else None
+        ),
+        verify_determinism=bool(args.verify_determinism),
+        determinism_reference=(
+            Path(args.determinism_reference)
+            if args.determinism_reference
+            else None
+        ),
+        seed=args.seed,
+        python_bin=Path(args.python_bin) if args.python_bin else None,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _audit_category_cluster_distance(args: argparse.Namespace) -> None:
+    from .category_cluster_runner import audit_category_cluster_distance
+
+    payload = audit_category_cluster_distance(
+        run_root=Path(args.run_root),
+        scene_ids=args.scene,
+        reference_bank_root=Path(args.reference_bank_root),
+        reference_trace_root=Path(args.reference_trace_root),
+        output_path=Path(args.output),
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _evaluate_category_cluster_bank(args: argparse.Namespace) -> None:
+    from .category_cluster_scene_evaluation import evaluate_category_cluster_run
+
+    payload = evaluate_category_cluster_run(
+        runtime_manifest=Path(args.runtime_manifest),
+        gt_dir=Path(args.gt_dir),
+        run_root=Path(args.run_root),
+        scene_ids=args.scene,
+        taxonomy=load_taxonomy(args.taxonomy),
+        phase=args.phase,
+        selected_condition=args.selected_condition,
+        primary_analysis=(
+            Path(args.primary_analysis) if args.primary_analysis else None
+        ),
+        frozen_selection_artifact=(
+            Path(args.frozen_selection_artifact)
+            if args.frozen_selection_artifact
+            else None
+        ),
+        metrics_output=Path(args.metrics_output),
+        analysis_output=Path(args.analysis_output),
+        size_bins=Path(args.size_bins) if args.size_bins else None,
+        radius_m=args.radius_m,
+        min_region_size=args.min_region_size,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
 def _diagnose_category_candidates(args: argparse.Namespace) -> None:
     from .category_candidate_evaluation import diagnose_category_candidates
 
@@ -860,6 +926,83 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_v10.add_argument("--radius-m", type=float, default=0.05)
     evaluate_v10.add_argument("--min-region-size", type=int, default=100)
     evaluate_v10.set_defaults(func=_evaluate_v10)
+
+    cluster_bank = commands.add_parser(
+        "run-category-cluster-bank",
+        help="build exact R0 and registered repaired instance-candidate banks",
+    )
+    cluster_bank.add_argument("--runtime-manifest", required=True)
+    cluster_bank.add_argument("--output-root", required=True)
+    cluster_bank.add_argument("--repo-root", default=".")
+    cluster_bank.add_argument("--category-priors", required=True)
+    cluster_bank.add_argument("--reference-bank-root")
+    cluster_bank.add_argument(
+        "--verify-determinism",
+        action="store_true",
+        help="independently rebuild every requested DEV2 bank and compare pointwise",
+    )
+    cluster_bank.add_argument(
+        "--determinism-reference",
+        help="measured DEV2 cluster-analysis JSON used by later stages",
+    )
+    cluster_bank.add_argument("--python-bin")
+    cluster_bank.add_argument("--seed", type=int, default=42)
+    cluster_bank.add_argument("--scene", action="append", required=True)
+    cluster_bank.add_argument(
+        "--condition",
+        action="append",
+        choices=(
+            "R0-legacy",
+            "R1-corrected-distance-legacy-expand",
+            "R2-corrected-distance-anchored-expand",
+            "G1-mutual-local-graph",
+        ),
+    )
+    cluster_bank.set_defaults(func=_run_category_cluster_bank)
+
+    cluster_audit = commands.add_parser(
+        "audit-category-cluster-distance",
+        help="verify exact R0 identity and corrected metric registration",
+    )
+    cluster_audit.add_argument("--run-root", required=True)
+    cluster_audit.add_argument("--reference-bank-root", required=True)
+    cluster_audit.add_argument("--reference-trace-root", required=True)
+    cluster_audit.add_argument("--scene", action="append", required=True)
+    cluster_audit.add_argument("--output", required=True)
+    cluster_audit.set_defaults(func=_audit_category_cluster_distance)
+
+    cluster_evaluate = commands.add_parser(
+        "evaluate-category-cluster-bank",
+        help="evaluate DEV2/DEV8 repaired candidate banks with frozen gates",
+    )
+    cluster_evaluate.add_argument("--runtime-manifest", required=True)
+    cluster_evaluate.add_argument("--gt-dir", required=True)
+    cluster_evaluate.add_argument("--run-root", required=True)
+    cluster_evaluate.add_argument("--scene", action="append", required=True)
+    cluster_evaluate.add_argument("--taxonomy")
+    cluster_evaluate.add_argument("--size-bins")
+    cluster_evaluate.add_argument("--phase", choices=("dev2", "dev8"), required=True)
+    cluster_evaluate.add_argument(
+        "--selected-condition",
+        choices=(
+            "R1-corrected-distance-legacy-expand",
+            "R2-corrected-distance-anchored-expand",
+            "G1-mutual-local-graph",
+        ),
+    )
+    cluster_evaluate.add_argument(
+        "--primary-analysis",
+        help="required only for conditional G1 DEV2 evaluation",
+    )
+    cluster_evaluate.add_argument(
+        "--frozen-selection-artifact",
+        help="required for DEV8 and must authorize --selected-condition",
+    )
+    cluster_evaluate.add_argument("--metrics-output", required=True)
+    cluster_evaluate.add_argument("--analysis-output", required=True)
+    cluster_evaluate.add_argument("--radius-m", type=float, default=0.05)
+    cluster_evaluate.add_argument("--min-region-size", type=int, default=100)
+    cluster_evaluate.set_defaults(func=_evaluate_category_cluster_bank)
 
     candidate_repair = commands.add_parser(
         "repair-category-candidates",
