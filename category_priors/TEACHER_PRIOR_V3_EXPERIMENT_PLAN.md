@@ -2121,5 +2121,6 @@ physical scenes等权汇总tune24，宏平均差至少0.002才进入final48。�
 - [x] 实现C0/C1/C2纯候选修复与测试；
 - [x] 实现双侧IQR size、trusted-core support和无smooth同池评价；
 - [x] 实现条件触发的两场同源10k表示正控；无论通过或失败都按授权边界停止，禁止偷换回2k继续；
-- [ ] 本地测试、commit/push、云端部署并启动DEV2；
+- [x] 本地622项类别先验回归测试通过，commit `50927bb` 已push到`origin/a800`；
+- [ ] 云端部署同一固定代码并启动DEV2；
 - [ ] runner健康后创建并回读核验当前任务的每小时自动检查。
