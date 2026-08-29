@@ -200,6 +200,14 @@ def _feature_path(scene: Mapping[str, Any]) -> Path:
         if value:
             path = Path(str(value))
             return path if path.is_absolute() else Path(str(scene["base_path"])) / path
+    base_path = scene.get("base_path")
+    if base_path:
+        # The canonical tune/final runtime manifests intentionally keep only
+        # the scene root.  Match run_pipeline's native asset convention rather
+        # than requiring an experiment-specific manifest rewrite.
+        native = Path(str(base_path)) / "saga" / "contrastive_feature_point_cloud.ply"
+        if native.is_file():
+            return native
     raise KeyError("runtime scene is missing its affinity feature PLY")
 
 

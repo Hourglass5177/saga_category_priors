@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 
 from category_priors.category_candidate_representation import (
+    _feature_path,
     local_affinity_edge_auc,
     oracle_seed_candidate_mask,
 )
@@ -45,3 +48,11 @@ def test_oracle_seed_uses_frozen_q95_envelope_not_gt_mask() -> None:
         spatial_distance_max=1.0,
     )
     assert mask.tolist() == [True, True, True, False]
+
+
+def test_feature_path_falls_back_to_native_scene_asset(tmp_path: Path) -> None:
+    feature = tmp_path / "saga" / "contrastive_feature_point_cloud.ply"
+    feature.parent.mkdir(parents=True)
+    feature.touch()
+
+    assert _feature_path({"base_path": str(tmp_path)}) == feature
