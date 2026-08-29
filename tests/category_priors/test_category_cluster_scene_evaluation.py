@@ -33,8 +33,12 @@ def test_evaluation_scene_propagates_real_gt_instance_ids(monkeypatch) -> None:
     context = {
         "objects": objects,
         "mapping": SimpleNamespace(
-            gt_to_gaussian=np.asarray([0, 1, 2, 3], dtype=np.int64),
-            gaussian_to_gt=np.asarray([0, 1, 2, 3, -1], dtype=np.int64),
+            gt_to_gaussian=SimpleNamespace(
+                indices=np.asarray([0, 1, 2, 3], dtype=np.int64)
+            ),
+            gaussian_to_gt=SimpleNamespace(
+                indices=np.asarray([0, 1, 2, 3, -1], dtype=np.int64)
+            ),
         ),
         "object_index": np.asarray([0, 0, 1, 1], dtype=np.int64),
     }

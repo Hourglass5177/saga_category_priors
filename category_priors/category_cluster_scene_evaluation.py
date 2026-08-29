@@ -64,13 +64,17 @@ def _evaluation_scene(
     objects = context["objects"]
     mapping = context["mapping"]
     gt_point_object = np.asarray(context["object_index"], dtype=np.int64)
-    gaussian_to_gt_point = np.asarray(mapping.gaussian_to_gt, dtype=np.int64)
+    gaussian_to_gt_point = np.asarray(
+        mapping.gaussian_to_gt.indices, dtype=np.int64
+    )
     gaussian_to_object = np.full(len(gaussian_to_gt_point), -1, dtype=np.int64)
     valid = gaussian_to_gt_point >= 0
     gaussian_to_object[valid] = gt_point_object[gaussian_to_gt_point[valid]]
     return ClusterEvaluationScene(
         scene_id=scene_id,
-        gt_to_gaussian_indices=np.asarray(mapping.gt_to_gaussian, dtype=np.int64),
+        gt_to_gaussian_indices=np.asarray(
+            mapping.gt_to_gaussian.indices, dtype=np.int64
+        ),
         gt_point_object_indices=gt_point_object,
         gt_object_class_ids=np.asarray(
             [item.class_id for item in objects], dtype=np.int64
