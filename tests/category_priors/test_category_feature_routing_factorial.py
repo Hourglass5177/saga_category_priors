@@ -102,5 +102,7 @@ def test_root_cause_decision_keeps_prior_uninterpreted() -> None:
             "v9-10k-dual-source__gt-class-oracle": row(4),
         }
     )
-    assert result["root_cause"] == "semantic-routing-dominant"
+    assert result["root_cause"] == (
+        "semantic-routing-contributor-but-raw-affinity-clustering-still-insufficient"
+    )
     assert result["category_prior_tested"] is False

@@ -259,6 +259,12 @@ def infer_root_cause(conditions: Mapping[str, Mapping[str, Any]]) -> dict[str, A
     f10g = conditions["v9-10k-dual-source__gt-class-oracle"]
     routing_gain = material_gain(f2g, f2p) or material_gain(f10g, f10p)
     representation_gain = material_gain(f10p, f2p) or material_gain(f10g, f2g)
+    real_healthy = any(
+        int(row["same_class_iou_050_count"]) >= 6
+        and float(row["tiny_small_recall_025"]) >= 0.20
+        for key, row in conditions.items()
+        if key.endswith("__predicted-32-top1")
+    )
     if routing_gain and representation_gain:
         conclusion = "both-semantic-routing-and-representation"
     elif routing_gain:
@@ -267,12 +273,14 @@ def infer_root_cause(conditions: Mapping[str, Mapping[str, Any]]) -> dict[str, A
         conclusion = "representation-version-dominant"
     else:
         conclusion = "affinity-objective-or-raw-clustering-dominant"
-    real_healthy = any(
-        int(row["same_class_iou_050_count"]) >= 6
-        and float(row["tiny_small_recall_025"]) >= 0.20
-        for key, row in conditions.items()
-        if key.endswith("__predicted-32-top1")
-    )
+    if not real_healthy and routing_gain:
+        conclusion = (
+            "semantic-routing-contributor-but-raw-affinity-clustering-still-insufficient"
+        )
+    elif not real_healthy and representation_gain:
+        conclusion = (
+            "representation-contributor-but-raw-affinity-clustering-still-insufficient"
+        )
     return {
         "semantic_routing_material_gain": routing_gain,
         "representation_version_material_gain": representation_gain,
