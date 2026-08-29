@@ -211,6 +211,14 @@ def _feature_path(scene: Mapping[str, Any]) -> Path:
     raise KeyError("runtime scene is missing its affinity feature PLY")
 
 
+def _mapped_object_gaussians(mapping: Any, point_indices: Any) -> np.ndarray:
+    """Return the GT->Gaussian nearest indices for one GT object's points."""
+
+    return np.asarray(mapping.gt_to_gaussian.indices, dtype=np.int64)[
+        np.asarray(point_indices, dtype=np.int64)
+    ]
+
+
 def evaluate_candidate_representation(
     *,
     runtime_manifest: Path,
@@ -290,7 +298,9 @@ def evaluate_candidate_representation(
             )
             if not len(selected):
                 continue
-            mapped = np.asarray(context["mapping"].gt_to_gaussian)[item.point_indices]
+            mapped = _mapped_object_gaussians(
+                context["mapping"], item.point_indices
+            )
             valid_mapped = mapped >= 0
             semantic_coverage = float(
                 np.count_nonzero(

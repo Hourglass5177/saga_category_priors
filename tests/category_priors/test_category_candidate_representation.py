@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
 from category_priors.category_candidate_representation import (
     _feature_path,
+    _mapped_object_gaussians,
     local_affinity_edge_auc,
     oracle_seed_candidate_mask,
 )
@@ -56,3 +58,14 @@ def test_feature_path_falls_back_to_native_scene_asset(tmp_path: Path) -> None:
     feature.touch()
 
     assert _feature_path({"base_path": str(tmp_path)}) == feature
+
+
+def test_object_mapping_reads_nearest_point_indices_not_wrapper_object() -> None:
+    mapping = SimpleNamespace(
+        gt_to_gaussian=SimpleNamespace(indices=np.asarray([4, -1, 7, 2]))
+    )
+
+    np.testing.assert_array_equal(
+        _mapped_object_gaussians(mapping, np.asarray([0, 2, 3])),
+        np.asarray([4, 7, 2]),
+    )
