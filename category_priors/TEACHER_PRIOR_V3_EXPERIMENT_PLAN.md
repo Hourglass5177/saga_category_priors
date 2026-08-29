@@ -1,14 +1,15 @@
-# SAGA 类别先验与小物体保护实验计划（当前权威：原始实例形成结构修复）
+# SAGA 类别先验与小物体保护实验计划（当前权威：类别约束碎片组装）
 
-> **权威状态：第30节候选追踪和事后包络修复已经完成并按门槛停止；当前执行第31节，
-> 直接修正HDBSCAN输入距离和原始实例形成。候选健康后才允许评价类别参数。**
+> **权威状态：第32节已确认错误语义路由是前置损失，但正确类别仍不能让raw HDBSCAN形成
+> 完整对象。当前执行第33节：冻结一次raw碎片和局部邻接图，让global/class统计直接决定
+> 碎片是否合并、何时停止和最终保留。**
 > 旧B2、class-first、prior-v2、teacher-preservation和selective-restore文档与代码只作为
 > 失败审计记录，不得覆盖本文件的研究问题、条件定义、阶段门槛或结论边界。
 
 - 版本：CFR-2.0
-- 冻结日期：2026-08-29
+- 冻结日期：2026-08-30
 - V3 起点代码检查点：`f1367fa58c8f50df75f80b86f67bab469af06531`
-- 当前状态：**第30节C1/C2均未通过；一般类别先验尚未被否定，正在修复原始实例形成**
+- 当前状态：**第32节根因诊断已完成；一般类别先验尚未被否定，正在首次检验类别知识参与实例组装**
 - 适用范围：现有 24 个 tune 场景、原 48 个内部评估场景及现有训练资产
 - 独立实验单位：physical scene
 - 技术重复：seed `42`、`3407`、`20260804`
@@ -2354,3 +2355,184 @@ IoU≥0.25、1个达到IoU≥0.50，远未达到健康标准。故准确结论�
 
 本节仍未测试类别先验。它说明继续修改KNN、filter或类别降噪没有意义；若要继续，应先用不依赖
 硬32类路由的实例身份形成方式建立健康候选，再在同一候选池比较global/class参数。
+
+## 33. 当前权威：类别先验参与raw碎片组装的最小验证
+
+### 33.1 研究问题与结论边界
+
+第24至32节多数实验把类别知识作用在完整候选形成之后，或者用类别值替换HDBSCAN参数；它们
+没有直接回答：**当一个对象被raw HDBSCAN切成多个局部碎片时，逐类典型尺寸和支持量能否比
+全局共享统计更准确地决定哪些碎片应合并、何时停止。**
+
+类别先验可以参与实例形成，但它只能约束公共邻接图中已经存在的连接，不能创造图中不存在的
+身份边。本节因此先评价公共碎片图是否包含正确拼装路径，再比较U/D。运行时只使用预测类别；
+错误语义路由已由第32节单独量化，本节不能声称类别先验能够修复错误类别。
+
+本节的结构依据与现有证据一致：PointGroup和HAIS都把局部点/集合聚合与完整实例形成分层；
+SoftGroup说明硬语义决策会把分类错误传播到实例分组。本节不移植这些方法的训练网络，只采用
+“先冻结局部碎片，再做受约束集合聚合”的最小结构。
+
+### 33.2 冻结原子碎片与公共邻接图
+
+正式运行只使用`native-2k-grounded + predicted-32-top1`：完整32类归一化top-1、阈值0.7、
+SAGA20范围、seed42、每类最多5000点、以及第31节修正距离的raw HDBSCAN。每个raw非噪声簇
+直接成为一个原子碎片；不做full assignment、中心吸附、KNN、filter、halo或类别先验。
+
+每个场景只生成一次`FragmentGraph`，U/D逐字节共用：
+
+- 节点保存raw fragment ID、成员Gaussian ID、预测类别、membership、语义分数和稳定来源ID；
+- 只在同一预测类别的raw成员上建物理24近邻，每点保留affinity最高的4个邻居，只留互选边；
+- 两个碎片间至少有3条跨碎片互选点边，且跨边物理距离不超过
+  `0.1 * exp(global.log_bbox_diag_m.q50)`，才形成碎片边；
+- 边证据只保存跨边数、affinity余弦中位数和最小物理距离，不读取类别统计；
+- 边证据只按跨边数降序、余弦中位数降序比较；两项完全相同时视为精确并列，不用fragment
+  ID强行破并列；稳定来源ID只用于确定性排序、序列化和lineage；
+- GT、GT类别、GT实例和IoU不得进入graph worker或其函数签名。
+
+第32节只保存了汇总，未保存raw bank。本节允许用完全冻结的第32节真实运行臂机械重建并持久化
+raw bank；重建后的候选数和same-class IoU计数必须复现第32.4节，否则只修接线。
+
+### 33.3 U/D唯一差异与唯一合并算法
+
+两臂从同一批单碎片组件和同一张边表开始。尺寸统一使用第30.4节已登记的sorted PCA三轴
+log extent双侧IQR平台：
+
+\[
+G_\theta(X)=\exp[-0.5\,mean(\min(z_\theta^2,25))]
+\]
+
+支持量为：
+
+\[
+C_\theta(X)=\min(1,n_{raw}(X)/m_\theta),\qquad P_\theta(X)=G_\theta(X)C_\theta(X)
+\]
+
+- `U-global`：三轴q25/q50/q75读取global，`m=5`；
+- `D-class`：读取预测类别的train-only shrunk统计，
+  `m_c=clip(round(5*sqrt(A_c/A_global)),3,10)`；缺失类别回退global。
+
+除统计表外公式完全相同。5cm smoothness、类别scale gate和新训练不进入本轮。
+
+合并固定为确定性的逐轮互为最佳：
+
+1. 每轮先对所有公共邻接边计算合并后的先验兼容度，只保留
+   `P(A union B) > max(P(A),P(B)) + 1e-6`的合格邻居；
+2. 当前每个组件只在这些合格邻居中按公共边证据选择一个最佳相邻组件；
+3. 只有双方互为最佳、类别相同且本轮均未被其他合并占用时才接受合并；
+4. 每轮结束后用原始公共边重新聚合组件间证据，并重新计算extent和support；组件间跨边数取
+   fragment边跨边数之和，余弦证据取以跨边数为权重的fragment-level余弦中位数的加权中位数
+   （weighted median-of-medians），最小物理距离取所有fragment边的最小值；该聚合在U/D间共用；
+5. 精确并列不合并；无可接受合并时结束；禁止一条非互选弱边桥接两个已有组件；
+6. 最终mask是成员raw碎片点的并集；不做扩张、KNN、救援或事后保护；
+7. 最终对象少于对应支持门槛时拒绝；主排序分数使用两臂共同的平均语义分数与membership
+   几何平均，不使用`P`，避免把prior排序变化冒充mask收益。
+
+内部对象身份固定为排序后的`source_fragment_ids`元组；紧凑输出ID只用于导出，比较器不得因
+插入或删除一个对象把后续ID重排解释成大面积变化。
+
+### 33.4 Stage A：DEV2图能力与机械验证
+
+固定`scene0645_00`和`scene0025_01`。先完成：
+
+- raw bank复现第32.4节真实预测路由臂；
+- U/D节点、成员、类别、边端点、边证据和边顺序逐字节一致；
+- 相同参数表时U/D逐点恒等；缺类时D严格等于U；
+- 输入fragment顺序和类别处理顺序不改变最终partition；重复运行逐点确定；
+- 最终fragment lineage完整，重叠所有权、orphan、negative metadata和`core/full`合同违规为0。
+
+GT只在独立评价器计算公共图上限：对每个GT，只允许沿公共图中的same-GT边合并其dominant
+fragment，未映射Gaussian计FP。进入实际U/D比较必须同时满足：
+
+- 两场累计至少6个same-class IoU≥0.50图上限对象；
+- official-valid tiny/small GT Recall@0.25至少0.20。
+
+图上限失败立即停止，结论为“固定raw碎片图没有足够正确连接路径”，不是类别先验失败。
+
+机械生效要求至少满足一项：
+
+- 至少10%的共同首轮合并提案`|P_D-P_U|>=0.01`；
+- 或U/D最终至少5个合并/保留决定不同，覆盖至少2类和2场景。
+
+若先验未机械介入，只能判当前统计映射在该合并接口无作用。机械生效后，D进入DEV8还必须：
+
+- IoU≥0.25和0.50匹配数均不低于U；
+- candidate precision@0.25相对U提高至少25%，或unsupported比例下降至少10个百分点；
+- tiny/small Recall@0.25不下降；候选数不超过U的1.25倍；
+- 至少一个场景改善，另一个场景任何GT最佳IoU下降不超过0.05；
+- D累计same-class IoU≥0.50至少4个、candidate precision@0.25至少10%。
+
+未通过时停止；不得现场修改24NN、top4、3条边、0.1全局尺度、合并公式或再加第二种聚合器。
+
+### 33.5 Stage B：DEV8配对验证与后续边界
+
+只有Stage A通过才运行冻结DEV8：
+
+```text
+scene0645_00 scene0025_01 scene0046_00 scene0474_01
+scene0591_02 scene0329_02 scene0164_03 scene0064_01
+```
+
+physical scene是独立实验单位；U/D在场景内配对，不把碎片、边或对象当独立样本，不制造多个
+随机seed。D必须先达到绝对健康门槛：
+
+- same-class IoU≥0.50候选至少12个，覆盖至少4场景；
+- candidate precision@0.25至少10%；
+- official-valid tiny/small Recall@0.25至少0.20；
+- 候选数不超过U的1.25倍；输出合同零违规。
+
+类别先验的相对收益门槛为：
+
+- 场景等权candidate AP@0.25的`D-U>=0.002`；
+- candidate AP@0.50下降不超过0.002；
+- 至少5/8场景方向为正；
+- tiny/small Recall不下降；FP/TP不恶化超过20%。
+
+候选级通过后，才允许U/D使用同一个无类别扩张方法补齐未采样点并进入未参与设计的五场
+canonical holdout；扩张方法必须在看DEV8结果前另行登记，不得把legacy KNN、保护旁路或
+ObjectBank临时接回。本节不直接授权tune24/final48。
+
+结果解释固定为：
+
+- 图上限失败：公共实例证据不足，不能评价先验；
+- 图上限通过、U/D未机械分开：该统计映射没有进入实例形成；
+- D真实改变合并但不优于U：当前train-derived尺寸/支持先验对碎片组装无额外价值；
+- D只改善小物：只支持小物体类别化组装；
+- D在DEV8健康且优于U：支持类别先验能帮助实例形成，随后才做独立holdout确认。
+
+### 33.6 实现、测试、产物与当前检查点
+
+新增独立小模块与三个入口：
+
+```text
+build-category-fragment-graph
+merge-category-fragments --mode global|class
+evaluate-category-fragment-merge
+```
+
+不向`postprocess.py`增加路径。必须测试：100点对象被切碎后可恢复；相邻同类对象在尺寸恶化时
+停止；U/D共用graph；不跨类别；互为最佳阻止错误链传递；global回退；GT不进入worker；
+lineage稳定；无ID级联假差异；确定性、断点复用和损坏项单场重跑；官方evaluator保持不变。
+
+验收产物：
+
+```text
+category_fragment_graph_dev2.parquet
+category_fragment_graph_oracle_dev2.json
+category_fragment_merge_dev2.parquet
+category_fragment_merge_dev2_analysis.json
+category_fragment_merge_dev8.parquet
+category_fragment_merge_dev8_analysis.json
+viewer/
+```
+
+只复用现有2k feature、30k 3DGS、GT和train-only priors；不下载、不训练、不重训3DGS、
+不运行ObjectBank/尺度门控/V3–V10。单GPU单进程；磁盘至少80GB；只读cgroup memory；
+不生成SHA文件、lock、schedule hash或contributor cache。
+
+- [x] 用户确认类别先验可能参与第一步，并授权先调查、预注册后实施；
+- [x] 完整回读权威文档、审计raw fragment、mutual graph与prior复用路径；
+- [x] 冻结本节研究问题、公共graph、唯一合并算法和DEV2/DEV8门槛；
+- [x] 实现独立模块、runner、评价与测试；
+- [x] 本地全量类别先验测试通过（758项通过、2项跳过）；
+- [ ] commit/push后才开启云端；
+- [ ] DEV2通过才运行DEV8，失败立即形成结论并关闭云电脑。

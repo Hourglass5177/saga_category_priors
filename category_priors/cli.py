@@ -43,6 +43,54 @@ V10_CLASSIFIERS = V9_CLASSIFIERS
 V10_PRIOR_CONDITIONS = V9_CONDITIONS
 
 
+def _build_category_fragment_graph(args: argparse.Namespace) -> None:
+    from .category_fragment_merge_runner import build_category_fragment_graphs
+
+    payload = build_category_fragment_graphs(
+        runtime_manifest=Path(args.runtime_manifest),
+        category_priors=Path(args.category_priors),
+        output_root=Path(args.output_root),
+        scene_ids=args.scene,
+        seed=args.seed,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _merge_category_fragments(args: argparse.Namespace) -> None:
+    from .category_fragment_merge_runner import merge_category_fragment_graphs
+
+    payload = merge_category_fragment_graphs(
+        runtime_manifest=Path(args.runtime_manifest),
+        category_priors=Path(args.category_priors),
+        output_root=Path(args.output_root),
+        scene_ids=args.scene,
+        modes=args.mode,
+        seed=args.seed,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _evaluate_category_fragment_merge(args: argparse.Namespace) -> None:
+    from .category_fragment_merge_scene_evaluation import (
+        evaluate_category_fragment_merge_run,
+    )
+
+    payload = evaluate_category_fragment_merge_run(
+        runtime_manifest=Path(args.runtime_manifest),
+        gt_dir=Path(args.gt_dir),
+        run_root=Path(args.run_root),
+        scene_ids=args.scene,
+        taxonomy=load_taxonomy(args.taxonomy),
+        phase=args.phase,
+        metrics_output=Path(args.metrics_output),
+        analysis_output=Path(args.analysis_output),
+        size_bins=Path(args.size_bins) if args.size_bins else None,
+        radius_m=args.radius_m,
+        min_region_size=args.min_region_size,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
 def _run_category_denoise_bank(args: argparse.Namespace) -> None:
     from .category_denoise_runner import run_category_denoise_bank
 
@@ -942,6 +990,53 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_v10.add_argument("--radius-m", type=float, default=0.05)
     evaluate_v10.add_argument("--min-region-size", type=int, default=100)
     evaluate_v10.set_defaults(func=_evaluate_v10)
+
+    fragment_graph = commands.add_parser(
+        "build-category-fragment-graph",
+        help="build the frozen raw-fragment graph without GT or category priors",
+    )
+    fragment_graph.add_argument("--runtime-manifest", required=True)
+    fragment_graph.add_argument("--category-priors", required=True)
+    fragment_graph.add_argument("--output-root", required=True)
+    fragment_graph.add_argument("--scene", action="append", required=True)
+    fragment_graph.add_argument("--seed", type=int, default=42)
+    fragment_graph.set_defaults(func=_build_category_fragment_graph)
+
+    fragment_merge = commands.add_parser(
+        "merge-category-fragments",
+        help="replay global or class statistics over one frozen fragment graph",
+    )
+    fragment_merge.add_argument("--runtime-manifest", required=True)
+    fragment_merge.add_argument("--category-priors", required=True)
+    fragment_merge.add_argument("--output-root", required=True)
+    fragment_merge.add_argument("--scene", action="append", required=True)
+    fragment_merge.add_argument(
+        "--mode",
+        action="append",
+        choices=("global", "class"),
+        required=True,
+    )
+    fragment_merge.add_argument("--seed", type=int, default=42)
+    fragment_merge.set_defaults(func=_merge_category_fragments)
+
+    fragment_evaluate = commands.add_parser(
+        "evaluate-category-fragment-merge",
+        help="evaluate the frozen graph oracle and paired U/D fragment assembly",
+    )
+    fragment_evaluate.add_argument("--runtime-manifest", required=True)
+    fragment_evaluate.add_argument("--gt-dir", required=True)
+    fragment_evaluate.add_argument("--run-root", required=True)
+    fragment_evaluate.add_argument("--scene", action="append", required=True)
+    fragment_evaluate.add_argument(
+        "--phase", choices=("dev2", "dev8"), required=True
+    )
+    fragment_evaluate.add_argument("--taxonomy")
+    fragment_evaluate.add_argument("--size-bins")
+    fragment_evaluate.add_argument("--metrics-output", required=True)
+    fragment_evaluate.add_argument("--analysis-output", required=True)
+    fragment_evaluate.add_argument("--radius-m", type=float, default=0.05)
+    fragment_evaluate.add_argument("--min-region-size", type=int, default=100)
+    fragment_evaluate.set_defaults(func=_evaluate_category_fragment_merge)
 
     cluster_bank = commands.add_parser(
         "run-category-cluster-bank",
