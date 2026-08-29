@@ -437,9 +437,13 @@ def run_category_fragment_merge_experiment(
                     scene_ids=scene_ids,
                 )
                 state[f"{phase}_passed"] = bool(result["passed"])
+                raw_identity = result.get("raw_fragment_identity")
+                raw_identity_passed = not isinstance(raw_identity, Mapping) or bool(
+                    raw_identity.get("passed", False)
+                )
                 prior_evaluable = bool(
                     result.get("graph_passed", phase == "dev8")
-                )
+                ) and raw_identity_passed
                 state["category_prior_replayed"] = True
                 state["category_prior_evaluable"] = bool(
                     state.get("category_prior_evaluable", False)

@@ -36,6 +36,7 @@ def _hooks(
     *,
     dev2_passed: bool = True,
     dev2_graph_passed: bool = True,
+    dev2_raw_identity_passed: bool | None = None,
     dev8_passed: bool = True,
     fail_once_at: str | None = None,
 ) -> FragmentMergeExperimentHooks:
@@ -93,6 +94,10 @@ def _hooks(
         }
         if phase == "dev2":
             result["graph_passed"] = dev2_graph_passed
+            if dev2_raw_identity_passed is not None:
+                result["raw_fragment_identity"] = {
+                    "passed": dev2_raw_identity_passed
+                }
         return result
 
     return FragmentMergeExperimentHooks(
@@ -153,6 +158,28 @@ def test_dev2_graph_failure_records_replay_but_not_prior_test(tmp_path: Path) ->
     result = run_category_fragment_merge_experiment(
         _config(tmp_path),
         _hooks(calls, dev2_passed=False, dev2_graph_passed=False),
+    )
+
+    assert result["status"] == "stopped"
+    assert result["category_prior_replayed"] is True
+    assert result["category_prior_evaluable"] is False
+    assert result["category_prior_tested"] is False
+    assert not any(row[0].startswith("dev8") for row in calls)
+
+
+def test_dev2_raw_identity_failure_is_not_marked_prior_evaluable(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple] = []
+
+    result = run_category_fragment_merge_experiment(
+        _config(tmp_path),
+        _hooks(
+            calls,
+            dev2_passed=False,
+            dev2_graph_passed=True,
+            dev2_raw_identity_passed=False,
+        ),
     )
 
     assert result["status"] == "stopped"
