@@ -316,8 +316,18 @@ def evaluate_candidate_representation(
             if semantic_coverage < 0.25:
                 continue
             target_key = item.class_id * 1_000_000 + item.instance_id
+            # The oracle supplies only the instance identity of seeds that are
+            # actually available to this class branch.  A GT point can map to
+            # a Gaussian sampled by another semantic branch; passing such an
+            # index to the class-local envelope is both impossible at runtime
+            # and used to abort the diagnostic.
             seed = np.flatnonzero(
-                (np.asarray(trace.sample_rank) >= 0) & (instance_key == target_key)
+                (np.asarray(trace.sample_rank) >= 0)
+                & (
+                    np.asarray(trace.semantic_selected_class_index, dtype=np.int64)
+                    == item.class_id
+                )
+                & (instance_key == target_key)
             )
             diagnostic = class_diagnostics.get(item.class_id, {})
             mask = oracle_seed_candidate_mask(
