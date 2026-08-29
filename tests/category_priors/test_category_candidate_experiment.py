@@ -385,6 +385,76 @@ def test_less_than_eight_objects_extends_trace_before_repair_evaluation(
     ]
 
 
+def test_dev8_with_seven_objects_routes_raw_majority_to_representation(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple] = []
+    hooks = _hooks(
+        calls,
+        diagnoses=[
+            {
+                "diagnosable_object_count": 1,
+                "next_action": "extend-trace-only-to-dev8",
+            },
+            {
+                "diagnosable_object_count": 7,
+                "next_action": "extend-trace-only-to-dev8",
+                "sample_starved_is_majority_of_failures": False,
+                "raw_clustering_is_majority_of_sufficiently_sampled_failures": True,
+            },
+        ],
+        representation_action=ROOT_ACTION_REPAIR,
+        dev2_passed=False,
+    )
+
+    result = run_category_candidate_experiment(_config(tmp_path), hooks)
+
+    functional = [row for row in calls if row[0] != "resources"]
+    assert ("representation", DEV8) in functional
+    assert result["checkpoint"] == "repair_dev2_gate_failed"
+
+
+def test_migrates_erroneous_dev8_insufficient_stop_without_retracing(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple] = []
+    config = _config(tmp_path)
+    state = experiment._initial_state(config)
+    state.update(
+        {
+            "status": "stopped",
+            "checkpoint": "root_diagnosis_insufficient_on_dev8",
+            "next_stage": None,
+            "stop_reason": "legacy controller bug",
+            "root_scene_ids": list(DEV8),
+            "tune24_scene_ids": list(_tune24()),
+            "final48_scene_ids": list(_final48()),
+        }
+    )
+    write_json(
+        config.acceptance_artifact("candidate_formation_root_cause.json"),
+        {
+            "diagnosable_object_count": 7,
+            "next_action": "extend-trace-only-to-dev8",
+            "sample_starved_is_majority_of_failures": False,
+            "raw_clustering_is_majority_of_sufficiently_sampled_failures": True,
+        },
+    )
+    experiment._write_state(config, state)
+    hooks = _hooks(
+        calls,
+        representation_action=ROOT_ACTION_REPAIR,
+        dev2_passed=False,
+    )
+
+    result = run_category_candidate_experiment(config, hooks)
+
+    functional = [row for row in calls if row[0] != "resources"]
+    assert functional[0] == ("representation", DEV8)
+    assert not any(row[0] in {"repair", "diagnose"} for row in functional)
+    assert result["checkpoint"] == "repair_dev2_gate_failed"
+
+
 def test_nested_sampling_branch_freezes_10k_only_after_gate_passes(
     tmp_path: Path,
 ) -> None:

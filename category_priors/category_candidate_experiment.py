@@ -563,13 +563,25 @@ def _route_root_action(
     action = str(result.get("next_action", ""))
     if action == ROOT_ACTION_EXTEND:
         if expanded_to_dev8:
-            return _stop(
-                config,
-                state,
-                checkpoint="root_diagnosis_insufficient_on_dev8",
-                reason="fewer than eight diagnosable objects remained after DEV8 trace extension",
-            )
-        state["next_stage"] = "repair_dev8_trace"
+            # The preregistration uses eight objects only to decide whether the
+            # two-scene trace must be widened to DEV8.  DEV8 is the terminal
+            # trace scope; if it still contains fewer than eight diagnosable
+            # objects, route the available evidence through the registered
+            # sampling/raw-clustering/assignment decision tree instead of
+            # inventing an unregistered sample-size stop.
+            if bool(result.get("sample_starved_is_majority_of_failures", False)):
+                state["next_stage"] = "nested_10k_sampling_control"
+            elif bool(
+                result.get(
+                    "raw_clustering_is_majority_of_sufficiently_sampled_failures",
+                    False,
+                )
+            ):
+                state["next_stage"] = "representation_diagnostic"
+            else:
+                state["next_stage"] = "evaluate_repair_dev2"
+        else:
+            state["next_stage"] = "repair_dev8_trace"
     elif action == ROOT_ACTION_NESTED:
         state["next_stage"] = "nested_10k_sampling_control"
     elif action == ROOT_ACTION_REPRESENTATION:
@@ -611,6 +623,30 @@ def run_category_candidate_experiment(
     config.output_root.mkdir(parents=True, exist_ok=True)
     config.artifacts_root.mkdir(parents=True, exist_ok=True)
     state = _load_state(config)
+    if (
+        state.get("status") == "stopped"
+        and state.get("checkpoint") == "root_diagnosis_insufficient_on_dev8"
+    ):
+        # Resume states written by the short-lived controller bug fixed above.
+        # The completed DEV8 trace and analysis remain authoritative; only the
+        # next registered branch is restored.
+        analysis_path = config.acceptance_artifact(
+            "candidate_formation_root_cause.json"
+        )
+        result = load_json(analysis_path)
+        if not isinstance(result, Mapping):
+            raise TypeError("DEV8 root-cause analysis must be a mapping")
+        state.update(
+            {
+                "status": "running",
+                "current_stage": None,
+                "next_stage": None,
+                "stop_reason": None,
+                "last_error": None,
+            }
+        )
+        _route_root_action(config, state, result, expanded_to_dev8=True)
+        _write_state(config, state)
     if state.get("status") in TERMINAL_STATUSES:
         _write_state(config, state)
         return state
