@@ -113,6 +113,22 @@ def _audit_category_cluster_distance(args: argparse.Namespace) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+def _run_feature_routing_factorial(args: argparse.Namespace) -> None:
+    from .category_feature_routing_factorial import run_feature_routing_factorial
+
+    payload = run_feature_routing_factorial(
+        runtime_manifest=Path(args.runtime_manifest),
+        gt_dir=Path(args.gt_dir),
+        category_priors=Path(args.category_priors),
+        feature_10k_root=Path(args.feature_10k_root),
+        scene_ids=args.scene,
+        taxonomy=load_taxonomy(args.taxonomy),
+        output_dir=Path(args.output_dir),
+        size_bins=Path(args.size_bins) if args.size_bins else None,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
 def _evaluate_category_cluster_bank(args: argparse.Namespace) -> None:
     from .category_cluster_scene_evaluation import evaluate_category_cluster_run
 
@@ -1003,6 +1019,20 @@ def build_parser() -> argparse.ArgumentParser:
     cluster_evaluate.add_argument("--radius-m", type=float, default=0.05)
     cluster_evaluate.add_argument("--min-region-size", type=int, default=100)
     cluster_evaluate.set_defaults(func=_evaluate_category_cluster_bank)
+
+    feature_route = commands.add_parser(
+        "run-feature-routing-factorial",
+        help="isolate feature representation and semantic routing at raw HDBSCAN",
+    )
+    feature_route.add_argument("--runtime-manifest", required=True)
+    feature_route.add_argument("--gt-dir", required=True)
+    feature_route.add_argument("--category-priors", required=True)
+    feature_route.add_argument("--feature-10k-root", required=True)
+    feature_route.add_argument("--scene", action="append", required=True)
+    feature_route.add_argument("--taxonomy")
+    feature_route.add_argument("--size-bins")
+    feature_route.add_argument("--output-dir", required=True)
+    feature_route.set_defaults(func=_run_feature_routing_factorial)
 
     candidate_repair = commands.add_parser(
         "repair-category-candidates",
