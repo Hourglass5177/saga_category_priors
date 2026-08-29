@@ -3,9 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 
 from category_priors import category_candidate_evaluation as candidate_eval
+from category_priors.category_denoise import CandidateBank
 from category_priors.io import sha256_file, write_json
 
 
@@ -305,3 +307,35 @@ def test_postprocess_survival_is_loaded_and_classified(
         full_precision=0.8,
         postprocess_loss_stage="post_filter",
     ) == "full_assignment_loss"
+
+
+def test_c0_survival_replay_projects_historical_core_to_exported_full() -> None:
+    bank = CandidateBank(
+        class_names=("chair",),
+        saga20_names=("chair",),
+        scene_scale_m_per_unit=1.0,
+        seed=42,
+        global_pre_knn=np.asarray([-1, -1, -1, -1], dtype=np.int64),
+        semantic_top1=np.zeros(4, dtype=np.int64),
+        semantic_top1_score=np.ones(4, dtype=np.float64),
+        branch_full_labels=np.asarray([0, 0, 0, -1], dtype=np.int64),
+        # Point 3 is a historical raw core member that legacy full assignment
+        # moved outside candidate 0.  Diagnosis must preserve and report this
+        # anomaly without making the common replay reject C0 itself.
+        branch_core_labels=np.asarray([0, 0, -1, 0], dtype=np.int64),
+        assignment_confidence=np.asarray([0.9, 0.8, 0.7, 0.6]),
+        candidates=(
+            {
+                "candidate_id": 0,
+                "branch_class": "chair",
+                "base_score": 0.8,
+            },
+        ),
+        diagnostics={},
+    )
+
+    survival = candidate_eval._all_c0_postprocess_survival(
+        bank, np.asarray([[0.0, 0.0, 0.0], [0.01, 0.0, 0.0], [0.02, 0.0, 0.0], [1.0, 0.0, 0.0]])
+    )
+
+    assert survival[0]["accepted"] is True

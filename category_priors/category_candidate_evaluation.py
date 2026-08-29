@@ -217,6 +217,13 @@ def _all_c0_postprocess_survival(
 
     full_labels = np.asarray(bank.branch_full_labels, dtype=np.int64)
     core_labels = np.asarray(bank.branch_core_labels, dtype=np.int64)
+
+    # C0 is the historical control whose formation bug we are diagnosing: a
+    # raw-cluster member may have been reassigned outside its emitted full
+    # candidate.  The legacy replay contract is intentionally stricter for
+    # repaired candidates, so feed it only the exported part of C0's core.
+    # The original core/full disagreement remains untouched in the bank and is
+    # reported separately by ``_candidate_scene_metrics``.
     candidates = tuple(
         LegacyReplayCandidate(
             candidate_id=int(row["candidate_id"]),
@@ -226,7 +233,8 @@ def _all_c0_postprocess_survival(
                 full_labels == int(row["candidate_id"])
             ),
             trusted_core_indices=np.flatnonzero(
-                core_labels == int(row["candidate_id"])
+                (core_labels == int(row["candidate_id"]))
+                & (full_labels == int(row["candidate_id"]))
             ),
         )
         for row in bank.candidates
