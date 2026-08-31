@@ -2536,3 +2536,38 @@ viewer/
 - [x] 本地全量类别先验测试通过（758项通过、2项跳过）；
 - [ ] commit/push后才开启云端；
 - [ ] DEV2通过才运行DEV8，失败立即形成结论并关闭云电脑。
+
+## 34. 当前权威：高斯—掩码共识干净基线
+
+第24至33节证明了若干旧接口失败，但没有建立一条健康、独立、完整掩码优先的
+自动实例基线。老师原型确实使用二维掩码；结构缺口是掩码身份在特征训练后被
+丢弃，自动实例仍由HDBSCAN、中心分配和全场近邻重新形成。不能再把“旧基线
+用了掩码”和“旧基线直接以完整掩码形成跨视角对象”混为一谈。
+
+本节由`CLEAN_ALPHA_MASK_BASELINE_PLAN.md`定义：新主干以SAM-everything完整掩码
+和正确alpha贡献建立类别无关多视角共识对象，只在合并时比较global/class的
+train-only米制三轴q95尺寸上界。支持量、平滑度、HDBSCAN、全场KNN、ObjectBank
+和新训练均不进入首轮正式比较。
+
+当前检查点：
+
+- [x] 完成老师意图、交付代码、公开SAGA、MaskClustering、SAI3D、SoftGroup和
+  Gaussian Grouping的一手资料审计；
+- [x] 用户选择首轮只测尺寸先验，并批准独立重构；
+- [x] 冻结DEV2/DEV8门槛、U/D/oracle边界和不复制无许可证源码的实现纪律；
+- [x] 完成独立证据库与`alpha × T_prev`贡献归一化；完整SAM掩码ID贯穿lifting、共识、
+  geometry oracle和最终对象，歧义Gaussian仅在跨视角关联与最终检测频率中弃权；
+- [x] 完成并用反例测试MaskClustering行为：supporter双侧包含率均须达到0.80，欠分割按
+  observable frame中diverse mask-ID distribution的频率严格大于0.30过滤，无有效mask证据
+  不误计为diverse；observer按top 5%、10%至95%逐轮推进，每轮合格图按connected component
+  合并并在轮末统一重算；
+- [x] 完成同帧替代假设、确定性排序和整component尺寸veto的稳定处理；veto拒绝时不静默接受
+  任何子集，也不在不变的后续百分位轮次重复提交同一component；
+- [x] 完成C0/U/D同证据、同原始几何共识和同基础Q的尺寸重放，类别后验仅在对象形成后聚合；
+  GT只进入独立oracle/evaluator，正式主干不依赖HDBSCAN、旧`postprocess.py`、ObjectBank或
+  全场KNN；
+- [x] 完成DEV2、DEV8、holdout5、tune24和final48的冻结门槛、物理场景配对汇总、恢复状态与
+  10,000次final paired bootstrap实现及针对性测试；
+- [x] 全量干净基线专项验证通过（125项通过，零失败）；仓库全量测试为884项通过、2项跳过；
+- [ ] 本地验证、commit/push后才部署云端DEV2；
+- [ ] DEV2达到几何与结构门槛后才运行DEV8。

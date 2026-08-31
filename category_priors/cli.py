@@ -43,6 +43,79 @@ V10_CLASSIFIERS = V9_CLASSIFIERS
 V10_PRIOR_CONDITIONS = V9_CONDITIONS
 
 
+def _run_clean_baseline_cli(args: argparse.Namespace) -> None:
+    """Delegate the four active clean-baseline commands to their narrow CLI.
+
+    Keeping argument registration here makes the commands discoverable from
+    ``python -m category_priors.cli`` without importing rendering or retired
+    experiment modules into the public CLI process.
+    """
+
+    from .clean_baseline.cli import main as clean_main
+
+    command = str(args.clean_baseline_command)
+    argv: list[str] = [command]
+    if command == "build-alpha-mask-evidence":
+        argv.extend(
+            [
+                "--scene-id",
+                args.scene_id,
+                "--request-json",
+                args.request_json,
+                "--output-dir",
+                args.output_dir,
+                "--worker",
+                args.worker,
+            ]
+        )
+    elif command in {"run-mask-consensus", "replay-size-prior"}:
+        argv.extend(
+            [
+                "--scene-id",
+                args.scene_id,
+                "--bank-dir",
+                args.bank_dir,
+                "--output-dir",
+                args.output_dir,
+                "--condition",
+                args.condition,
+                "--gaussian-count",
+                str(args.gaussian_count),
+                "--runner",
+                args.runner,
+            ]
+        )
+        if args.priors:
+            argv.extend(["--priors", args.priors])
+    elif command == "evaluate-clean-baseline":
+        argv.extend(
+            [
+                "--manifest",
+                args.manifest,
+                "--output",
+                args.output,
+                "--radius-m",
+                str(args.radius_m),
+                "--min-region-size",
+                str(args.min_region_size),
+            ]
+        )
+        if args.taxonomy:
+            argv.extend(["--taxonomy", args.taxonomy])
+    else:  # pragma: no cover - argparse owns the command set
+        raise ValueError(f"unknown clean-baseline command: {command}")
+    clean_main(argv)
+
+
+def _add_clean_condition_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--scene-id", required=True)
+    parser.add_argument("--bank-dir", required=True)
+    parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--condition", required=True)
+    parser.add_argument("--gaussian-count", type=int, required=True)
+    parser.add_argument("--priors")
+
+
 def _build_category_fragment_graph(args: argparse.Namespace) -> None:
     from .category_fragment_merge_runner import build_category_fragment_graphs
 
@@ -772,6 +845,64 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--radius-m", type=float, default=0.05)
     audit.add_argument("--min-region-size", type=int, default=100)
     audit.set_defaults(func=_audit)
+
+    clean_evidence = commands.add_parser(
+        "build-alpha-mask-evidence",
+        help="build the immutable sparse alpha-mask evidence bank",
+    )
+    clean_evidence.add_argument("--scene-id", required=True)
+    clean_evidence.add_argument("--request-json", required=True)
+    clean_evidence.add_argument("--output-dir", required=True)
+    clean_evidence.add_argument(
+        "--worker",
+        default="category_priors.clean_baseline.evidence:build_alpha_mask_evidence",
+    )
+    clean_evidence.set_defaults(
+        func=_run_clean_baseline_cli,
+        clean_baseline_command="build-alpha-mask-evidence",
+    )
+
+    clean_consensus = commands.add_parser(
+        "run-mask-consensus",
+        help="form class-agnostic objects from complete cross-view masks",
+    )
+    _add_clean_condition_arguments(clean_consensus)
+    clean_consensus.add_argument(
+        "--runner",
+        default="category_priors.clean_baseline.pipeline:run_consensus_condition",
+    )
+    clean_consensus.set_defaults(
+        func=_run_clean_baseline_cli,
+        clean_baseline_command="run-mask-consensus",
+    )
+
+    clean_prior = commands.add_parser(
+        "replay-size-prior",
+        help="replay global or predicted-class size constraints on one evidence bank",
+    )
+    _add_clean_condition_arguments(clean_prior)
+    clean_prior.add_argument(
+        "--runner",
+        default="category_priors.clean_baseline.pipeline:replay_size_prior_condition",
+    )
+    clean_prior.set_defaults(
+        func=_run_clean_baseline_cli,
+        clean_baseline_command="replay-size-prior",
+    )
+
+    clean_evaluate = commands.add_parser(
+        "evaluate-clean-baseline",
+        help="evaluate clean C0/U/D predictions with the official ScanNet protocol",
+    )
+    clean_evaluate.add_argument("--manifest", required=True)
+    clean_evaluate.add_argument("--output", required=True)
+    clean_evaluate.add_argument("--taxonomy")
+    clean_evaluate.add_argument("--radius-m", type=float, default=0.05)
+    clean_evaluate.add_argument("--min-region-size", type=int, default=100)
+    clean_evaluate.set_defaults(
+        func=_run_clean_baseline_cli,
+        clean_baseline_command="evaluate-clean-baseline",
+    )
 
     lifting_v8 = commands.add_parser(
         "run-v8-lifting-audit", help="run the frozen V8 mask-by-lifting factorial"
