@@ -3,6 +3,7 @@ from __future__ import annotations
 """Thin runtime pipeline for the clean Gaussian--mask consensus baseline."""
 
 from dataclasses import asdict
+import json
 from pathlib import Path
 import subprocess
 from typing import Any, Mapping, Sequence
@@ -647,12 +648,30 @@ def run_consensus_condition(
 
     observations = _observations(bank)
     visibility = _dense_visibility(bank)
+
+    def report_progress(stage: str, payload: Mapping[str, object]) -> None:
+        print(
+            json.dumps(
+                {
+                    "event": "clean-baseline-consensus-progress",
+                    "scene_id": scene_id,
+                    "condition": condition,
+                    "stage": stage,
+                    **payload,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            flush=True,
+        )
+
     result = run_mask_consensus(
         observations,
         visibility,
         bank.xyz_m,
         config=config,
         merge_veto=merge_veto,
+        progress_callback=report_progress,
     )
     unique_objects = _resolve_unique_ownership(
         result.objects,

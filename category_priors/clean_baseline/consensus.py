@@ -18,6 +18,7 @@ import numpy as np
 
 
 MergeVeto = Callable[[tuple[int, ...], np.ndarray], bool]
+ProgressCallback = Callable[[str, Mapping[str, object]], None]
 
 
 def _readonly_unique_ids(values: object, *, name: str) -> np.ndarray:
@@ -46,6 +47,9 @@ class MaskObservation:
     ambiguous_ids: np.ndarray = field(
         default_factory=lambda: np.empty(0, dtype=np.int64)
     )
+    _association_ids: np.ndarray = field(
+        init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         if int(self.mask_id) < 0 or int(self.frame_id) < 0:
@@ -56,18 +60,20 @@ class MaskObservation:
         )
         if np.any(~np.isin(ambiguous, full)):
             raise ValueError("ambiguous_ids must be a subset of gaussian_ids")
+        association = np.setdiff1d(full, ambiguous, assume_unique=True)
+        association.setflags(write=False)
         object.__setattr__(self, "mask_id", int(self.mask_id))
         object.__setattr__(self, "frame_id", int(self.frame_id))
         object.__setattr__(self, "gaussian_ids", full)
         object.__setattr__(self, "ambiguous_ids", ambiguous)
+        object.__setattr__(self, "_association_ids", association)
 
     @property
     def association_ids(self) -> np.ndarray:
-        result = np.setdiff1d(
-            self.gaussian_ids, self.ambiguous_ids, assume_unique=True
-        )
-        result.setflags(write=False)
-        return result
+        # This set is immutable.  Computing it on every access made the
+        # scene-scale consensus path repeat the same ``setdiff1d`` millions of
+        # times without changing a single result.
+        return self._association_ids
 
 
 @dataclass(frozen=True)
@@ -141,6 +147,264 @@ class ConsensusResult:
     diagnostics: dict[str, object]
 
 
+@dataclass(frozen=True)
+class _FrameSupportIndex:
+    """Exact sparse point-to-mask index for one physical frame.
+
+    Most lifted association supports are disjoint after hierarchical
+    ambiguity is removed.  The single-membership arrays keep that common path
+    vectorised; the explicit multi-membership rows preserve the legacy result
+    for malformed or synthetic overlapping inputs.
+    """
+
+    mask_count: int
+    single_ids: np.ndarray
+    single_labels: np.ndarray
+    multi_ids: np.ndarray
+    multi_labels: tuple[np.ndarray, ...]
+
+    @classmethod
+    def from_supports(
+        cls, supports: Sequence[np.ndarray]
+    ) -> "_FrameSupportIndex":
+        mask_count = len(supports)
+        nonempty = [
+            (label, np.asarray(ids, dtype=np.int64))
+            for label, ids in enumerate(supports)
+            if len(ids)
+        ]
+        if not nonempty:
+            empty = np.empty(0, dtype=np.int64)
+            empty.setflags(write=False)
+            return cls(mask_count, empty, empty, empty, ())
+
+        ids = np.concatenate([row for _, row in nonempty])
+        labels = np.concatenate(
+            [
+                np.full(len(row), label, dtype=np.int64)
+                for label, row in nonempty
+            ]
+        )
+        order = np.argsort(ids, kind="stable")
+        sorted_ids = ids[order]
+        sorted_labels = labels[order]
+        unique_ids, starts, counts = np.unique(
+            sorted_ids, return_index=True, return_counts=True
+        )
+        single = counts == 1
+        single_ids = np.asarray(unique_ids[single], dtype=np.int64)
+        single_labels = np.asarray(sorted_labels[starts[single]], dtype=np.int64)
+        multi_ids = np.asarray(unique_ids[~single], dtype=np.int64)
+        multi_labels = tuple(
+            np.asarray(
+                sorted_labels[start : start + count], dtype=np.int64
+            )
+            for start, count in zip(starts[~single], counts[~single])
+        )
+        for array in (single_ids, single_labels, multi_ids, *multi_labels):
+            array.setflags(write=False)
+        return cls(
+            mask_count,
+            single_ids,
+            single_labels,
+            multi_ids,
+            multi_labels,
+        )
+
+    def counts(self, gaussian_ids: np.ndarray) -> np.ndarray:
+        result = np.zeros(self.mask_count, dtype=np.int64)
+        query = np.asarray(gaussian_ids, dtype=np.int64)
+        if query.size == 0 or self.mask_count == 0:
+            return result
+
+        if self.single_ids.size:
+            positions = np.searchsorted(self.single_ids, query)
+            in_bounds = positions < self.single_ids.size
+            matched = np.zeros(query.size, dtype=bool)
+            matched[in_bounds] = (
+                self.single_ids[positions[in_bounds]] == query[in_bounds]
+            )
+            if np.any(matched):
+                result += np.bincount(
+                    self.single_labels[positions[matched]],
+                    minlength=self.mask_count,
+                )
+
+        if self.multi_ids.size:
+            positions = np.searchsorted(self.multi_ids, query)
+            in_bounds = positions < self.multi_ids.size
+            safe_positions = np.minimum(positions, self.multi_ids.size - 1)
+            matched = in_bounds & (
+                self.multi_ids[safe_positions] == query
+            )
+            matched_positions = np.unique(positions[matched])
+            for position in matched_positions:
+                result += np.bincount(
+                    self.multi_labels[int(position)],
+                    minlength=self.mask_count,
+                )
+        return result
+
+
+@dataclass(frozen=True)
+class _PairFrameContext:
+    ambiguity_ids: np.ndarray
+    active_index: _FrameSupportIndex
+    rejected_index: _FrameSupportIndex
+
+
+@dataclass(frozen=True)
+class _PairConsensusContext:
+    visible: np.ndarray
+    frames: tuple[_PairFrameContext, ...]
+    config: ConsensusConfig
+
+
+@dataclass(frozen=True)
+class _ComponentPairState:
+    observer_frames: int
+    qualifier_bits_by_frame: tuple[int, ...]
+
+
+def _prepare_pair_consensus_context(
+    by_frame: Mapping[int, Sequence[MaskObservation]],
+    abstain_masks_by_frame: Mapping[int, Sequence[np.ndarray]],
+    visible: np.ndarray,
+    config: ConsensusConfig,
+    ambiguous_by_frame: Mapping[int, np.ndarray],
+) -> _PairConsensusContext:
+    """Build the immutable scene index used by every component pair.
+
+    This is an exact index of the existing observer/supporter definition.  It
+    changes neither the candidate graph nor any threshold; it only avoids
+    rescanning every same-frame mask for every component pair.
+    """
+
+    empty_ids = np.empty(0, dtype=np.int64)
+    empty_ids.setflags(write=False)
+    frames: list[_PairFrameContext] = []
+    for frame_id in range(visible.shape[0]):
+        active_supports = tuple(
+            item.association_ids for item in by_frame.get(frame_id, ())
+        )
+        rejected_supports = tuple(
+            np.asarray(ids, dtype=np.int64)
+            for ids in abstain_masks_by_frame.get(frame_id, ())
+        )
+        ambiguity = np.asarray(
+            ambiguous_by_frame.get(frame_id, empty_ids), dtype=np.int64
+        )
+        ambiguity.setflags(write=False)
+        frames.append(
+            _PairFrameContext(
+                ambiguity_ids=ambiguity,
+                active_index=_FrameSupportIndex.from_supports(
+                    active_supports
+                ),
+                rejected_index=_FrameSupportIndex.from_supports(
+                    rejected_supports
+                ),
+            )
+        )
+    return _PairConsensusContext(
+        visible=np.asarray(visible, dtype=bool),
+        frames=tuple(frames),
+        config=config,
+    )
+
+
+def _build_component_pair_state(
+    support: np.ndarray,
+    context: _PairConsensusContext,
+) -> _ComponentPairState:
+    """Materialise target-specific observer and containing-mask evidence.
+
+    A component's observer eligibility and the masks that contain it depend
+    only on that component, not on the other side of a proposed pair.  The
+    legacy implementation recomputed those two facts for both sides of every
+    pair.  Storing them once is mathematically identical, including negative
+    observer frames with no active mask evidence and target-specific abstention
+    caused by a rejected mask.
+    """
+
+    ids = np.asarray(support, dtype=np.int64)
+    if ids.size == 0:
+        return _ComponentPairState(
+            observer_frames=0,
+            qualifier_bits_by_frame=(0,) * len(context.frames),
+        )
+
+    observer_frames = 0
+    qualifiers = [0] * len(context.frames)
+    for frame_id, frame in enumerate(context.frames):
+        visible_ids = ids[context.visible[frame_id, ids]]
+        if frame.ambiguity_ids.size:
+            visible_ids = np.setdiff1d(
+                visible_ids,
+                frame.ambiguity_ids,
+                assume_unique=True,
+            )
+        if (
+            visible_ids.size / ids.size
+            < context.config.mask_visible_threshold
+        ):
+            continue
+
+        rejected_counts = frame.rejected_index.counts(visible_ids)
+        if rejected_counts.size and np.any(
+            rejected_counts / visible_ids.size
+            >= context.config.contained_threshold
+        ):
+            continue
+
+        observer_frames |= 1 << frame_id
+        active_counts = frame.active_index.counts(visible_ids)
+        containing = np.flatnonzero(
+            active_counts / visible_ids.size
+            >= context.config.contained_threshold
+        )
+        qualifier_bits = 0
+        for local_mask_index in containing:
+            qualifier_bits |= 1 << int(local_mask_index)
+        qualifiers[frame_id] = qualifier_bits
+
+    return _ComponentPairState(
+        observer_frames=observer_frames,
+        qualifier_bits_by_frame=tuple(qualifiers),
+    )
+
+
+def _pair_consensus_from_states(
+    left_state: _ComponentPairState,
+    right_state: _ComponentPairState,
+    left_masks: tuple[int, ...],
+    right_masks: tuple[int, ...],
+) -> PairConsensus:
+    common_observers = (
+        left_state.observer_frames & right_state.observer_frames
+    )
+    observers = int(common_observers.bit_count())
+    supporters = 0
+    remaining = common_observers
+    while remaining:
+        frame_bit = remaining & -remaining
+        frame_id = frame_bit.bit_length() - 1
+        if (
+            left_state.qualifier_bits_by_frame[frame_id]
+            & right_state.qualifier_bits_by_frame[frame_id]
+        ):
+            supporters += 1
+        remaining ^= frame_bit
+    consensus = supporters / observers if observers else 0.0
+    return PairConsensus(
+        left_masks,
+        right_masks,
+        observers,
+        supporters,
+        consensus,
+    )
+
+
 class _DeterministicUnionFind:
     def __init__(self, count: int) -> None:
         self.parent = list(range(count))
@@ -208,6 +472,7 @@ def detect_undersegmented_masks(
     visibility: object,
     *,
     config: ConsensusConfig = ConsensusConfig(),
+    progress_callback: ProgressCallback | None = None,
 ) -> tuple[int, ...]:
     """Find masks that are diversely partitioned in too many observable views.
 
@@ -272,7 +537,10 @@ def detect_undersegmented_masks(
             sorted_labels[keep_last],
         )
 
-    for target_index in sorted(range(len(items)), key=lambda index: items[index].mask_id):
+    ordered_target_indices = sorted(
+        range(len(items)), key=lambda index: items[index].mask_id
+    )
+    for target_offset, target_index in enumerate(ordered_target_indices, start=1):
         target = items[target_index]
         target_ids = target.association_ids
         if target_ids.size == 0:
@@ -302,19 +570,20 @@ def detect_undersegmented_masks(
             # only treats a frame as an observer after some *mask* evidence is
             # present, and computes diversity over assigned mask IDs rather
             # than letting uncovered/background support form a fake class.
-            _, _, assigned_positions = np.intersect1d(
-                visible_target,
-                assigned_ids,
-                assume_unique=True,
-                return_indices=True,
+            assigned_positions = np.searchsorted(assigned_ids, visible_target)
+            in_bounds = assigned_positions < assigned_ids.size
+            matched = np.zeros(visible_target.size, dtype=bool)
+            matched[in_bounds] = (
+                assigned_ids[assigned_positions[in_bounds]]
+                == visible_target[in_bounds]
             )
-            if assigned_positions.size == 0:
+            if not np.any(matched):
                 continue
             observable_frames += 1
             _, counts = np.unique(
-                assigned_labels[assigned_positions], return_counts=True
+                assigned_labels[assigned_positions[matched]], return_counts=True
             )
-            dominant_fraction = float(counts.max() / assigned_positions.size)
+            dominant_fraction = float(counts.max() / np.count_nonzero(matched))
             if dominant_fraction < config.contained_threshold:
                 diverse_frames += 1
 
@@ -324,6 +593,21 @@ def detect_undersegmented_masks(
             > config.undersegment_filter_threshold
         ):
             rejected.append(target.mask_id)
+        if (
+            progress_callback is not None
+            and (
+                target_offset == len(ordered_target_indices)
+                or target_offset % 250 == 0
+            )
+        ):
+            progress_callback(
+                "undersegmentation-progress",
+                {
+                    "completed_mask_count": target_offset,
+                    "mask_count": len(ordered_target_indices),
+                    "rejected_mask_count": len(rejected),
+                },
+            )
     return tuple(sorted(rejected))
 
 
@@ -343,6 +627,24 @@ def _component_full(
     if not arrays:
         return np.empty(0, dtype=np.int64)
     return np.unique(np.concatenate(arrays))
+
+
+def _ambiguity_by_frame(
+    by_frame: Mapping[int, Sequence[MaskObservation]],
+) -> dict[int, np.ndarray]:
+    """Materialise immutable same-frame ambiguity once per scene context."""
+
+    result: dict[int, np.ndarray] = {}
+    for frame_id, frame_masks in by_frame.items():
+        rows = [mask.ambiguous_ids for mask in frame_masks if mask.ambiguous_ids.size]
+        ambiguous = (
+            np.unique(np.concatenate(rows))
+            if rows
+            else np.empty(0, dtype=np.int64)
+        )
+        ambiguous.setflags(write=False)
+        result[int(frame_id)] = ambiguous
+    return result
 
 
 def compute_pair_consensus(
@@ -394,6 +696,7 @@ def compute_pair_consensus(
             rejected_support_by_frame.setdefault(item.frame_id, []).append(
                 item.association_ids
             )
+    ambiguous_by_frame = _ambiguity_by_frame(by_frame)
     return _pair_consensus_from_support(
         left_support,
         right_support,
@@ -403,6 +706,7 @@ def compute_pair_consensus(
         visible,
         config,
         rejected_support_by_frame,
+        ambiguous_by_frame,
     )
 
 
@@ -415,24 +719,33 @@ def _pair_consensus_from_support(
     visible: np.ndarray,
     config: ConsensusConfig,
     abstain_masks_by_frame: Mapping[int, Sequence[np.ndarray]] | None = None,
+    ambiguous_by_frame: Mapping[int, np.ndarray] | None = None,
+    left_state: _ComponentPairState | None = None,
+    right_state: _ComponentPairState | None = None,
 ) -> PairConsensus:
+    if (left_state is None) != (right_state is None):
+        raise ValueError("prepared pair states must be provided together")
+    if left_state is not None and right_state is not None:
+        return _pair_consensus_from_states(
+            left_state,
+            right_state,
+            left_masks,
+            right_masks,
+        )
     if left_support.size == 0 or right_support.size == 0:
         return PairConsensus(left_masks, right_masks, 0, 0, 0.0)
     observers = 0
     supporters = 0
-    ambiguous_by_frame: dict[int, np.ndarray] = {}
-    for frame_id, frame_masks in by_frame.items():
-        rows = [mask.ambiguous_ids for mask in frame_masks if mask.ambiguous_ids.size]
-        ambiguous_by_frame[frame_id] = (
-            np.unique(np.concatenate(rows))
-            if rows
-            else np.empty(0, dtype=np.int64)
-        )
+    frame_ambiguity = (
+        _ambiguity_by_frame(by_frame)
+        if ambiguous_by_frame is None
+        else ambiguous_by_frame
+    )
     for frame_id in range(visible.shape[0]):
         frame_masks = by_frame.get(frame_id, ())
         left_visible = left_support[visible[frame_id, left_support]]
         right_visible = right_support[visible[frame_id, right_support]]
-        frame_ambiguous = ambiguous_by_frame.get(
+        frame_ambiguous = frame_ambiguity.get(
             frame_id, np.empty(0, dtype=np.int64)
         )
         if frame_ambiguous.size:
@@ -500,7 +813,10 @@ def _pair_consensus_from_support(
 
 
 def _sparse_raw_candidate_pairs(
-    observations: Sequence[MaskObservation], active_indices: Sequence[int]
+    observations: Sequence[MaskObservation],
+    active_indices: Sequence[int],
+    *,
+    progress_callback: ProgressCallback | None = None,
 ) -> tuple[tuple[int, int], ...]:
     """Generate only pairs that could share at least one supporter mask.
 
@@ -510,11 +826,24 @@ def _sparse_raw_candidate_pairs(
     """
 
     point_to_masks: dict[int, list[int]] = {}
-    for index in active_indices:
+    active_count = len(active_indices)
+    for active_offset, index in enumerate(active_indices, start=1):
         for gaussian_id in observations[index].association_ids:
             point_to_masks.setdefault(int(gaussian_id), []).append(int(index))
+        if (
+            progress_callback is not None
+            and (active_offset == active_count or active_offset % 500 == 0)
+        ):
+            progress_callback(
+                "raw-candidate-index-progress",
+                {
+                    "completed_mask_count": active_offset,
+                    "active_mask_count": active_count,
+                    "indexed_gaussian_count": len(point_to_masks),
+                },
+            )
     pairs: set[tuple[int, int]] = set()
-    for supporter_index in active_indices:
+    for supporter_offset, supporter_index in enumerate(active_indices, start=1):
         neighbours: set[int] = set()
         for gaussian_id in observations[supporter_index].association_ids:
             neighbours.update(point_to_masks.get(int(gaussian_id), ()))
@@ -522,6 +851,18 @@ def _sparse_raw_candidate_pairs(
             if observations[left].frame_id == observations[right].frame_id:
                 continue
             pairs.add((left, right))
+        if (
+            progress_callback is not None
+            and (supporter_offset == active_count or supporter_offset % 250 == 0)
+        ):
+            progress_callback(
+                "raw-candidate-pair-progress",
+                {
+                    "completed_supporter_count": supporter_offset,
+                    "active_mask_count": active_count,
+                    "candidate_pair_count": len(pairs),
+                },
+            )
     return tuple(sorted(pairs))
 
 
@@ -642,6 +983,7 @@ def run_mask_consensus(
     *,
     config: ConsensusConfig = ConsensusConfig(),
     merge_veto: MergeVeto | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> ConsensusResult:
     """Build deterministic objects from complete lifted masks.
 
@@ -652,28 +994,54 @@ def run_mask_consensus(
     config.validate()
     items, visible_raw, xyz = _validate_inputs(observations, visibility, xyz_m)
     assert xyz is not None
+
+    def emit_progress(stage: str, **payload: object) -> None:
+        if progress_callback is not None:
+            progress_callback(stage, payload)
+
+    emit_progress(
+        "validated-inputs",
+        mask_count=len(items),
+        frame_count=int(visible_raw.shape[0]),
+        gaussian_count=int(visible_raw.shape[1]),
+    )
     visible = _visible_boolean(visible_raw, config.mask_visible_threshold)
-    rejected = detect_undersegmented_masks(items, visible_raw, config=config)
+    emit_progress("undersegmentation-start", mask_count=len(items))
+    rejected = detect_undersegmented_masks(
+        items,
+        visible_raw,
+        config=config,
+        progress_callback=(
+            None
+            if progress_callback is None
+            else lambda stage, payload: progress_callback(stage, payload)
+        ),
+    )
     rejected_set = set(rejected)
+    emit_progress(
+        "undersegmentation-complete",
+        rejected_mask_count=len(rejected),
+    )
     active = tuple(
         index for index, item in enumerate(items) if item.mask_id not in rejected_set
     )
-    raw_candidate_pairs = _sparse_raw_candidate_pairs(items, active)
+    raw_candidate_pairs = _sparse_raw_candidate_pairs(
+        items,
+        active,
+        progress_callback=(
+            None
+            if progress_callback is None
+            else lambda stage, payload: progress_callback(stage, payload)
+        ),
+    )
     by_frame: dict[int, list[MaskObservation]] = {}
     for index in active:
         by_frame.setdefault(items[index].frame_id, []).append(items[index])
-    ambiguity_by_frame_all: dict[int, np.ndarray] = {}
-    for frame_id in range(visible.shape[0]):
-        rows = [
-            item.ambiguous_ids
-            for item in items
-            if item.frame_id == frame_id and item.ambiguous_ids.size
-        ]
-        ambiguity_by_frame_all[frame_id] = (
-            np.unique(np.concatenate(rows))
-            if rows
-            else np.empty(0, dtype=np.int64)
-        )
+    ambiguity_by_frame_active = _ambiguity_by_frame(by_frame)
+    all_by_frame: dict[int, list[MaskObservation]] = {}
+    for item in items:
+        all_by_frame.setdefault(item.frame_id, []).append(item)
+    ambiguity_by_frame_all = _ambiguity_by_frame(all_by_frame)
     # Rejected masks are removed as graph nodes/supporters.  Their effect on an
     # observer denominator is target-specific: only a target that was actually
     # contained by that rejected mask abstains in its source frame.
@@ -691,6 +1059,36 @@ def run_mask_consensus(
     component_full = {index: items[index].gaussian_ids for index in active}
     component_mask_ids = {index: (items[index].mask_id,) for index in active}
     component_frame_ids = {index: {items[index].frame_id} for index in active}
+    component_revisions = {index: 0 for index in active}
+    pair_context = _prepare_pair_consensus_context(
+        by_frame,
+        rejected_support_by_frame,
+        visible,
+        config,
+        ambiguity_by_frame_active,
+    )
+    component_pair_states: dict[int, _ComponentPairState] = {}
+    component_state_build_count = 0
+    emit_progress(
+        "component-pair-state-start",
+        component_count=len(component_supports),
+    )
+    for state_offset, index in enumerate(sorted(component_supports), start=1):
+        component_pair_states[index] = _build_component_pair_state(
+            component_supports[index], pair_context
+        )
+        component_state_build_count += 1
+        if state_offset == len(component_supports) or state_offset % 250 == 0:
+            emit_progress(
+                "component-pair-state-progress",
+                completed_component_count=state_offset,
+                component_count=len(component_supports),
+            )
+    emit_progress(
+        "component-pair-state-complete",
+        component_count=len(component_pair_states),
+        component_state_build_count=component_state_build_count,
+    )
     accepted_edges: list[ConsensusEdge] = []
     pair_cache: dict[tuple[int, int], PairConsensus] = {}
     pair_evaluation_count = 0
@@ -707,9 +1105,18 @@ def run_mask_consensus(
             visible,
             config,
             rejected_support_by_frame,
+            ambiguity_by_frame_active,
+            component_pair_states[left_root],
+            component_pair_states[right_root],
         )
 
-    def rebuild_pair_cache() -> dict[tuple[int, int], PairConsensus]:
+    def rebuild_pair_cache(
+        previous_cache: Mapping[tuple[int, int], PairConsensus] | None = None,
+        previous_revisions: Mapping[tuple[int, int], tuple[int, int]] | None = None,
+    ) -> tuple[
+        dict[tuple[int, int], PairConsensus],
+        dict[tuple[int, int], tuple[int, int]],
+    ]:
         current_pairs: set[tuple[int, int]] = set()
         for left_index, right_index in raw_candidate_pairs:
             left_root = uf.find(left_index)
@@ -719,12 +1126,36 @@ def run_mask_consensus(
             left_root, right_root = sorted((left_root, right_root))
             if left_root in components and right_root in components:
                 current_pairs.add((left_root, right_root))
-        return {
-            pair: evaluate_pair(*pair)
-            for pair in sorted(current_pairs)
-        }
+        cache: dict[tuple[int, int], PairConsensus] = {}
+        revisions: dict[tuple[int, int], tuple[int, int]] = {}
+        for pair in sorted(current_pairs):
+            revision = (
+                component_revisions[pair[0]],
+                component_revisions[pair[1]],
+            )
+            if (
+                previous_cache is not None
+                and previous_revisions is not None
+                and pair in previous_cache
+                and previous_revisions.get(pair) == revision
+            ):
+                cache[pair] = previous_cache[pair]
+            else:
+                cache[pair] = evaluate_pair(*pair)
+            revisions[pair] = revision
+        return cache, revisions
 
-    pair_cache = rebuild_pair_cache()
+    emit_progress(
+        "raw-candidate-pairs-complete",
+        active_mask_count=len(active),
+        sparse_candidate_pair_count=len(raw_candidate_pairs),
+    )
+    pair_cache, pair_cache_revisions = rebuild_pair_cache()
+    emit_progress(
+        "initial-pair-consensus-complete",
+        pair_count=len(pair_cache),
+        pair_evaluation_count=pair_evaluation_count,
+    )
     initial_pair_rows = [
         {
             "left_mask_ids": list(evidence.left_mask_ids),
@@ -850,6 +1281,8 @@ def run_mask_consensus(
             accepted_groups.append((roots, mask_ids, full_ids))
 
         for roots, mask_ids, full_ids in accepted_groups:
+            component_state_build_count += 1
+            merged_revision = 1 + max(component_revisions[root] for root in roots)
             merged_indices = set().union(*(components[root] for root in roots))
             merged_support = np.unique(
                 np.concatenate([component_supports[root] for root in roots])
@@ -863,6 +1296,8 @@ def run_mask_consensus(
                 component_full.pop(root)
                 component_mask_ids.pop(root)
                 component_frame_ids.pop(root)
+                component_revisions.pop(root)
+                component_pair_states.pop(root)
             root = roots[0]
             for other in roots[1:]:
                 root = uf.union(root, other)
@@ -871,6 +1306,10 @@ def run_mask_consensus(
             component_full[root] = full_ids
             component_mask_ids[root] = mask_ids
             component_frame_ids[root] = merged_frames
+            component_revisions[root] = merged_revision
+            component_pair_states[root] = _build_component_pair_state(
+                merged_support, pair_context
+            )
 
             root_set = set(roots)
             for left_root, right_root, evidence in selected_edges:
@@ -895,7 +1334,20 @@ def run_mask_consensus(
             }
         )
         if accepted_groups:
-            pair_cache = rebuild_pair_cache()
+            pair_cache, pair_cache_revisions = rebuild_pair_cache(
+                pair_cache, pair_cache_revisions
+            )
+        emit_progress(
+            "observer-round-complete",
+            top_percent=top_percent,
+            observer_threshold=observer_threshold,
+            qualified_edge_count=len(qualified),
+            accepted_component_count=len(accepted_groups),
+            remaining_component_count=len(components),
+            pair_count=len(pair_cache),
+            pair_evaluation_count=pair_evaluation_count,
+            component_state_build_count=component_state_build_count,
+        )
 
     provisional: list[ConsensusObject] = []
     dropped_by_views = 0
@@ -925,7 +1377,9 @@ def run_mask_consensus(
             member_indices_by_frame.setdefault(items[index].frame_id, []).append(index)
         for frame_id in range(visible.shape[0]):
             eligible_in_frame = visible[frame_id, full_ids].copy()
-            ambiguous_ids = ambiguity_by_frame_all[frame_id]
+            ambiguous_ids = ambiguity_by_frame_all.get(
+                frame_id, np.empty(0, dtype=np.int64)
+            )
             if ambiguous_ids.size:
                 eligible_in_frame &= ~np.isin(
                     full_ids, ambiguous_ids, assume_unique=True
@@ -1048,6 +1502,7 @@ def run_mask_consensus(
         "raw_graph_identity": raw_graph_identity,
         "raw_pair_evidence_count": len(initial_pair_rows),
         "pair_evaluation_count": pair_evaluation_count,
+        "component_state_build_count": component_state_build_count,
         "undersegmented_mask_count": len(rejected),
         "undersegmented_source_frame_count": len(rejected_support_by_frame),
         "accepted_edge_count": len(accepted_edges),

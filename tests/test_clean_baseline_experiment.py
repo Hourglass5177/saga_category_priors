@@ -210,6 +210,84 @@ def test_prepared_scene_rejects_same_path_content_replacement(tmp_path: Path) ->
         experiment_module._prepare_registered_scene(config, scene_id)
 
 
+def test_imported_evidence_is_byte_validated_and_never_rebuilt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    scene_id = config.dev2[0]
+    producer_commit = "b" * 40
+    bank_dir = tmp_path / "imported-bank" / scene_id
+    bank_dir.mkdir(parents=True)
+    filenames = ("evidence.npz", "masks.json", "diagnostics.json")
+    for name in filenames:
+        (bank_dir / name).write_bytes(f"registered-{name}".encode("ascii"))
+
+    request_path = config.scenes[scene_id].evidence_request
+    request = load_json(request_path)
+    request["producer_commit"] = producer_commit
+    write_json(request_path, request)
+    payload = load_json(config.config_path)
+    payload["evidence_imports"] = {
+        scene_id: {
+            "schema": experiment_module.EVIDENCE_IMPORT_SCHEMA,
+            "bank_dir": str(bank_dir),
+            "producer_commit": producer_commit,
+            "files": {
+                name: sha256_file(bank_dir / name) for name in filenames
+            },
+        }
+    }
+    write_json(config.config_path, payload)
+    imported_config = CleanExperimentConfig.from_json(config.config_path)
+    assert imported_config.bank_dir(scene_id) == bank_dir.resolve()
+    assert experiment_module._state_identity(imported_config)["evidence_imports"][
+        scene_id
+    ]["producer_commit"] == producer_commit
+
+    build_calls: list[str] = []
+    monkeypatch.setattr(
+        experiment_module,
+        "evidence_request_source",
+        lambda **_kwargs: {"producer_commit": producer_commit},
+    )
+    monkeypatch.setattr(
+        experiment_module,
+        "evidence_bank_is_complete",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        experiment_module,
+        "load_evidence_bank",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            mask_count=7, source={"producer_commit": producer_commit}
+        ),
+    )
+    monkeypatch.setattr(
+        experiment_module,
+        "build_alpha_mask_evidence",
+        lambda **_kwargs: build_calls.append("built"),
+    )
+    result = experiment_module._default_build_evidence(
+        imported_config,
+        scene_id=scene_id,
+        request_path=request_path,
+        output_dir=bank_dir,
+    )
+    assert result["status"] == "reused-imported"
+    assert result["producer_commit"] == producer_commit
+    assert build_calls == []
+
+    (bank_dir / "evidence.npz").write_bytes(b"corrupt")
+    with pytest.raises(ValueError, match="byte identity changed"):
+        experiment_module._default_build_evidence(
+            imported_config,
+            scene_id=scene_id,
+            request_path=request_path,
+            output_dir=bank_dir,
+        )
+    assert build_calls == []
+
+
 def test_geometry_gate_uses_true_support_ceiling_not_greedy_subset() -> None:
     rows = []
     for _scene in DEV2:

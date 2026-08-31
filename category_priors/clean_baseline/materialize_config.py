@@ -6,8 +6,9 @@ This module is intentionally a one-time registration tool, not another
 runtime manifest layer.  It resolves the already existing tune/final assets,
 checks the preregistered physical-scene split, derives the official-valid
 tiny/small GT instance IDs, and writes one experiment config plus one evidence
-request per scene.  It does not download data, calculate content hashes, or
-create lock files.
+request per scene.  It does not download data or create lock files.  The only
+large-file hashes it calculates are for explicitly imported evidence banks,
+whose old producer bytes must be proved unchanged before reuse.
 """
 
 import argparse
@@ -21,7 +22,7 @@ from typing import Any
 import numpy as np
 
 from ..evaluator import apply_transform, load_ground_truth_npz, load_ply_xyz
-from ..io import load_json, read_rows, write_json
+from ..io import load_json, read_rows, sha256_file, write_json
 from ..runner import load_scene_runtime_manifest
 from ..scannet import physical_scene_id
 from ..taxonomy import load_taxonomy
@@ -30,7 +31,15 @@ from .experiment import (
     CONFIG_KIND,
     DEV2,
     DEV8,
+    EVIDENCE_IMPORT_SCHEMA,
     is_evaluation_only_runtime_field,
+)
+from .evidence import (
+    EVIDENCE_ARRAY_FILE,
+    EVIDENCE_DIAGNOSTICS_FILE,
+    EVIDENCE_METADATA_FILE,
+    evidence_bank_is_complete,
+    evidence_request_source,
 )
 from .identity_control import (
     IDENTITY_CONTROL_REGISTRATION_SCHEMA,
@@ -48,12 +57,95 @@ from .worker import DEFAULT_CLASSES, resolve_clean_scene_inputs
 
 REGISTRATION_SCHEMA = "saga-clean-baseline-registration-v1"
 REQUEST_SCHEMA = "saga-clean-alpha-mask-evidence-request-v1"
+EVIDENCE_IMPORT_MANIFEST_SCHEMA = "saga-clean-evidence-import-manifest-v1"
 IDENTITY_4X4 = (
     (1.0, 0.0, 0.0, 0.0),
     (0.0, 1.0, 0.0, 0.0),
     (0.0, 0.0, 1.0, 0.0),
     (0.0, 0.0, 0.0, 1.0),
 )
+
+
+def _resolve_from(base: Path, value: str | Path) -> Path:
+    path = Path(value)
+    return path.resolve() if path.is_absolute() else (base / path).resolve()
+
+
+def _load_evidence_imports(path: Path | None) -> dict[str, dict[str, Any]]:
+    """Load and byte-validate explicitly imported evidence producer outputs."""
+
+    if path is None:
+        return {}
+    source = Path(path).resolve()
+    payload = load_json(source)
+    if (
+        not isinstance(payload, Mapping)
+        or payload.get("schema") != EVIDENCE_IMPORT_MANIFEST_SCHEMA
+    ):
+        raise ValueError(
+            "evidence imports must use the registered import-manifest schema"
+        )
+    rows = payload.get("scenes")
+    if not isinstance(rows, Mapping):
+        raise TypeError("evidence import manifest.scenes must be an object")
+    base = source.parent
+    result: dict[str, dict[str, Any]] = {}
+    expected_files = {
+        EVIDENCE_ARRAY_FILE,
+        EVIDENCE_METADATA_FILE,
+        EVIDENCE_DIAGNOSTICS_FILE,
+    }
+    for raw_scene_id, raw in rows.items():
+        scene_id = str(raw_scene_id)
+        if not scene_id or not isinstance(raw, Mapping):
+            raise TypeError("each evidence import row must be a named object")
+        bank_dir = _resolve_from(base, raw["bank_dir"])
+        source_request = _resolve_from(base, raw["source_request"])
+        producer = str(raw.get("producer_commit", "")).strip()
+        files_raw = raw.get("files")
+        if len(producer) != 40 or any(
+            character not in "0123456789abcdef" for character in producer
+        ):
+            raise ValueError(
+                f"{scene_id}: imported producer_commit must be a full lowercase commit"
+            )
+        if not isinstance(files_raw, Mapping) or set(map(str, files_raw)) != expected_files:
+            raise ValueError(
+                f"{scene_id}: import must register exactly the three evidence files"
+            )
+        files = {str(key): str(value) for key, value in files_raw.items()}
+        for name, expected_digest in files.items():
+            if len(expected_digest) != 64 or any(
+                character not in "0123456789abcdef" for character in expected_digest
+            ):
+                raise ValueError(f"{scene_id}: invalid SHA-256 for imported {name}")
+            candidate = bank_dir / name
+            if not candidate.is_file():
+                raise FileNotFoundError(candidate)
+            if sha256_file(candidate) != expected_digest:
+                raise ValueError(
+                    f"{scene_id}: imported evidence byte identity changed for {name}"
+                )
+        request = load_json(source_request)
+        if not isinstance(request, Mapping) or request.get("schema") != REQUEST_SCHEMA:
+            raise ValueError(f"{scene_id}: imported evidence request has the wrong schema")
+        if request.get("producer_commit") != producer:
+            raise ValueError(f"{scene_id}: import/request producer commits differ")
+        expected_source = evidence_request_source(scene_id=scene_id, request=request)
+        if not evidence_bank_is_complete(
+            bank_dir,
+            expected_scene_id=scene_id,
+            expected_source=expected_source,
+        ):
+            raise ValueError(f"{scene_id}: imported evidence bank is incomplete")
+        result[scene_id] = {
+            "bank_dir": bank_dir,
+            "source_request": source_request,
+            "producer_commit": producer,
+            "files": files,
+            "request": dict(request),
+        }
+    return result
 
 
 def _scene_ids_from_spec(path: Path) -> tuple[str, ...]:
@@ -548,6 +640,7 @@ def materialize_clean_baseline_config(
     artifact_root: Path,
     output_dir: Path,
     code_commit: str,
+    evidence_imports: Path | None = None,
     b1_condition: str | None = None,
     tune_sam_root: Path | None = None,
     final_sam_root: Path | None = None,
@@ -597,6 +690,14 @@ def materialize_clean_baseline_config(
     final48 = tuple(final_runtime)
     if set(final48) != set(locked) or len(final48) != len(locked):
         raise ValueError("final runtime does not exactly match locked_evaluation_scenes")
+    imported_evidence = _load_evidence_imports(evidence_imports)
+    unknown_imports = sorted(
+        set(imported_evidence).difference(set(tune24).union(final48))
+    )
+    if unknown_imports:
+        raise ValueError(
+            f"evidence imports reference unregistered scenes: {unknown_imports}"
+        )
     split_report = _validate_split(
         tune24=tune24,
         final48=final48,
@@ -690,24 +791,43 @@ def materialize_clean_baseline_config(
             locked_spec_dir=Path(locked_evaluation_scenes).resolve().parent,
         )
         request_path = requests / f"{scene_id}.json"
-        request = {
-            "schema": REQUEST_SCHEMA,
-            "producer_commit": code_commit,
-            "classes": list(evidence_classes),
-            "runtime_registration": formal_runtime_registration,
-            "scene": scene,
-            "sam_generation": {
-                "output_root": str(
-                    Path(run_root).resolve() / "sam-everything" / scene_id
-                ),
-                "checkpoint": str(checkpoint),
-                "sam_arch": str(sam_arch),
-                "device": "cuda",
-                "config": dict(SAM_EVERYTHING_CONFIG),
-                "download_allowed": False,
-                "overwrite_registered_masks": False,
-            },
-        }
+        imported = imported_evidence.get(scene_id)
+        if imported is None:
+            request = {
+                "schema": REQUEST_SCHEMA,
+                "producer_commit": code_commit,
+                "classes": list(evidence_classes),
+                "runtime_registration": formal_runtime_registration,
+                "scene": scene,
+                "sam_generation": {
+                    "output_root": str(
+                        Path(run_root).resolve() / "sam-everything" / scene_id
+                    ),
+                    "checkpoint": str(checkpoint),
+                    "sam_arch": str(sam_arch),
+                    "device": "cuda",
+                    "config": dict(SAM_EVERYTHING_CONFIG),
+                    "download_allowed": False,
+                    "overwrite_registered_masks": False,
+                },
+            }
+        else:
+            request = dict(imported["request"])
+            if tuple(map(str, request.get("classes", ()))) != evidence_classes:
+                raise ValueError(
+                    f"{scene_id}: imported request class vocabulary changed"
+                )
+            if request.get("runtime_registration") != formal_runtime_registration:
+                raise ValueError(
+                    f"{scene_id}: imported request runtime registration changed"
+                )
+            request_scene = request.get("scene")
+            if not isinstance(request_scene, Mapping) or _formal_runtime_fields(
+                request_scene
+            ) != scene:
+                raise ValueError(
+                    f"{scene_id}: imported request scene registration changed"
+                )
         _write_identity_json(request_path, request)
         scenes[scene_id] = {
             "evidence_request": str(request_path),
@@ -731,6 +851,8 @@ def materialize_clean_baseline_config(
                 "grounded_labels": str(inputs.grounded_labels),
                 "asset_validation": "deferred-until-stage",
                 "tiny_small_derivation": "deferred-until-stage",
+                "evidence_producer_commit": str(request["producer_commit"]),
+                "evidence_imported": imported is not None,
             }
         )
 
@@ -767,6 +889,15 @@ def materialize_clean_baseline_config(
         "min_region_size": 100,
         "radius_m": 0.05,
         "identity_control_registration": identity_registration,
+        "evidence_imports": {
+            scene_id: {
+                "schema": EVIDENCE_IMPORT_SCHEMA,
+                "bank_dir": str(row["bank_dir"]),
+                "producer_commit": str(row["producer_commit"]),
+                "files": dict(row["files"]),
+            }
+            for scene_id, row in sorted(imported_evidence.items())
+        },
         "runtime_registration": {
             scene_id: _formal_runtime_fields(all_runtime[scene_id])
             for scene_id in tuple(tune24) + tuple(final48)
@@ -788,6 +919,7 @@ def materialize_clean_baseline_config(
         "locked_runtime_matches_spec": True,
         "identity_control_status": identity_registration["status"],
         "identity_control_issues": list(identity_registration["issues"]),
+        "imported_evidence_scene_ids": sorted(imported_evidence),
         **split_report,
         "scenes": scene_reports,
     }
@@ -814,6 +946,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--artifact-root", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--code-commit", required=True)
+    parser.add_argument(
+        "--evidence-imports",
+        type=Path,
+        help=(
+            "optional registered producer manifest for byte-identical evidence "
+            "banks that must be reused read-only"
+        ),
+    )
     parser.add_argument("--tune-sam-root", type=Path)
     parser.add_argument("--final-sam-root", type=Path)
     parser.add_argument("--sam-template", default="{root}/{scene_id}")
@@ -846,6 +986,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         artifact_root=args.artifact_root,
         output_dir=args.output_dir,
         code_commit=args.code_commit,
+        evidence_imports=args.evidence_imports,
         tune_sam_root=args.tune_sam_root,
         final_sam_root=args.final_sam_root,
         sam_template=args.sam_template,

@@ -14,7 +14,7 @@ from category_priors.clean_baseline.identity_control import (
 )
 from category_priors.clean_baseline.validation import HOLDOUT5
 from category_priors.clean_baseline.worker import DEFAULT_CLASSES
-from category_priors.io import hash_json, load_json, write_json
+from category_priors.io import hash_json, load_json, sha256_file, write_json
 from category_priors.taxonomy import default_taxonomy_path, load_taxonomy
 
 
@@ -234,6 +234,85 @@ def test_materializes_strict_config_and_separates_32_from_20(
         git_head_reader=lambda _path: commit,
     )
     assert again == result
+
+
+def test_materializer_registers_old_evidence_producer_without_changing_other_scenes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _fixture(tmp_path)
+    old_commit = "a" * 40
+    old_paths = dict(paths)
+    old_paths["run_root"] = tmp_path / "old-runs"
+    old_paths["artifact_root"] = tmp_path / "old-artifacts"
+    old_paths["output_dir"] = tmp_path / "old-registration"
+    old = module.materialize_clean_baseline_config(
+        **old_paths,
+        code_commit=old_commit,
+        git_head_reader=lambda _path: old_commit,
+    )
+    old_config = load_json(Path(old["config"]))
+    imported_scene = DEV8[0]
+    imported_bank = tmp_path / "copied-old-bank" / imported_scene
+    imported_bank.mkdir(parents=True)
+    evidence_files = ("evidence.npz", "masks.json", "diagnostics.json")
+    for name in evidence_files:
+        (imported_bank / name).write_bytes(f"old-{name}".encode("ascii"))
+    imports = tmp_path / "evidence-imports.json"
+    write_json(
+        imports,
+        {
+            "schema": module.EVIDENCE_IMPORT_MANIFEST_SCHEMA,
+            "scenes": {
+                imported_scene: {
+                    "bank_dir": str(imported_bank),
+                    "source_request": old_config["scenes"][imported_scene][
+                        "evidence_request"
+                    ],
+                    "producer_commit": old_commit,
+                    "files": {
+                        name: sha256_file(imported_bank / name)
+                        for name in evidence_files
+                    },
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "evidence_bank_is_complete",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        module,
+        "evidence_request_source",
+        lambda **_kwargs: {"producer_commit": old_commit},
+    )
+    new_commit = "b" * 40
+    new_paths = dict(paths)
+    new_paths["run_root"] = tmp_path / "new-runs"
+    new_paths["artifact_root"] = tmp_path / "new-artifacts"
+    new_paths["output_dir"] = tmp_path / "new-registration"
+    result = module.materialize_clean_baseline_config(
+        **new_paths,
+        code_commit=new_commit,
+        evidence_imports=imports,
+        git_head_reader=lambda _path: new_commit,
+    )
+    config = load_json(Path(result["config"]))
+    assert result["imported_evidence_scene_ids"] == [imported_scene]
+    assert config["evidence_imports"][imported_scene]["producer_commit"] == old_commit
+    assert config["evidence_imports"][imported_scene]["bank_dir"] == str(
+        imported_bank.resolve()
+    )
+    imported_request = load_json(
+        Path(config["scenes"][imported_scene]["evidence_request"])
+    )
+    normal_request = load_json(Path(config["scenes"][DEV8[1]]["evidence_request"]))
+    assert imported_request["producer_commit"] == old_commit
+    assert normal_request["producer_commit"] == new_commit
+    parsed = CleanExperimentConfig.from_json(Path(result["config"]))
+    assert parsed.bank_dir(imported_scene) == imported_bank.resolve()
+    assert parsed.bank_dir(DEV8[1]) == Path(new_paths["run_root"]) / "bank" / DEV8[1]
 
 
 def test_registers_existing_three_scene_identity_control_assets(

@@ -80,6 +80,7 @@ from .sam_inputs import (
 
 
 SCENE_INPUT_REGISTRATION_SCHEMA = "saga-clean-stage-scene-input-v1"
+EVIDENCE_IMPORT_SCHEMA = "saga-clean-evidence-import-v1"
 
 
 DEV2 = ("scene0645_00", "scene0025_01")
@@ -236,6 +237,51 @@ class CleanSceneSpec:
 
 
 @dataclass(frozen=True)
+class CleanEvidenceImport:
+    """Immutable registration for one evidence bank made by an older producer.
+
+    The imported bytes remain an input to the current consumer; they are never
+    a writable cache target.  Their three persisted files, source request, and
+    producer commit are all part of the recoverable experiment identity.
+    """
+
+    bank_dir: Path
+    producer_commit: str
+    files: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        root = Path(self.bank_dir).resolve()
+        producer = str(self.producer_commit).strip()
+        files = {str(key): str(value) for key, value in self.files.items()}
+        expected_files = {
+            EVIDENCE_ARRAY_FILE,
+            EVIDENCE_METADATA_FILE,
+            EVIDENCE_DIAGNOSTICS_FILE,
+        }
+        if len(producer) != 40 or any(
+            character not in "0123456789abcdef" for character in producer
+        ):
+            raise ValueError(
+                "imported evidence producer_commit must be a full lowercase git commit"
+            )
+        if set(files) != expected_files:
+            raise ValueError(
+                "imported evidence must register exactly evidence.npz, masks.json, "
+                "and diagnostics.json"
+            )
+        for name, digest in files.items():
+            if len(digest) != 64 or any(
+                character not in "0123456789abcdef" for character in digest
+            ):
+                raise ValueError(
+                    f"imported evidence {name} must have a lowercase SHA-256"
+                )
+        object.__setattr__(self, "bank_dir", root)
+        object.__setattr__(self, "producer_commit", producer)
+        object.__setattr__(self, "files", files)
+
+
+@dataclass(frozen=True)
 class CleanExperimentConfig:
     config_path: Path
     code_commit: str
@@ -250,6 +296,7 @@ class CleanExperimentConfig:
     b1_fixed_map_50_95: float
     b1_fixed_map_050: float
     scenes: Mapping[str, CleanSceneSpec]
+    evidence_imports: Mapping[str, CleanEvidenceImport]
     dev2: tuple[str, ...] = DEV2
     dev8: tuple[str, ...] = DEV8
     holdout5: tuple[str, ...] = HOLDOUT5
@@ -273,7 +320,12 @@ class CleanExperimentConfig:
         return self.artifact_root / "clean_baseline_analysis.json"
 
     def bank_dir(self, scene_id: str) -> Path:
-        return self.run_root / "bank" / scene_id
+        imported = self.evidence_imports.get(str(scene_id))
+        return (
+            imported.bank_dir
+            if imported is not None
+            else self.run_root / "bank" / scene_id
+        )
 
     def condition_dir(self, scene_id: str, condition: str) -> Path:
         return self.run_root / "conditions" / condition / scene_id
@@ -368,6 +420,29 @@ class CleanExperimentConfig:
             raise TypeError(
                 "config.identity_control_registration must be an object"
             )
+        raw_imports = payload.get("evidence_imports", {})
+        if not isinstance(raw_imports, Mapping):
+            raise TypeError("config.evidence_imports must be an object")
+        evidence_imports: dict[str, CleanEvidenceImport] = {}
+        for scene_id, raw in raw_imports.items():
+            if not isinstance(raw, Mapping):
+                raise TypeError(
+                    f"imported evidence registration for {scene_id!r} must be an object"
+                )
+            if raw.get("schema") != EVIDENCE_IMPORT_SCHEMA:
+                raise ValueError(
+                    f"imported evidence registration for {scene_id!r} has the wrong schema"
+                )
+            files = raw.get("files")
+            if not isinstance(files, Mapping):
+                raise TypeError(
+                    f"imported evidence registration for {scene_id!r} lacks file hashes"
+                )
+            evidence_imports[str(scene_id)] = CleanEvidenceImport(
+                bank_dir=_resolved(base, raw["bank_dir"]),
+                producer_commit=str(raw["producer_commit"]),
+                files={str(key): str(value) for key, value in files.items()},
+            )
         config = cls(
             config_path=source,
             code_commit=str(payload["code_commit"]),
@@ -389,6 +464,7 @@ class CleanExperimentConfig:
             b1_fixed_map_50_95=float(anchor["map_50_95"]),
             b1_fixed_map_050=float(anchor["map_0.50"]),
             scenes=scenes,
+            evidence_imports=evidence_imports,
             dev2=tuple(map(str, payload.get("dev2", DEV2))),
             dev8=tuple(map(str, payload.get("dev8", DEV8))),
             holdout5=tuple(map(str, payload.get("holdout5", HOLDOUT5))),
@@ -452,6 +528,11 @@ class CleanExperimentConfig:
         missing = sorted(registered_scenes.difference(self.scenes))
         if missing:
             raise ValueError(f"registered scene specifications are missing: {missing}")
+        unexpected_imports = sorted(set(self.evidence_imports).difference(registered_scenes))
+        if unexpected_imports:
+            raise ValueError(
+                f"imported evidence references unregistered scenes: {unexpected_imports}"
+            )
         if len(self.code_commit) != 40 or any(
             character not in "0123456789abcdef" for character in self.code_commit
         ):
@@ -498,6 +579,16 @@ class CleanExperimentConfig:
             if request.get("runtime_registration") != row:
                 raise ValueError(
                     f"{scene_id}: evidence request runtime registration drifted"
+                )
+            expected_producer = (
+                self.evidence_imports[scene_id].producer_commit
+                if scene_id in self.evidence_imports
+                else self.code_commit
+            )
+            if request.get("producer_commit") != expected_producer:
+                raise ValueError(
+                    f"{scene_id}: evidence request producer_commit differs from its "
+                    "registered producer"
                 )
             request_scene = request.get("scene")
             if not isinstance(request_scene, Mapping):
@@ -649,6 +740,15 @@ def _state_identity(config: CleanExperimentConfig) -> dict[str, Any]:
         "identity_control_registration": _json_safe(
             config.identity_control_registration
         ),
+        "evidence_imports": {
+            scene_id: {
+                "schema": EVIDENCE_IMPORT_SCHEMA,
+                "bank_dir": str(registration.bank_dir),
+                "producer_commit": registration.producer_commit,
+                "files": dict(registration.files),
+            }
+            for scene_id, registration in sorted(config.evidence_imports.items())
+        },
         "radius_m": config.radius_m,
         "min_region_size": config.min_region_size,
         "b1_fixed_map_50_95": config.b1_fixed_map_50_95,
@@ -1738,6 +1838,22 @@ def _validate_deployment_environment(
         raise ValueError(
             "registered code_commit does not match the deployed repository HEAD"
         )
+    imported_rows: list[dict[str, Any]] = []
+    for scene_id, registration in sorted(config.evidence_imports.items()):
+        bank = _load_imported_evidence_bank(
+            config,
+            scene_id=scene_id,
+            request_path=config.scenes[scene_id].evidence_request,
+            output_dir=registration.bank_dir,
+        )
+        imported_rows.append(
+            {
+                "scene_id": scene_id,
+                "producer_commit": registration.producer_commit,
+                "mask_count": int(bank.mask_count),
+                "status": "validated-read-only",
+            }
+        )
     # Invalid deployments fail without overwriting the last valid provenance.
     write_json(
         config.artifact_root / "clean_baseline_provenance.json", provenance
@@ -1747,6 +1863,7 @@ def _validate_deployment_environment(
         "tracked_worktree_clean": True,
         "category_priors_sha256": sha256_file(config.category_priors),
         "category_prior_splits": ["train"],
+        "imported_evidence": imported_rows,
     }
 
 
@@ -1778,10 +1895,15 @@ def _validate_registered_inputs(config: CleanExperimentConfig) -> dict[str, Any]
     )
     for scene_id in registered_scene_ids:
         request = load_json(config.scenes[scene_id].evidence_request)
-        if request.get("producer_commit") != config.code_commit:
+        expected_producer = (
+            config.evidence_imports[scene_id].producer_commit
+            if scene_id in config.evidence_imports
+            else config.code_commit
+        )
+        if request.get("producer_commit") != expected_producer:
             raise ValueError(
                 f"{scene_id}: evidence request producer_commit does not exactly "
-                "match the registered code_commit"
+                "match its registered evidence producer"
             )
         if tuple(map(str, request.get("classes", ()))) != (
             config.evidence_class_names
@@ -1962,7 +2084,12 @@ def _prepare_registered_scene(
             min_region_size=config.min_region_size,
         )
         source = evidence_request_source(scene_id=scene_id, request=prepared_request)
-        if source.get("producer_commit") != config.code_commit:
+        expected_producer = (
+            config.evidence_imports[scene_id].producer_commit
+            if scene_id in config.evidence_imports
+            else config.code_commit
+        )
+        if source.get("producer_commit") != expected_producer:
             raise ValueError("prepared evidence producer identity changed")
         parity_scene = load_ground_truth_npz(base.gt_npz, scene_id)[1]
         parity = evaluate_ground_truth_parity(
@@ -2204,6 +2331,53 @@ def _offline_oracle_is_complete(
         return False
 
 
+def _load_imported_evidence_bank(
+    config: CleanExperimentConfig,
+    *,
+    scene_id: str,
+    request_path: Path,
+    output_dir: Path,
+) -> Any:
+    """Strictly validate an imported producer artifact without rebuilding it."""
+
+    registration = config.evidence_imports.get(scene_id)
+    if registration is None:
+        raise KeyError(f"{scene_id}: evidence is not registered as imported")
+    if output_dir.resolve() != registration.bank_dir:
+        raise ValueError(f"{scene_id}: imported evidence bank path changed")
+    request = load_json(request_path)
+    expected_source = evidence_request_source(scene_id=scene_id, request=request)
+    if expected_source.get("producer_commit") != registration.producer_commit:
+        raise ValueError(f"{scene_id}: imported evidence producer identity changed")
+    for name, expected_digest in registration.files.items():
+        path = registration.bank_dir / name
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"{scene_id}: imported evidence file is missing: {path}"
+            )
+        actual_digest = sha256_file(path)
+        if actual_digest != expected_digest:
+            raise ValueError(
+                f"{scene_id}: imported evidence byte identity changed for {name}"
+            )
+    if not evidence_bank_is_complete(
+        registration.bank_dir,
+        expected_scene_id=scene_id,
+        expected_source=expected_source,
+    ):
+        raise ValueError(
+            f"{scene_id}: imported evidence bank failed its source/schema contract"
+        )
+    bank = load_evidence_bank(
+        registration.bank_dir,
+        expected_scene_id=scene_id,
+        expected_source=expected_source,
+    )
+    if str(bank.source.get("producer_commit", "")) != registration.producer_commit:
+        raise ValueError(f"{scene_id}: imported evidence embedded producer changed")
+    return bank
+
+
 def _default_build_evidence(
     config: CleanExperimentConfig, **kwargs: Any
 ) -> Mapping[str, Any]:
@@ -2212,6 +2386,19 @@ def _default_build_evidence(
     request = load_json(request_path)
     expected = evidence_request_source(scene_id=scene_id, request=request)
     output = Path(kwargs["output_dir"])
+    if scene_id in config.evidence_imports:
+        bank = _load_imported_evidence_bank(
+            config,
+            scene_id=scene_id,
+            request_path=request_path,
+            output_dir=output,
+        )
+        return {
+            "scene_id": scene_id,
+            "status": "reused-imported",
+            "producer_commit": config.evidence_imports[scene_id].producer_commit,
+            "mask_count": bank.mask_count,
+        }
     if evidence_bank_is_complete(
         output, expected_scene_id=scene_id, expected_source=expected
     ):
@@ -2897,6 +3084,8 @@ __all__ = [
     "CONFIG_KIND",
     "DEV2",
     "DEV8",
+    "EVIDENCE_IMPORT_SCHEMA",
+    "CleanEvidenceImport",
     "CleanExperimentConfig",
     "CleanExperimentHooks",
     "CleanSceneSpec",
