@@ -17,7 +17,7 @@ from typing import Any
 import numpy as np
 
 from ..evaluator import apply_transform, load_ground_truth_npz, load_ply_xyz
-from ..io import load_json, write_json
+from ..io import hash_json, load_json, sha256_file, write_json
 from ..taxonomy import load_taxonomy
 from .evaluation import (
     CleanCandidate,
@@ -25,7 +25,12 @@ from .evaluation import (
     ground_truth_objects_from_arrays,
     gt_point_to_gaussian_mapping,
 )
-from .evidence import load_evidence_bank
+from .evidence import (
+    EVIDENCE_ARRAY_FILE,
+    EVIDENCE_DIAGNOSTICS_FILE,
+    EVIDENCE_METADATA_FILE,
+    load_evidence_bank,
+)
 from .models import AlphaMaskEvidenceBank
 
 
@@ -785,6 +790,49 @@ def identity_control_result_is_complete(
         return False
 
 
+def build_identity_control_run_identity(
+    control: IdentityControlConfig,
+    scenes: Mapping[str, IdentitySceneInput],
+) -> dict[str, Any]:
+    """Bind the offline control to every byte that can affect its answer."""
+
+    if set(scenes) != set(control.assets):
+        raise ValueError("identity-control scene inputs differ from registered assets")
+    scene_rows: dict[str, Any] = {}
+    for scene_id in (*control.train_scene_ids, control.validation_scene_id):
+        scene = scenes[scene_id]
+        asset = control.assets[scene_id]
+        bank_root = Path(scene.bank_dir)
+        files = {
+            "feature_ply": sha256_file(asset.feature_ply),
+            "gaussian_ply": sha256_file(asset.gaussian_ply),
+            "gt_npz": sha256_file(scene.gt_npz),
+            "uniform_output_json": sha256_file(scene.uniform_output_json),
+            EVIDENCE_ARRAY_FILE: sha256_file(bank_root / EVIDENCE_ARRAY_FILE),
+            EVIDENCE_METADATA_FILE: sha256_file(bank_root / EVIDENCE_METADATA_FILE),
+            EVIDENCE_DIAGNOSTICS_FILE: sha256_file(
+                bank_root / EVIDENCE_DIAGNOSTICS_FILE
+            ),
+        }
+        scene_rows[scene_id] = {
+            "files": files,
+            "gaussian_to_gt_transform": [
+                list(map(float, row)) for row in scene.gaussian_to_gt_transform
+            ],
+            "evaluation_class_names": list(scene.evaluation_class_names),
+            "tiny_small_instance_ids": list(scene.tiny_small_instance_ids),
+            "min_region_size": int(scene.min_region_size),
+            "radius_m": float(scene.radius_m),
+        }
+    identity: dict[str, Any] = {
+        **control.identity(),
+        "implementation_sha256": sha256_file(Path(__file__)),
+        "scenes": scene_rows,
+    }
+    identity["content_sha256"] = hash_json(identity)
+    return identity
+
+
 def run_identity_edge_control(
     *,
     control: IdentityControlConfig,
@@ -793,12 +841,10 @@ def run_identity_edge_control(
 ) -> dict[str, Any]:
     """Run the preregistered offline identity capacity control exactly once."""
 
-    identity = control.identity()
+    identity = build_identity_control_run_identity(control, scenes)
     target = Path(output_path)
     if identity_control_result_is_complete(target, expected_identity=identity):
         return load_json(target)
-    if set(scenes) != set(control.assets):
-        raise ValueError("identity-control scene inputs differ from registered assets")
     prepared = {
         scene_id: _prepare_scene(control, scenes[scene_id])
         for scene_id in (*control.train_scene_ids, control.validation_scene_id)
@@ -930,6 +976,7 @@ __all__ = [
     "IdentityControlConfig",
     "IdentitySceneInput",
     "binary_auroc",
+    "build_identity_control_run_identity",
     "edge_components",
     "edge_feature_matrix",
     "fit_balanced_l2_logistic",

@@ -26,7 +26,12 @@ from ..runner import load_scene_runtime_manifest
 from ..scannet import physical_scene_id
 from ..taxonomy import load_taxonomy
 from .evaluation import gt_point_to_gaussian_mapping
-from .experiment import CONFIG_KIND, DEV2, DEV8
+from .experiment import (
+    CONFIG_KIND,
+    DEV2,
+    DEV8,
+    is_evaluation_only_runtime_field,
+)
 from .identity_control import (
     IDENTITY_CONTROL_REGISTRATION_SCHEMA,
     IDENTITY_CONTROL_SCHEMA,
@@ -201,6 +206,28 @@ def _runtime_with_overrides(
     if labels is not None:
         scene["grounded_labels_path"] = str(labels)
     return scene
+
+
+def _formal_runtime_fields(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Remove GT/evaluation-only fields before a worker request is written."""
+
+    def sanitized(item: Any) -> Any:
+        if isinstance(item, Mapping):
+            return {
+                str(key): sanitized(child)
+                for key, child in item.items()
+                if not is_evaluation_only_runtime_field(key)
+            }
+        if isinstance(item, list):
+            return [sanitized(child) for child in item]
+        if isinstance(item, tuple):
+            return [sanitized(child) for child in item]
+        return item
+
+    result = sanitized(value)
+    if not isinstance(result, dict):  # pragma: no cover - input contract
+        raise TypeError("formal runtime registration must remain an object")
+    return result
 
 
 def _validate_mask_roots(scene_id: str, *, sam: Path, masks: Path, labels: Path) -> None:
@@ -651,6 +678,8 @@ def materialize_clean_baseline_config(
         if not math.isfinite(scale) or scale <= 0:
             raise ValueError(f"{scene_id}: scene_scale_m_per_unit must be finite and positive")
         transform = _transform(scene_id, scene)
+        scene = _formal_runtime_fields(scene)
+        formal_runtime_registration = _formal_runtime_fields(raw)
         inputs = resolve_clean_scene_inputs(scene, require_exists=False)
         _prove_30k_ply(scene_id, scene, inputs.rgb_ply)
         locked_row = locked.get(scene_id) if is_final else None
@@ -665,7 +694,7 @@ def materialize_clean_baseline_config(
             "schema": REQUEST_SCHEMA,
             "producer_commit": code_commit,
             "classes": list(evidence_classes),
-            "runtime_registration": dict(raw),
+            "runtime_registration": formal_runtime_registration,
             "scene": scene,
             "sam_generation": {
                 "output_root": str(
@@ -739,7 +768,7 @@ def materialize_clean_baseline_config(
         "radius_m": 0.05,
         "identity_control_registration": identity_registration,
         "runtime_registration": {
-            scene_id: dict(all_runtime[scene_id])
+            scene_id: _formal_runtime_fields(all_runtime[scene_id])
             for scene_id in tuple(tune24) + tuple(final48)
         },
         "scenes": scenes,

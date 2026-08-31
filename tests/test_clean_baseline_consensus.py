@@ -151,6 +151,22 @@ def test_undersegmentation_treats_no_mask_evidence_as_nondiverse() -> None:
     assert detect_undersegmented_masks(observations, visibility) == ()
 
 
+def test_no_mask_evidence_does_not_dilute_undersegmentation_frequency() -> None:
+    full = np.arange(10)
+    observations = (
+        _observation(0, 0, full),
+        _observation(1, 1, np.arange(5)),
+        _observation(2, 1, np.arange(5, 10)),
+    )
+    # Frames 2--4 see the Gaussians but contain no mask observation.  They are
+    # not valid mask-distribution observers and must not turn 1/2 into 1/5.
+    visibility = np.ones((5, 10), dtype=bool)
+
+    rejected = detect_undersegmented_masks(observations, visibility)
+
+    assert 0 in rejected
+
+
 def test_undersegmentation_frequency_is_strictly_greater_than_thirty_percent() -> None:
     full = np.arange(10)
     observations: list[MaskObservation] = [_observation(0, 0, full)]
@@ -205,6 +221,55 @@ def test_iterative_consensus_merges_three_views_deterministically() -> None:
     assert len(forward.accepted_edges) == 2
     assert [obj.mask_ids for obj in reverse.objects] == [(100, 101, 102)]
     assert reverse.objects[0].gaussian_ids.tolist() == ids.tolist()
+
+
+def test_rejected_undersegment_mask_abstains_only_for_related_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shared = np.arange(4)
+    unrelated = np.arange(4, 8)
+    observations = (
+        _observation(0, 0, shared),
+        _observation(1, 1, shared),
+        _observation(2, 2, unrelated),
+    )
+    monkeypatch.setattr(
+        consensus_module,
+        "detect_undersegmented_masks",
+        lambda *_args, **_kwargs: (2,),
+    )
+
+    result = run_mask_consensus(
+        observations, np.ones((3, 8), dtype=bool), _line_points(8)
+    )
+
+    # Frame 2 remains valid negative observer evidence for masks 0/1 because
+    # the rejected mask is unrelated.  A global frame clear would falsely
+    # change their consensus from 2/3 to 1 and merge them.
+    assert result.objects == ()
+
+
+def test_rejected_undersegment_mask_withdraws_related_observer_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shared = np.arange(4)
+    observations = (
+        _observation(0, 0, shared),
+        _observation(1, 1, shared),
+        _observation(2, 2, shared),
+    )
+    monkeypatch.setattr(
+        consensus_module,
+        "detect_undersegmented_masks",
+        lambda *_args, **_kwargs: (2,),
+    )
+
+    result = run_mask_consensus(
+        observations, np.ones((3, 4), dtype=bool), _line_points(4)
+    )
+
+    assert len(result.objects) == 1
+    assert result.objects[0].mask_ids == (0, 1)
 
 
 def test_observer_percentiles_select_the_registered_top_fraction(
@@ -415,6 +480,25 @@ def test_consensus_outputs_one_object_per_disconnected_physical_part() -> None:
     ]
 
 
+def test_disconnected_one_view_fragment_does_not_inherit_parent_views() -> None:
+    main = np.arange(4)
+    observations = (
+        _observation(0, 0, np.arange(8)),
+        _observation(1, 1, main),
+    )
+    visibility = np.zeros((2, 8), dtype=bool)
+    visibility[0, :] = True
+    visibility[1, main] = True
+    xyz = np.vstack((_line_points(4), _line_points(4, start=1.0)))
+
+    result = run_mask_consensus(observations, visibility, xyz)
+
+    assert len(result.objects) == 1
+    assert result.objects[0].gaussian_ids.tolist() == main.tolist()
+    assert result.objects[0].mask_ids == (0, 1)
+    assert result.objects[0].frame_ids == (0, 1)
+
+
 def test_containment_dedup_keeps_higher_quality_candidate() -> None:
     low = ConsensusObject(0, (0, 1), (0, 1), np.arange(4), 0.8, 0.8, 0.8)
     high = ConsensusObject(1, (2, 3), (2, 3), np.arange(5), 0.9, 0.9, 0.9)
@@ -509,6 +593,14 @@ def test_pca_extents_are_rotation_translation_invariant_and_sorted() -> None:
 
     assert np.allclose(original, [1.0, 2.0, 4.0])
     assert np.allclose(transformed, original)
+
+
+def test_pca_extents_match_train_prior_definition_for_two_points() -> None:
+    # Train-prior pca_obb deliberately falls back to the axis-aligned box for
+    # fewer than three points; runtime gating must use the same convention.
+    points = np.asarray([[0.0, 0.0, 0.0], [1.0, 1.0, 0.0]])
+
+    assert np.allclose(pca_sorted_extents_m(points), [0.0, 1.0, 1.0])
 
 
 def test_size_q95_modes_and_missing_class_global_fallback() -> None:

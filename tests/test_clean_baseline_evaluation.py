@@ -52,7 +52,7 @@ def _candidate(
     )
 
 
-def test_geometry_oracles_keep_full_masks_and_monotonically_associate() -> None:
+def test_geometry_oracles_keep_full_masks_and_report_conservative_greedy() -> None:
     mapping = np.arange(12, dtype=np.int64)
     gt = [
         GroundTruthObject(
@@ -73,15 +73,16 @@ def test_geometry_oracles_keep_full_masks_and_monotonically_associate() -> None:
 
     row = result["per_gt"][0]
     assert row["best_single"] == pytest.approx(0.5)
-    assert row["perfect_association"] == pytest.approx(1.0)
-    assert row["perfect_association_mask_ids"] == ["left", "right"]
+    assert row["greedy_association"] == pytest.approx(1.0)
+    assert row["greedy_association_mask_ids"] == ["left", "right"]
     assert row["perfect_trim"] == pytest.approx(1.0)
     assert result["aggregate"]["tiny_small_official_valid"][
-        "perfect_association"
+        "greedy_association"
     ]["recall_050"] == 1.0
+    assert result["oracle_semantics"]["greedy_association_is_upper_bound"] is False
 
 
-def test_perfect_association_uses_at_most_one_mask_per_physical_view() -> None:
+def test_greedy_association_uses_at_most_one_mask_per_physical_view() -> None:
     result = evaluate_geometry_oracles(
         [np.asarray([0, 1]), np.asarray([2, 3])],
         [GroundTruthObject(1, "chair", np.arange(4))],
@@ -93,8 +94,8 @@ def test_perfect_association_uses_at_most_one_mask_per_physical_view() -> None:
 
     row = result["per_gt"][0]
     assert row["best_single"] == pytest.approx(0.5)
-    assert row["perfect_association"] == pytest.approx(0.5)
-    assert len(row["perfect_association_mask_ids"]) == 1
+    assert row["greedy_association"] == pytest.approx(0.5)
+    assert len(row["greedy_association_mask_ids"]) == 1
 
 
 def test_perfect_trim_removes_false_positive_point_support() -> None:
@@ -109,7 +110,7 @@ def test_perfect_trim_removes_false_positive_point_support() -> None:
 
     row = result["per_gt"][0]
     assert row["best_single"] == pytest.approx(2 / 6)
-    assert row["perfect_association"] == pytest.approx(2 / 6)
+    assert row["greedy_association"] == pytest.approx(2 / 6)
     assert row["perfect_trim"] == pytest.approx(0.5)
 
 

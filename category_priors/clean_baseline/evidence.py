@@ -58,6 +58,20 @@ _ARRAY_KEYS = {
 }
 
 
+def _integer_array(value: Any, dtype: Any, *, name: str) -> np.ndarray:
+    raw = np.asarray(value)
+    if raw.size == 0:
+        return np.asarray(raw, dtype=dtype)
+    if np.issubdtype(raw.dtype, np.bool_) or not np.issubdtype(
+        raw.dtype, np.integer
+    ):
+        raise TypeError(f"{name} must use an integer dtype")
+    limits = np.iinfo(np.dtype(dtype))
+    if np.any(raw < limits.min) or np.any(raw > limits.max):
+        raise ValueError(f"{name} cannot be represented as {np.dtype(dtype)}")
+    return np.asarray(raw, dtype=dtype)
+
+
 def _stream_file_digest(path: Path) -> tuple[int, str]:
     """Hash one immutable producer input without creating a sidecar file."""
 
@@ -173,15 +187,106 @@ def _colmap_camera_content_identity(sparse: Path) -> dict[str, Any]:
     }
 
 
-def _producer_input_identity(inputs: Any) -> dict[str, Any]:
+def _selected_tree_content_identity(
+    root: Path,
+    relative_paths: Sequence[str],
+    *,
+    kind: str,
+    allow_missing: bool,
+) -> dict[str, Any]:
+    """Bind only the registered files that the worker can actually consume.
+
+    Hashing an entire directory used to include stale ``.part`` files and
+    unrelated exports while still failing to describe which COLMAP frames
+    were absent.  This selected manifest records every expected relative path
+    and an explicit present/absent marker, then hashes present files in full.
+    """
+
+    base = root.resolve()
+    if base.exists() and not base.is_dir():
+        raise ValueError(f"evidence input root is not a directory: {base}")
+    normalized: list[str] = []
+    for value in relative_paths:
+        relative = Path(str(value))
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError(f"evidence input path must be relative: {value}")
+        canonical = relative.as_posix()
+        if not canonical or canonical in normalized:
+            raise ValueError("selected evidence paths must be non-empty and unique")
+        normalized.append(canonical)
+    manifest = hashlib.sha256()
+    present: list[str] = []
+    missing: list[str] = []
+    total_bytes = 0
+    for relative in normalized:
+        encoded = relative.encode("utf-8")
+        manifest.update(len(encoded).to_bytes(8, "big"))
+        manifest.update(encoded)
+        candidate = base / Path(relative)
+        if not candidate.exists():
+            if not allow_missing:
+                raise FileNotFoundError(f"missing registered evidence input: {candidate}")
+            manifest.update(b"\x00")
+            missing.append(relative)
+            continue
+        if not candidate.is_file():
+            raise ValueError(f"registered evidence input is not a file: {candidate}")
+        size, content_digest = _stream_file_digest(candidate)
+        manifest.update(b"\x01")
+        manifest.update(size.to_bytes(8, "big"))
+        manifest.update(bytes.fromhex(content_digest))
+        present.append(relative)
+        total_bytes += size
     return {
-        "schema": "saga-clean-evidence-input-content-v1",
+        "path": str(base),
+        "kind": kind,
+        "expected_file_count": len(normalized),
+        "file_count": len(present),
+        "missing_file_count": len(missing),
+        "total_bytes": int(total_bytes),
+        "relative_paths": present,
+        "missing_relative_paths": missing,
+        "manifest_sha256": manifest.hexdigest(),
+    }
+
+
+def _producer_input_identity(inputs: Any) -> dict[str, Any]:
+    from .sam_inputs import colmap_frame_specs
+
+    frames = colmap_frame_specs(Path(inputs.sparse))
+    image_paths = [frame.relative_image_path for frame in frames]
+    sam_paths = [f"{frame.image_name}.npz" for frame in frames]
+    grounded_paths = [f"{frame.image_name}.pt" for frame in frames]
+    images = _selected_tree_content_identity(
+        Path(inputs.images), image_paths, kind="registered-images", allow_missing=False
+    )
+    sam = _selected_tree_content_identity(
+        Path(inputs.sam_masks), sam_paths, kind="registered-sam-masks", allow_missing=False
+    )
+    grounded_masks = _selected_tree_content_identity(
+        Path(inputs.grounded_masks),
+        grounded_paths,
+        kind="registered-grounded-masks",
+        allow_missing=True,
+    )
+    grounded_labels = _selected_tree_content_identity(
+        Path(inputs.grounded_labels),
+        grounded_paths,
+        kind="registered-grounded-labels",
+        allow_missing=True,
+    )
+    if grounded_masks["missing_relative_paths"] != grounded_labels["missing_relative_paths"]:
+        raise ValueError(
+            "Grounded-SAM mask/label inputs must both exist or both abstain per frame"
+        )
+    return {
+        "schema": "saga-clean-evidence-input-content-v2",
         "gaussian_ply": _path_content_identity(Path(inputs.rgb_ply)),
         "colmap_cameras": _colmap_camera_content_identity(Path(inputs.sparse)),
-        "image_inputs": _path_content_identity(Path(inputs.images)),
-        "sam_everything_masks": _path_content_identity(Path(inputs.sam_masks)),
-        "grounded_masks": _path_content_identity(Path(inputs.grounded_masks)),
-        "grounded_labels": _path_content_identity(Path(inputs.grounded_labels)),
+        "image_inputs": images,
+        "sam_everything_masks": sam,
+        "grounded_masks": grounded_masks,
+        "grounded_labels": grounded_labels,
     }
 
 
@@ -295,7 +400,7 @@ def build_frame_evidence(
     if classes <= 0:
         raise ValueError("class_count must be positive")
     if global_mask_ids is not None:
-        ids = np.asarray(global_mask_ids, dtype=np.int64)
+        ids = _integer_array(global_mask_ids, np.int64, name="global_mask_ids")
         if ids.shape != (mask_count,):
             raise ValueError("global_mask_ids must have one value per mask")
     else:
@@ -308,7 +413,7 @@ def build_frame_evidence(
     local = (
         np.arange(mask_count, dtype=np.int32)
         if mask_indices is None
-        else np.asarray(mask_indices, dtype=np.int32)
+        else _integer_array(mask_indices, np.int32, name="mask_indices")
     )
     if local.shape != (mask_count,) or np.any(local < 0):
         raise ValueError("mask_indices must have one non-negative value per mask")
@@ -444,7 +549,7 @@ def build_sparse_frame_evidence(
     points = int(point_count)
     if points <= 0:
         raise ValueError("point_count must be positive")
-    visible = np.asarray(visible_ids, dtype=np.int32)
+    visible = _integer_array(visible_ids, np.int32, name="visible_ids")
     visible_values = np.asarray(visible_mass, dtype=np.float32)
     if (
         visible.ndim != 1
@@ -456,7 +561,10 @@ def build_sparse_frame_evidence(
         or np.any(visible_values < thresholds.visible_min_mass)
     ):
         raise ValueError("visible IDs/mass violate the packed visibility contract")
-    rows = tuple(np.asarray(row, dtype=np.int32) for row in mask_gaussian_ids)
+    rows = tuple(
+        _integer_array(row, np.int32, name="mask_gaussian_ids")
+        for row in mask_gaussian_ids
+    )
     masses = tuple(np.asarray(row, dtype=np.float32) for row in mask_inside_mass)
     ratios = tuple(np.asarray(row, dtype=np.float32) for row in mask_inside_ratio)
     count = len(rows)
@@ -493,10 +601,13 @@ def build_sparse_frame_evidence(
     expected_ambiguous = np.flatnonzero(membership_count > 1).astype(np.int32)
     if ambiguous_ids is not None:
         if isinstance(ambiguous_ids, np.ndarray) and ambiguous_ids.ndim == 1:
-            supplied_ambiguous = np.asarray(ambiguous_ids, dtype=np.int32)
+            supplied_ambiguous = _integer_array(
+                ambiguous_ids, np.int32, name="ambiguous_ids"
+            )
         else:
             ambiguity_rows = tuple(
-                np.asarray(row, dtype=np.int32) for row in ambiguous_ids
+                _integer_array(row, np.int32, name="ambiguous_ids")
+                for row in ambiguous_ids
             )
             if len(ambiguity_rows) != count:
                 raise ValueError("per-mask ambiguous IDs must match mask rows")
@@ -528,13 +639,15 @@ def build_sparse_frame_evidence(
             raise ValueError("global_mask_id_start must be non-negative")
         global_ids = np.arange(start, start + count, dtype=np.int64)
     else:
-        global_ids = np.asarray(global_mask_ids, dtype=np.int64)
+        global_ids = _integer_array(
+            global_mask_ids, np.int64, name="global_mask_ids"
+        )
     if global_ids.shape != (count,) or np.any(global_ids < 0) or len(np.unique(global_ids)) != count:
         raise ValueError("global mask IDs must be unique, non-negative, and match rows")
     local = (
         np.arange(count, dtype=np.int32)
         if mask_indices is None
-        else np.asarray(mask_indices, dtype=np.int32)
+        else _integer_array(mask_indices, np.int32, name="mask_indices")
     )
     if (
         local.shape != (count,)
@@ -759,6 +872,12 @@ def save_evidence_bank(
     )
     if not overwrite and any(path.exists() for path in files):
         raise FileExistsError(f"evidence target is occupied: {target}")
+    if overwrite:
+        # masks.json is the completion marker.  Invalidate it *before* any
+        # constituent file is replaced so an interruption can never expose a
+        # new NPZ together with stale metadata from the previous bank.  The
+        # runner will treat the directory as incomplete and safely rebuild it.
+        files[1].unlink(missing_ok=True)
     _write_npz_atomic(files[0], _arrays(bank))
     _write_json_atomic(files[2], _diagnostics(bank))
     # Metadata is written last and therefore acts as the completion marker.
@@ -1067,7 +1186,11 @@ def build_alpha_mask_evidence(
             global_mask_id_start=next_global_mask_id,
             mask_indices=[int(mask.mask_index) for mask in supports],
             valid_pixel_count=int(record.valid_pixel_count),
-            geometry_abstained=False,
+            # A valid packed file with zero SAM masks means that this frame
+            # supplied no geometric object observation.  Preserve rendered
+            # visibility for audit, but do not let the empty observation act
+            # as negative cross-view evidence.
+            geometry_abstained=not supports,
             class_count=len(classes),
         )
         frames.append(frame)

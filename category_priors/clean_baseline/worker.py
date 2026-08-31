@@ -15,6 +15,8 @@ from typing import Any, Callable, Iterator, Mapping, Sequence
 
 import numpy as np
 
+from .sam_inputs import PackedMaskFrame, colmap_frame_specs, load_packed_mask_frame
+
 
 DEFAULT_CLASSES: tuple[str, ...] = (
     "chair", "table", "plant", "flower", "foliage", "tv", "painting",
@@ -61,6 +63,16 @@ class RenderedFrameEvidence:
 class _MaskBatch:
     indices: tuple[int, ...]
     targets: np.ndarray
+
+
+@dataclass(frozen=True)
+class _GroundedSemanticIndex:
+    packed_masks: np.ndarray
+    mask_area: np.ndarray
+    labels: np.ndarray
+    height: int
+    width: int
+    class_count: int
 
 
 def _resolve_path(
@@ -153,18 +165,24 @@ def resolve_clean_scene_inputs(
     return result
 
 
-def iter_mask_batches(masks: np.ndarray) -> Iterator[_MaskBatch]:
+def iter_mask_batches(masks: np.ndarray | PackedMaskFrame) -> Iterator[_MaskBatch]:
     # Keep the scene-sized mask stack in its compact source dtype (normally
     # bool/uint8).  Converting it here used to materialise a second float32
     # copy of every mask in the frame before the first render.
-    array = np.asarray(masks)
-    if array.ndim != 3:
-        raise ValueError("masks must have shape MxHxW")
-    for start in range(0, len(array), 3):
-        stop = min(start + 3, len(array))
-        targets = np.zeros((3, *array.shape[1:]), dtype=np.float32)
+    if isinstance(masks, PackedMaskFrame):
+        count, height, width = masks.count, masks.height, masks.width
+        dense_batch = masks.dense_batch
+    else:
+        array = np.asarray(masks)
+        if array.ndim != 3:
+            raise ValueError("masks must have shape MxHxW")
+        count, height, width = array.shape
+        dense_batch = lambda start, stop: array[start:stop]
+    for start in range(0, count, 3):
+        stop = min(start + 3, count)
+        targets = np.zeros((3, height, width), dtype=np.float32)
         targets[: stop - start] = np.asarray(
-            array[start:stop], dtype=np.float32
+            dense_batch(start, stop), dtype=np.float32
         )
         yield _MaskBatch(tuple(range(start, stop)), targets)
 
@@ -259,6 +277,89 @@ def _popcount_rows(packed: np.ndarray) -> np.ndarray:
     return lookup[np.asarray(packed, dtype=np.uint8)].sum(axis=-1, dtype=np.int64)
 
 
+def _prepare_grounded_semantics(
+    grounded_masks: np.ndarray | None,
+    grounded_labels: np.ndarray | None,
+    *,
+    height: int,
+    width: int,
+    class_count: int,
+) -> _GroundedSemanticIndex | None:
+    if grounded_masks is None and grounded_labels is None:
+        return None
+    if grounded_masks is None or grounded_labels is None:
+        raise ValueError("Grounded masks and labels must both exist or both abstain")
+    grounded = np.asarray(grounded_masks, dtype=bool)
+    raw_labels = np.asarray(grounded_labels).reshape(-1)
+    if grounded.ndim != 3 or grounded.shape[1:] != (int(height), int(width)):
+        raise ValueError("Grounded masks must match SAM mask image shape")
+    if len(grounded) != len(raw_labels):
+        raise ValueError("Grounded masks and labels have different lengths")
+    if np.issubdtype(raw_labels.dtype, np.bool_) or not np.issubdtype(
+        raw_labels.dtype, np.integer
+    ):
+        raise ValueError("Grounded labels must use an integer dtype")
+    labels = raw_labels.astype(np.int32, copy=False)
+    if np.any(labels < 0) or np.any(labels >= int(class_count)):
+        raise ValueError("Grounded class ID is outside the complete class vocabulary")
+    pixels = int(height) * int(width)
+    packed = np.packbits(grounded.reshape(len(grounded), pixels), axis=1)
+    return _GroundedSemanticIndex(
+        packed_masks=packed,
+        mask_area=_popcount_rows(packed),
+        labels=labels,
+        height=int(height),
+        width=int(width),
+        class_count=int(class_count),
+    )
+
+
+def _class_probabilities_against_index(
+    sam_masks: np.ndarray,
+    grounded: _GroundedSemanticIndex | None,
+    *,
+    iou_threshold: float,
+    chunk_size: int,
+    class_count: int,
+) -> tuple[np.ndarray, bool]:
+    sam = np.asarray(sam_masks, dtype=bool)
+    if sam.ndim != 3:
+        raise ValueError("SAM masks must be MxHxW")
+    result = np.zeros((len(sam), int(class_count)), dtype=np.float32)
+    if grounded is None:
+        return result, True
+    if (
+        sam.shape[1:] != (grounded.height, grounded.width)
+        or int(class_count) != grounded.class_count
+    ):
+        raise ValueError("SAM and Grounded semantic geometry/classes disagree")
+    pixels = grounded.height * grounded.width
+    sam_packed = np.packbits(sam.reshape(len(sam), pixels), axis=1)
+    sam_area = _popcount_rows(sam_packed)
+    for start in range(0, len(sam), max(1, int(chunk_size))):
+        stop = min(start + max(1, int(chunk_size)), len(sam))
+        for local, packed in enumerate(sam_packed[start:stop]):
+            intersection = _popcount_rows(
+                np.bitwise_and(grounded.packed_masks, packed[None, :])
+            )
+            union = sam_area[start + local] + grounded.mask_area - intersection
+            iou = np.divide(
+                intersection,
+                union,
+                out=np.zeros_like(intersection, dtype=np.float64),
+                where=union > 0,
+            )
+            for class_id in np.unique(grounded.labels):
+                class_iou = iou[grounded.labels == class_id]
+                if class_iou.size:
+                    score = float(np.max(class_iou))
+                    if score >= float(iou_threshold):
+                        result[start + local, int(class_id)] = score
+    normalizer = result.sum(axis=1, keepdims=True)
+    np.divide(result, normalizer, out=result, where=normalizer > 0)
+    return result, False
+
+
 def mask_class_probabilities(
     sam_masks: np.ndarray,
     grounded_masks: np.ndarray | None,
@@ -273,46 +374,20 @@ def mask_class_probabilities(
     sam = np.asarray(sam_masks, dtype=bool)
     if sam.ndim != 3:
         raise ValueError("SAM masks must be MxHxW")
-    result = np.zeros((len(sam), int(class_count)), dtype=np.float32)
-    if grounded_masks is None and grounded_labels is None:
-        return result, True
-    if grounded_masks is None or grounded_labels is None:
-        raise ValueError("Grounded masks and labels must both exist or both abstain")
-    grounded = np.asarray(grounded_masks, dtype=bool)
-    labels = np.asarray(grounded_labels).reshape(-1)
-    if grounded.ndim != 3 or grounded.shape[1:] != sam.shape[1:]:
-        raise ValueError("Grounded masks must match SAM mask image shape")
-    if len(grounded) != len(labels):
-        raise ValueError("Grounded masks and labels have different lengths")
-    if np.any(labels < 0) or np.any(labels >= class_count):
-        raise ValueError("Grounded class ID is outside the complete class vocabulary")
-    pixels = int(np.prod(sam.shape[1:]))
-    sam_packed = np.packbits(sam.reshape(len(sam), pixels), axis=1)
-    grounded_packed = np.packbits(grounded.reshape(len(grounded), pixels), axis=1)
-    sam_area = _popcount_rows(sam_packed)
-    grounded_area = _popcount_rows(grounded_packed)
-    for start in range(0, len(sam), max(1, int(chunk_size))):
-        stop = min(start + max(1, int(chunk_size)), len(sam))
-        for local, packed in enumerate(sam_packed[start:stop]):
-            intersection = _popcount_rows(
-                np.bitwise_and(grounded_packed, packed[None, :])
-            )
-            union = sam_area[start + local] + grounded_area - intersection
-            iou = np.divide(
-                intersection,
-                union,
-                out=np.zeros_like(intersection, dtype=np.float64),
-                where=union > 0,
-            )
-            for class_id in np.unique(labels):
-                class_iou = iou[labels == class_id]
-                if class_iou.size:
-                    score = float(np.max(class_iou))
-                    if score >= float(iou_threshold):
-                        result[start + local, int(class_id)] = score
-    normalizer = result.sum(axis=1, keepdims=True)
-    np.divide(result, normalizer, out=result, where=normalizer > 0)
-    return result, False
+    index = _prepare_grounded_semantics(
+        grounded_masks,
+        grounded_labels,
+        height=sam.shape[1],
+        width=sam.shape[2],
+        class_count=int(class_count),
+    )
+    return _class_probabilities_against_index(
+        sam,
+        index,
+        iou_threshold=float(iou_threshold),
+        chunk_size=int(chunk_size),
+        class_count=int(class_count),
+    )
 
 
 def _resize_masks(value: Any, height: int, width: int) -> np.ndarray:
@@ -329,25 +404,23 @@ def _resize_masks(value: Any, height: int, width: int) -> np.ndarray:
 
 
 def load_sam_masks(root: Path, image_name: str, height: int, width: int) -> np.ndarray:
+    """Compatibility helper that expands one complete frame.
+
+    Production rendering uses :func:`load_packed_sam_frame` and never calls
+    this eager helper.
+    """
+
+    frame = load_packed_sam_frame(root, image_name, height, width)
+    return frame.dense_batch(0, frame.count)
+
+
+def load_packed_sam_frame(
+    root: Path, image_name: str, height: int, width: int
+) -> PackedMaskFrame:
     path = Path(root) / f"{image_name}.npz"
     if not path.is_file():
         raise FileNotFoundError(f"missing SAM-everything mask frame: {path}")
-    try:
-        with np.load(path, allow_pickle=False) as payload:
-            packed = np.asarray(payload["packed"], dtype=np.uint8)
-            count = int(np.asarray(payload["count"]).item())
-            stored_height = int(np.asarray(payload["height"]).item())
-            stored_width = int(np.asarray(payload["width"]).item())
-    except (OSError, ValueError, KeyError, EOFError) as error:
-        raise ValueError(f"invalid packed SAM-everything frame: {path}") from error
-    if (stored_height, stored_width) != (height, width):
-        raise ValueError("SAM-everything frame and rendered camera shapes differ")
-    expected = (count, (height * width + 7) // 8)
-    if count < 0 or packed.shape != expected:
-        raise ValueError(f"invalid packed SAM-everything payload: {path}")
-    return np.unpackbits(packed, axis=1, count=height * width).reshape(
-        count, height, width
-    ).astype(bool, copy=False)
+    return load_packed_mask_frame(path, height=height, width=width)
 
 
 def _load_grounded(camera: Any) -> tuple[np.ndarray | None, np.ndarray | None]:
@@ -367,7 +440,17 @@ def _load_grounded(camera: Any) -> tuple[np.ndarray | None, np.ndarray | None]:
     return resized, label_array.astype(np.int16, copy=False)
 
 
-def _load_cameras(inputs: CleanSceneInputs) -> list[Any]:
+def _load_cameras(inputs: CleanSceneInputs) -> Iterator[Any]:
+    """Yield exactly one registered camera at a time.
+
+    The historical helper materialised every RGB image and every Grounded-SAM
+    tensor before rendering the first frame.  On a long ScanNet sequence that
+    can exhaust both host and GPU memory.  This iterator keeps only COLMAP's
+    small pose dictionaries resident and loads one image/mask/label triple per
+    yield.
+    """
+
+    from PIL import Image
     from scene.colmap_loader import (
         read_extrinsics_binary,
         read_extrinsics_text,
@@ -375,7 +458,7 @@ def _load_cameras(inputs: CleanSceneInputs) -> list[Any]:
         read_intrinsics_text,
     )
     from scene.dataset_readers import readColmapCameras
-    from utils.camera_utils import cameraList_from_camInfos
+    from utils.camera_utils import loadCam
 
     try:
         extrinsics = read_extrinsics_binary(str(inputs.sparse / "images.bin"))
@@ -383,17 +466,57 @@ def _load_cameras(inputs: CleanSceneInputs) -> list[Any]:
     except (FileNotFoundError, OSError):
         extrinsics = read_extrinsics_text(str(inputs.sparse / "images.txt"))
         intrinsics = read_intrinsics_text(str(inputs.sparse / "cameras.txt"))
-    infos = readColmapCameras(
-        extrinsics,
-        intrinsics,
-        str(inputs.images),
-        masks_folder=str(inputs.grounded_masks),
-        labels_folder=str(inputs.grounded_labels),
+    expected = colmap_frame_specs(inputs.sparse)
+    expected_names = tuple(frame.image_name for frame in expected)
+    ordered_extrinsics = sorted(
+        extrinsics.items(),
+        key=lambda item: str(
+            Path(str(item[1].name).replace("\\", "/")).with_suffix("")
+        ).replace("\\", "/"),
     )
+    actual_names = tuple(
+        str(
+            Path(str(extrinsic.name).replace("\\", "/")).with_suffix("")
+        ).replace("\\", "/")
+        for _, extrinsic in ordered_extrinsics
+    )
+    if actual_names != expected_names or len(ordered_extrinsics) != len(expected):
+        raise ValueError(
+            "rendered camera order/names differ from the COLMAP registration"
+        )
     args = SimpleNamespace(resolution=1, data_device="cuda")
-    return sorted(
-        cameraList_from_camInfos(infos, 1, args), key=lambda item: item.image_name
-    )
+    for stable_id, ((key, extrinsic), frame) in enumerate(
+        zip(ordered_extrinsics, expected, strict=True)
+    ):
+        image_path = inputs.images / frame.relative_image_path
+        if not image_path.is_file():
+            raise FileNotFoundError(f"missing exact COLMAP image: {image_path}")
+        with Image.open(image_path) as image:
+            if image.size != (frame.width, frame.height):
+                raise ValueError(
+                    f"{frame.image_name}: image dimensions differ from COLMAP"
+                )
+        infos = readColmapCameras(
+            {key: extrinsic},
+            intrinsics,
+            str(inputs.images),
+            masks_folder=str(inputs.grounded_masks),
+            labels_folder=str(inputs.grounded_labels),
+        )
+        if len(infos) != 1:
+            raise RuntimeError(f"{frame.image_name}: camera loader did not return one frame")
+        info = infos[0]
+        try:
+            camera = loadCam(args, stable_id, info, 1)
+        finally:
+            if getattr(info, "image", None) is not None:
+                info.image.close()
+        if (int(camera.image_height), int(camera.image_width)) != (
+            frame.height,
+            frame.width,
+        ) or str(camera.image_name) != frame.image_name:
+            raise ValueError(f"{frame.image_name}: loaded camera disagrees with COLMAP")
+        yield camera
 
 
 def render_frame_evidence(
@@ -401,7 +524,7 @@ def render_frame_evidence(
     gaussians: Any,
     pipeline: Any,
     background: Any,
-    sam_masks: np.ndarray,
+    sam_masks: np.ndarray | PackedMaskFrame,
     *,
     render_mask_fn: Callable[..., Mapping[str, Any]] | None = None,
     class_count: int = 32,
@@ -413,12 +536,20 @@ def render_frame_evidence(
     if render_mask_fn is None:
         from gaussian_renderer import render_mask as render_mask_fn
     height, width = int(camera.image_height), int(camera.image_width)
-    masks = np.asarray(sam_masks, dtype=bool)
-    if masks.ndim != 3 or masks.shape[1:] != (height, width):
-        raise ValueError("SAM masks must match the rendered camera")
+    if isinstance(sam_masks, PackedMaskFrame):
+        if (sam_masks.height, sam_masks.width) != (height, width):
+            raise ValueError("SAM masks must match the rendered camera")
+        mask_count = sam_masks.count
+        masks: np.ndarray | PackedMaskFrame = sam_masks
+    else:
+        dense_masks = np.asarray(sam_masks, dtype=bool)
+        if dense_masks.ndim != 3 or dense_masks.shape[1:] != (height, width):
+            raise ValueError("SAM masks must match the rendered camera")
+        mask_count = len(dense_masks)
+        masks = dense_masks
     point_count = int(gaussians.get_xyz.shape[0])
     batches: Iterator[_MaskBatch]
-    if len(masks):
+    if mask_count:
         batches = iter_mask_batches(masks)
     else:
         batches = iter(
@@ -427,6 +558,16 @@ def render_frame_evidence(
     visible_mass: np.ndarray | None = None
     valid_pixel_count = 0
     support_rows: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+    semantic_rows: list[np.ndarray] = []
+    grounded_masks, grounded_labels = _load_grounded(camera)
+    grounded_index = _prepare_grounded_semantics(
+        grounded_masks,
+        grounded_labels,
+        height=height,
+        width=width,
+        class_count=int(class_count),
+    )
+    grounded_abstained = grounded_index is None
     for batch_number, batch in enumerate(batches):
         probe = torch.ones(
             (point_count, 3),
@@ -472,15 +613,20 @@ def render_frame_evidence(
             )
             assert visible_mass is not None
             support_rows.extend(sparse_support_from_mass(inside, visible_mass))
+            class_rows, batch_abstained = _class_probabilities_against_index(
+                batch.targets[: len(batch.indices)] > 0.5,
+                grounded_index,
+                iou_threshold=0.25,
+                chunk_size=8,
+                class_count=class_count,
+            )
+            if bool(batch_abstained) != grounded_abstained:
+                raise RuntimeError("Grounded-SAM abstention changed within one frame")
+            semantic_rows.extend(class_rows)
     if visible_mass is None:
         raise RuntimeError("alpha-mass visibility gradient was not produced")
-    grounded_masks, grounded_labels = _load_grounded(camera)
-    class_probs, abstained = mask_class_probabilities(
-        masks,
-        grounded_masks,
-        grounded_labels,
-        class_count=class_count,
-    )
+    if len(support_rows) != mask_count or len(semantic_rows) != mask_count:
+        raise RuntimeError("mask streaming lost or duplicated an observation row")
     ambiguous = mark_same_frame_ambiguity(
         [row[0] for row in support_rows], point_count
     )
@@ -491,7 +637,7 @@ def render_frame_evidence(
             inside_mass=row[1],
             inside_ratio=row[2],
             ambiguous_ids=ambiguous[index],
-            class_probabilities=class_probs[index],
+            class_probabilities=np.asarray(semantic_rows[index], dtype=np.float32),
         )
         for index, row in enumerate(support_rows)
     )
@@ -502,7 +648,7 @@ def render_frame_evidence(
         visible_ids=visible_ids,
         visible_mass=visible_mass[visible_ids].astype(np.float32),
         masks=supports,
-        grounded_abstained=abstained,
+        grounded_abstained=grounded_abstained,
         valid_pixel_count=valid_pixel_count,
     )
 
@@ -526,7 +672,7 @@ def render_scene_frames(
     background = torch.zeros(3, dtype=torch.float32, device="cuda")
     records: list[RenderedFrameEvidence] = []
     for stable_frame_id, camera in enumerate(_load_cameras(inputs)):
-        masks = load_sam_masks(
+        masks = load_packed_sam_frame(
             inputs.sam_masks,
             str(camera.image_name),
             int(camera.image_height),

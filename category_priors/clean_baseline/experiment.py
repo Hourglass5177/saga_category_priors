@@ -22,8 +22,10 @@ import numpy as np
 
 from ..evaluator import apply_transform, load_ground_truth_npz, load_ply_xyz
 from ..io import hash_json, load_json, sha256_file, write_json, write_rows
+from ..priors import validate_priors
 from .consensus import ConsensusConfig, MaskObservation, run_mask_consensus
 from .evaluation import (
+    RUN_IDENTITY_SCHEMA,
     CleanCandidate,
     evaluate_candidates,
     evaluate_clean_baseline_manifest,
@@ -100,11 +102,102 @@ OFFLINE_ORACLE_IDENTITY_SCHEMA = (
 GEOMETRY_ORACLE_SCHEMA = "saga-clean-alpha-mask-geometry-oracle-v2"
 ORACLE_SIZE_SCHEMA = "saga-clean-alpha-mask-oracle-size-v2"
 GEOMETRY_ORACLE_IMPLEMENTATION = (
-    "complete-mask-single-greedy-perfect-trim-v2"
+    "complete-mask-single-conservative-greedy-perfect-trim-ceiling-v3"
 )
 ORACLE_SIZE_IMPLEMENTATION = (
     "gt-class-size-veto-mask-consensus-v2"
 )
+
+# A recoverable run is still a preregistered state machine.  Persisting the
+# previous checkpoint is not sufficient: a truncated or hand-edited state
+# must not be able to jump directly to holdout/final evaluation.
+COMPLETED_STAGE_SEQUENCE = (
+    "validated",
+    "dev2-evidence",
+    "dev2-geometry-oracle",
+    "dev2-c0-u",
+    "dev2-prior",
+    "dev8-evidence",
+    "dev8-uniform",
+    "dev8-prior",
+    "holdout5-evidence",
+    "holdout5-evaluate",
+    "tune24-evidence",
+    "tune24-evaluate",
+    "final48-evidence",
+    "final48-evaluate",
+)
+ACTIVE_NEXT_STAGE = {
+    "initialized": "validated",
+    **{
+        stage: COMPLETED_STAGE_SEQUENCE[index + 1]
+        for index, stage in enumerate(COMPLETED_STAGE_SEQUENCE[:-1])
+    },
+}
+STOP_PREDECESSOR = {
+    "dev2-inputs-unavailable": "validated",
+    "dev2-geometry-gate-failed": "dev2-evidence",
+    "dev2-uniform-gate-failed": "dev2-geometry-oracle",
+    "dev2-prior-intervention-inactive": "dev2-c0-u",
+    "dev8-inputs-unavailable": "dev2-prior",
+    "dev8-uniform-gate-failed": "dev8-evidence",
+    "dev8-prior-gate-failed": "dev8-uniform",
+    "holdout5-inputs-unavailable": "dev8-prior",
+    "holdout5-gate-failed": "holdout5-evidence",
+    "tune24-inputs-unavailable": "holdout5-evaluate",
+    "tune24-gate-failed": "tune24-evidence",
+    "final48-inputs-unavailable": "tune24-evaluate",
+    "final48-gate-failed": "final48-evidence",
+}
+
+# These fields belong to offline evaluation, never to the formal evidence
+# worker.  Historical runtime manifests occasionally carried them alongside
+# rendering assets, so the materializer strips them before writing a worker
+# request and validation rejects any later reintroduction.
+EVALUATION_ONLY_RUNTIME_FIELDS = frozenset(
+    {
+        "gt",
+        "gt_npz",
+        "gt_path",
+        "ground_truth",
+        "ground_truth_path",
+        "replacement_gt",
+        "replacement_gt_npz",
+        "gaussian_to_gt_transform",
+        "tiny_small_instance_ids",
+    }
+)
+
+
+def is_evaluation_only_runtime_field(name: Any) -> bool:
+    normalized = str(name).strip().lower()
+    return (
+        normalized in EVALUATION_ONLY_RUNTIME_FIELDS
+        or normalized.startswith("gt_")
+        or normalized.endswith("_gt")
+        or "ground_truth" in normalized
+    )
+
+
+def evaluation_only_runtime_paths(
+    value: Any, *, prefix: str = ""
+) -> tuple[str, ...]:
+    """Locate forbidden GT/evaluation fields at any request nesting depth."""
+
+    found: list[str] = []
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            name = str(key)
+            path = f"{prefix}.{name}" if prefix else name
+            if is_evaluation_only_runtime_field(name):
+                found.append(path)
+            else:
+                found.extend(evaluation_only_runtime_paths(item, prefix=path))
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            path = f"{prefix}[{index}]" if prefix else f"[{index}]"
+            found.extend(evaluation_only_runtime_paths(item, prefix=path))
+    return tuple(found)
 
 
 def _resolved(base: Path, value: str | Path) -> Path:
@@ -213,6 +306,16 @@ class CleanExperimentConfig:
         request = Path(str(payload["prepared_request"])).resolve()
         if not request.is_file():
             raise FileNotFoundError(request)
+        content_identity = payload.get("content_identity")
+        if not isinstance(content_identity, Mapping):
+            raise ValueError(f"{scene_id}: prepared scene lacks a content identity")
+        expected_content = {
+            "prepared_request_sha256": sha256_file(request),
+            "gt_npz_sha256": sha256_file(base.gt_npz),
+            "gaussian_ply_sha256": sha256_file(base.gaussian_ply),
+        }
+        if dict(content_identity) != expected_content:
+            raise ValueError(f"{scene_id}: prepared scene input content changed")
         if Path(str(payload["gt_npz"])).resolve() != base.gt_npz:
             raise ValueError(f"{scene_id}: prepared GT path changed")
         if Path(str(payload["gaussian_ply"])).resolve() != base.gaussian_ply:
@@ -396,6 +499,18 @@ class CleanExperimentConfig:
                 raise ValueError(
                     f"{scene_id}: evidence request runtime registration drifted"
                 )
+            request_scene = request.get("scene")
+            if not isinstance(request_scene, Mapping):
+                raise TypeError(f"{scene_id}: evidence request.scene must be an object")
+            forbidden = sorted(
+                set(evaluation_only_runtime_paths(row, prefix="runtime_registration"))
+                | set(evaluation_only_runtime_paths(request_scene, prefix="scene"))
+            )
+            if forbidden:
+                raise ValueError(
+                    f"{scene_id}: evaluation-only fields leaked into the formal "
+                    f"runtime request: {sorted(set(forbidden))}"
+                )
         if self.min_region_size != 100 or not math.isclose(self.radius_m, 0.05):
             raise ValueError("official min_region_size=100 and radius=0.05 are frozen")
         expected_size_keys = ("tiny_max_m", "small_max_m", "medium_max_m")
@@ -505,13 +620,16 @@ class CleanExperimentHooks:
 
 def _state_identity(config: CleanExperimentConfig) -> dict[str, Any]:
     return {
+        "config_content_sha256": sha256_file(config.config_path),
         "config_path": str(config.config_path),
         "code_commit": config.code_commit,
         "repo_root": str(config.repo_root),
         "run_root": str(config.run_root),
         "artifact_root": str(config.artifact_root),
         "category_priors": str(config.category_priors),
+        "category_priors_sha256": sha256_file(config.category_priors),
         "size_bins_path": str(config.size_bins_path),
+        "size_bins_sha256": sha256_file(config.size_bins_path),
         "size_bin_boundaries_m": dict(config.size_bin_boundaries_m),
         "evidence_class_names": list(config.evidence_class_names),
         "evaluation_class_names": list(config.evaluation_class_names),
@@ -538,6 +656,9 @@ def _state_identity(config: CleanExperimentConfig) -> dict[str, Any]:
         "scenes": {
             scene_id: {
                 "evidence_request": str(config.scenes[scene_id].evidence_request),
+                "evidence_request_sha256": sha256_file(
+                    config.scenes[scene_id].evidence_request
+                ),
                 "gt_npz": str(config.scenes[scene_id].gt_npz),
                 "gaussian_ply": str(config.scenes[scene_id].gaussian_ply),
                 "gaussian_to_gt_transform": [
@@ -572,8 +693,87 @@ def _new_state(config: CleanExperimentConfig) -> dict[str, Any]:
     }
 
 
+def _history_stage_prefix(checkpoint: str) -> list[str]:
+    if checkpoint == "initialized":
+        return []
+    try:
+        index = COMPLETED_STAGE_SEQUENCE.index(checkpoint)
+    except ValueError as exc:
+        raise ValueError(f"unknown clean-baseline checkpoint: {checkpoint}") from exc
+    return list(COMPLETED_STAGE_SEQUENCE[: index + 1])
+
+
+def _validate_state_machine(state: Mapping[str, Any]) -> None:
+    """Reject an impossible or stage-skipping recoverable state."""
+
+    status = str(state.get("status", ""))
+    checkpoint = str(state.get("checkpoint", ""))
+    history = state.get("history")
+    if not isinstance(history, list) or any(
+        not isinstance(row, Mapping) or not isinstance(row.get("stage"), str)
+        for row in history
+    ):
+        raise TypeError("state history must contain stage mappings")
+    observed_stages = [str(row["stage"]) for row in history]
+    current = state.get("current_stage")
+    next_stage = state.get("next_stage")
+    active_substage = state.get("active_substage")
+    if status == "active":
+        if checkpoint not in ACTIVE_NEXT_STAGE:
+            raise ValueError("active state has an impossible checkpoint")
+        expected_history = _history_stage_prefix(checkpoint)
+        if observed_stages != expected_history:
+            raise ValueError("active state history skips or reorders stages")
+        expected_next = ACTIVE_NEXT_STAGE[checkpoint]
+        allowed_next = {expected_next}
+        # The pristine state historically displayed the shorter user-facing
+        # label; once execution begins `_begin` records the exact stage name.
+        if checkpoint == "initialized" and current is None:
+            allowed_next.add("validate")
+        if next_stage not in allowed_next:
+            raise ValueError("active state next_stage is inconsistent")
+        if current not in (None, expected_next):
+            raise ValueError("active state current_stage is inconsistent")
+        if active_substage is not None and not (
+            checkpoint == "dev8-evidence"
+            and current == "dev8-uniform"
+            and next_stage == "dev8-uniform"
+            and active_substage == "identity-edge-control"
+        ):
+            raise ValueError("active state contains an unauthorized substage")
+        if state.get("stop_reason") not in (None, ""):
+            raise ValueError("active state cannot carry a stop_reason")
+        return
+    if status == "complete":
+        if (
+            checkpoint != "final48-complete"
+            or observed_stages != list(COMPLETED_STAGE_SEQUENCE)
+            or current is not None
+            or next_stage is not None
+            or state.get("stop_reason") not in (None, "")
+            or active_substage is not None
+        ):
+            raise ValueError("complete state does not contain the full stage chain")
+        return
+    if status == "stopped":
+        predecessor = STOP_PREDECESSOR.get(checkpoint)
+        if predecessor is None:
+            raise ValueError("stopped state has an unknown stop checkpoint")
+        expected_history = _history_stage_prefix(predecessor) + [checkpoint]
+        if observed_stages != expected_history:
+            raise ValueError("stopped state history skips or reorders stages")
+        if current is not None or next_stage is not None or active_substage is not None:
+            raise ValueError("stopped state cannot have an active/next stage")
+        if not isinstance(state.get("stop_reason"), str) or not state["stop_reason"]:
+            raise ValueError("stopped state requires a reason")
+        return
+    raise ValueError(f"unknown clean-baseline state status: {status!r}")
+
+
 def _write_state(config: CleanExperimentConfig, state: dict[str, Any]) -> None:
     config.artifact_root.mkdir(parents=True, exist_ok=True)
+    state.pop("content_sha256", None)
+    state["content_sha256"] = hash_json(state)
     write_json(config.state_path, state)
     write_json(
         config.analysis_path,
@@ -604,10 +804,17 @@ def _load_state(config: CleanExperimentConfig) -> dict[str, Any]:
     if not isinstance(payload, Mapping) or payload.get("schema") != STATE_SCHEMA:
         raise ValueError("invalid clean-baseline state file")
     state = dict(payload)
+    expected_hash = state.pop("content_sha256", None)
+    if not isinstance(expected_hash, str) or len(expected_hash) != 64:
+        raise ValueError("clean-baseline state lacks an embedded content identity")
+    if hash_json(state) != expected_hash:
+        raise ValueError("clean-baseline state content identity mismatch")
+    state["content_sha256"] = expected_hash
     if state.get("identity") != _state_identity(config):
         raise ValueError("registered config differs from the recoverable state")
     if not isinstance(state.get("history"), list):
         raise TypeError("state history must be a list")
+    _validate_state_machine(state)
     return state
 
 
@@ -624,6 +831,7 @@ def _complete(
     result: Mapping[str, Any],
     next_stage: str | None,
 ) -> None:
+    state.pop("active_substage", None)
     state["history"].append({"stage": stage, **_history_safe(dict(result))})
     state.update(
         checkpoint=stage,
@@ -640,6 +848,7 @@ def _stop(
     reason: str,
     result: Mapping[str, Any],
 ) -> dict[str, Any]:
+    state.pop("active_substage", None)
     state["history"].append({"stage": checkpoint, **_history_safe(dict(result))})
     state.update(
         status="stopped",
@@ -695,9 +904,12 @@ def _aggregate_oracle_gate(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     tiny_match_025 = 0
     tiny_count = 0
     for row in rows:
-        official = row["aggregate"]["official_valid"]["perfect_association"]
+        # The greedy association diagnostic is a feasible lower bound and can
+        # miss a good subset.  Early stopping is therefore based on the true
+        # complete-mask support ceiling: perfect deletion of false positives.
+        official = row["aggregate"]["official_valid"]["perfect_trim"]
         tiny_group = row["aggregate"]["tiny_small_official_valid"]
-        tiny = tiny_group["perfect_association"]
+        tiny = tiny_group["perfect_trim"]
         match_050 += int(official["match_050_count"])
         tiny_match_025 += int(tiny["match_025_count"])
         tiny_count += int(tiny_group["gt_count"])
@@ -713,6 +925,8 @@ def _aggregate_oracle_gate(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "tiny_small_match025_count": tiny_match_025,
         "tiny_small_gt_count": tiny_count,
         "tiny_small_recall025": tiny_recall,
+        "gate_metric": "perfect_trim_support_ceiling",
+        "greedy_association_used_for_gate": False,
     }
 
 
@@ -1022,20 +1236,45 @@ def run_clean_baseline_experiment(
     """Run or resume the registered DEV2-to-final48 experiment."""
 
     config.validate()
+    production_runtime = hooks is None
+    if production_runtime:
+        # This gate intentionally precedes state loading and the terminal-state
+        # early return.  A stopped/complete run must not be reported from a
+        # different commit or a dirty deployment, and a mid-run restart must
+        # not skip the provenance check merely because Stage 0 already passed.
+        _validate_deployment_environment(config)
     hooks = hooks or default_hooks(config)
     state = _load_state(config)
     if state["status"] in {"stopped", "complete"}:
         return state
 
     def guarded(stage: str, function: Callable[[], Mapping[str, Any]]) -> Mapping[str, Any]:
-        _begin(config, state, stage)
+        registered_stage = ACTIVE_NEXT_STAGE.get(
+            str(state["checkpoint"]), stage
+        )
+        _begin(config, state, registered_stage)
+        if stage != registered_stage:
+            # Record conditional diagnostic progress without turning it into a
+            # resumable checkpoint.  A hard kill can therefore only replay the
+            # enclosing registered stage, never jump into a half-run control.
+            state["active_substage"] = stage
+            _write_state(config, state)
         try:
             return function()
         except BaseException as exc:
+            # Conditional diagnostics (currently only identity-edge-control)
+            # are nested inside a preregistered main stage.  The controller
+            # dispatches from checkpoints, not arbitrary next_stage strings,
+            # so an interruption must return to that checkpoint's registered
+            # stage rather than persist an unreachable substage.
+            retry_stage = ACTIVE_NEXT_STAGE.get(
+                str(state["checkpoint"]), stage
+            )
+            state.pop("active_substage", None)
             state.update(
                 status="active",
                 current_stage=None,
-                next_stage=stage,
+                next_stage=retry_stage,
                 last_error={"type": type(exc).__name__, "message": str(exc)},
             )
             _write_state(config, state)
@@ -1466,12 +1705,49 @@ def run_clean_baseline_experiment(
                 "final48 did not satisfy both the 0.002 effect-size floor and the positive paired-bootstrap confidence bound",
                 result,
             )
-        state.update(status="complete", checkpoint="final48-complete", next_stage=None)
+        state.update(
+            status="complete",
+            checkpoint="final48-complete",
+            current_stage=None,
+            next_stage=None,
+            stop_reason=None,
+        )
         state["history"].append(
             {"stage": "final48-evaluate", **_history_safe(result)}
         )
         _write_state(config, state)
     return state
+
+
+def _validate_deployment_environment(
+    config: CleanExperimentConfig,
+) -> dict[str, Any]:
+    """Revalidate immutable code and train-only priors on every invocation."""
+
+    prior_payload = load_json(config.category_priors)
+    if not isinstance(prior_payload, Mapping):
+        raise TypeError("category priors must be a JSON object")
+    validate_priors(prior_payload)
+    if prior_payload.get("provenance", {}).get("splits") != ["train"]:
+        raise ValueError("formal category priors must be fitted from train only")
+    provenance = build_clean_baseline_provenance(
+        repo_root=config.repo_root,
+        output_path=None,
+    )
+    if str(provenance.get("current_commit")) != config.code_commit:
+        raise ValueError(
+            "registered code_commit does not match the deployed repository HEAD"
+        )
+    # Invalid deployments fail without overwriting the last valid provenance.
+    write_json(
+        config.artifact_root / "clean_baseline_provenance.json", provenance
+    )
+    return {
+        "current_commit": config.code_commit,
+        "tracked_worktree_clean": True,
+        "category_priors_sha256": sha256_file(config.category_priors),
+        "category_prior_splits": ["train"],
+    }
 
 
 def _validate_registered_inputs(config: CleanExperimentConfig) -> dict[str, Any]:
@@ -1496,15 +1772,10 @@ def _validate_registered_inputs(config: CleanExperimentConfig) -> dict[str, Any]
                     missing.append(str(path))
     if missing:
         raise FileNotFoundError(f"registered inputs are missing: {missing}")
-    provenance = build_clean_baseline_provenance(
-        repo_root=config.repo_root,
-        output_path=config.artifact_root / "clean_baseline_provenance.json",
+    deployment = _validate_deployment_environment(config)
+    provenance = load_json(
+        config.artifact_root / "clean_baseline_provenance.json"
     )
-    current_commit = str(provenance["current_commit"])
-    if current_commit != config.code_commit:
-        raise ValueError(
-            "registered code_commit does not match the deployed repository HEAD"
-        )
     for scene_id in registered_scene_ids:
         request = load_json(config.scenes[scene_id].evidence_request)
         if request.get("producer_commit") != config.code_commit:
@@ -1539,6 +1810,7 @@ def _validate_registered_inputs(config: CleanExperimentConfig) -> dict[str, Any]
         "missing_inputs": [],
         "gt_as_prediction_parity": "deferred-to-dev2-input-preflight",
         "provenance_schema": provenance["schema"],
+        "deployment": deployment,
         "sai3d": sai3d_audit,
     }
 
@@ -1563,6 +1835,7 @@ def _prepare_registered_scene(
             else ""
         )
         manifest_ok = False
+        content_ok = False
         if prepared_existing.is_file():
             prepared_payload = load_json(prepared_existing)
             manifest = prepared_payload.get("sam_frame_manifest", [])
@@ -1578,19 +1851,47 @@ def _prepare_registered_scene(
                 # Unit-test hooks use no real camera assets.  Production rows
                 # can never select this source.
                 manifest_ok = True
-        if (
+            content_identity = existing.get("content_identity", {})
+            content_ok = isinstance(content_identity, Mapping) and dict(
+                content_identity
+            ) == {
+                "prepared_request_sha256": sha256_file(prepared_existing),
+                "gt_npz_sha256": (
+                    sha256_file(base.gt_npz) if base.gt_npz.is_file() else None
+                ),
+                "gaussian_ply_sha256": (
+                    sha256_file(base.gaussian_ply)
+                    if base.gaussian_ply.is_file()
+                    else None
+                ),
+            }
+        complete_registration = (
             isinstance(existing, Mapping)
             and existing.get("schema") == SCENE_INPUT_REGISTRATION_SCHEMA
             and existing.get("status") == "complete"
             and existing.get("scene_id") == scene_id
             and existing.get("code_commit") == config.code_commit
+        )
+        if (
+            complete_registration
             and bool(audit.get("complete", False))
             and prepared_existing.is_file()
             and manifest_ok
+            and content_ok
             and base.gt_npz.is_file()
             and base.gaussian_ply.is_file()
         ):
             return dict(existing)
+        if complete_registration:
+            # Once a scene has contributed to a completed gate, silently
+            # rebuilding it from changed bytes would mix two datasets inside
+            # one recoverable experiment.  Treat any identity/manifest drift
+            # as immutable-input corruption and require a fresh registered
+            # run instead of rewriting the old registration in place.
+            raise ValueError(
+                f"{scene_id}: completed scene input registration changed or "
+                "became incomplete"
+            )
     try:
         request = load_json(base.evidence_request)
         if not isinstance(request, Mapping):
@@ -1677,6 +1978,11 @@ def _prepare_registered_scene(
             "prepared_request": str(prepared_path),
             "gt_npz": str(base.gt_npz),
             "gaussian_ply": str(base.gaussian_ply),
+            "content_identity": {
+                "prepared_request_sha256": sha256_file(prepared_path),
+                "gt_npz_sha256": sha256_file(base.gt_npz),
+                "gaussian_ply_sha256": sha256_file(base.gaussian_ply),
+            },
             "tiny_small_instance_ids": list(tiny_small),
             "tiny_small_diagnostics": tiny_report,
             "gt_as_prediction_parity": bool(parity["gt_as_prediction_parity"]),
@@ -1995,6 +2301,12 @@ def _oracle_candidates(
     )
     visibility = np.zeros((bank.frame_count, bank.point_count), dtype=np.bool_)
     for index, frame in enumerate(bank.frames):
+        # Keep the offline oracle on the exact formal visibility protocol.  A
+        # frame whose SAM geometry abstained may retain alpha visibility for
+        # input auditing, but it supplied no mask observation and therefore
+        # cannot count as negative evidence here either.
+        if frame.geometry_abstained:
+            continue
         ids, _ = bank.visibility_for_frame(frame.frame_id)
         visibility[index, ids] = True
     decisions: list[dict[str, Any]] = []
@@ -2214,6 +2526,78 @@ def _prior_effect(config: CleanExperimentConfig, scene_ids: Sequence[str]) -> di
     }
 
 
+def _validate_condition_pair_identity(
+    config: CleanExperimentConfig,
+    scene_id: str,
+    conditions: Sequence[str],
+) -> dict[str, Any]:
+    """Prove that conditions differ only by the registered size-prior mode."""
+
+    identities: dict[str, dict[str, Any]] = {}
+    raw_graphs: dict[str, str] = {}
+    for condition in conditions:
+        output = load_json(config.condition_dir(scene_id, condition) / "output.json")
+        diagnostics = load_json(
+            config.condition_dir(scene_id, condition) / "diagnostics.json"
+        )
+        identity = validate_embedded_identity(
+            output.get("run_identity"), expected_schema=RUN_IDENTITY_SCHEMA
+        )
+        diagnostic_identity = validate_embedded_identity(
+            diagnostics.get("run_identity"),
+            expected_schema=RUN_IDENTITY_SCHEMA,
+        )
+        if diagnostic_identity != identity:
+            raise ValueError(f"{scene_id}/{condition}: output/diagnostic identity mismatch")
+        if identity.get("condition") != condition or identity.get("scene_id") != scene_id:
+            raise ValueError(f"{scene_id}/{condition}: embedded formal identity mismatch")
+        raw_graph = diagnostics.get("consensus", {}).get("raw_graph_identity")
+        if not isinstance(raw_graph, str) or not raw_graph:
+            raise ValueError(f"{scene_id}/{condition}: raw graph identity is missing")
+        identities[condition] = identity
+        raw_graphs[condition] = raw_graph
+    first = identities[str(conditions[0])]
+    invariant_keys = (
+        "consumer_commit",
+        "scene_id",
+        "evidence",
+        "consensus_config",
+        "taxonomy",
+        "ap_score",
+    )
+    prior_conditions = [
+        condition for condition in conditions if condition != "C0-no-prior"
+    ]
+    formal_prior = (
+        identities[str(prior_conditions[0])].get("prior")
+        if prior_conditions
+        else None
+    )
+    if prior_conditions and not isinstance(formal_prior, Mapping):
+        raise ValueError(f"{scene_id}: U/D run identity lacks train-only priors")
+    for condition, identity in identities.items():
+        for key in invariant_keys:
+            if identity.get(key) != first.get(key):
+                raise ValueError(
+                    f"{scene_id}: formal conditions do not share {key}; "
+                    f"drift detected at {condition}"
+                )
+        if condition != "C0-no-prior" and identity.get("prior") != formal_prior:
+            raise ValueError(f"{scene_id}: U/D category-prior content differs")
+        if condition == "C0-no-prior" and identity.get("prior") is not None:
+            raise ValueError(f"{scene_id}: C0 unexpectedly embeds a category prior")
+    if len(set(raw_graphs.values())) != 1:
+        raise ValueError(f"{scene_id}: formal conditions do not share one raw graph")
+    return {
+        "scene_id": scene_id,
+        "conditions": list(map(str, conditions)),
+        "evidence_identity": first["evidence"]["files"],
+        "raw_graph_identity": next(iter(raw_graphs.values())),
+        "ap_score_identity": first["ap_score"],
+        "condition_specific_fields": ["condition", "prior"],
+    }
+
+
 def _default_evaluate_stage(
     config: CleanExperimentConfig, **kwargs: Any
 ) -> Mapping[str, Any]:
@@ -2257,7 +2641,11 @@ def _default_evaluate_stage(
         condition: [] for condition in conditions
     }
     table_rows: list[dict[str, Any]] = []
+    paired_identity_rows: list[dict[str, Any]] = []
     for scene_id in scene_ids:
+        paired_identity_rows.append(
+            _validate_condition_pair_identity(config, scene_id, conditions)
+        )
         _, gt_objects, mapping, _ = _scene_gt_adapter(
             config, scene_id, config.bank_dir(scene_id)
         )
@@ -2437,6 +2825,7 @@ def _default_evaluate_stage(
         "data_minus_uniform": data_minus_uniform,
         "rows": table_rows,
         "prior_rows": prior_effect["rows"],
+        "paired_runtime_identity": paired_identity_rows,
         "oracle_class_in_formal_metrics": False,
     }
     write_json(stage_output, result)

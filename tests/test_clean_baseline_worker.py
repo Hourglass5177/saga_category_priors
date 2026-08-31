@@ -10,6 +10,7 @@ from category_priors.clean_baseline.worker import (
     normalized_alpha_objectives,
     sparse_support_from_mass,
 )
+from category_priors.clean_baseline.sam_inputs import PackedMaskFrame
 
 
 def test_mask_batches_convert_only_the_current_three_masks_to_float32(
@@ -33,6 +34,28 @@ def test_mask_batches_convert_only_the_current_three_masks_to_float32(
     assert [row.indices for row in rows] == [(0, 1, 2), (3, 4, 5), (6,)]
     assert all(row.targets.shape == (3, 5, 6) for row in rows)
     assert all(row.targets.dtype == np.float32 for row in rows)
+
+
+def test_packed_mask_batches_expand_at_most_three_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from category_priors.clean_baseline import sam_inputs
+
+    dense = np.zeros((7, 5, 6), dtype=np.bool_)
+    dense[:, 0, 0] = True
+    packed = np.packbits(dense.reshape(7, -1), axis=1)
+    frame = PackedMaskFrame(packed, 7, 5, 6)
+    original = sam_inputs.np.unpackbits
+    expanded_rows: list[int] = []
+
+    def guarded(value, *args, **kwargs):
+        expanded_rows.append(int(np.asarray(value).shape[0]))
+        return original(value, *args, **kwargs)
+
+    monkeypatch.setattr(sam_inputs.np, "unpackbits", guarded)
+    rows = list(iter_mask_batches(frame))
+    assert [row.indices for row in rows] == [(0, 1, 2), (3, 4, 5), (6,)]
+    assert expanded_rows == [3, 3, 1]
 
 
 def test_normalized_alpha_objectives_conserve_valid_pixel_mass() -> None:
@@ -100,3 +123,8 @@ def test_mask_semantics_are_soft_iou_evidence_and_abstain_cleanly() -> None:
     )
     assert missing is True
     assert np.count_nonzero(empty) == 0
+
+    with pytest.raises(ValueError, match="integer dtype"):
+        mask_class_probabilities(
+            sam, grounded[:1], np.asarray([0.5]), class_count=3
+        )

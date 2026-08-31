@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import struct
 from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import pytest
 
+import category_priors.clean_baseline.evidence as evidence_module
 from category_priors.clean_baseline import (
     AlphaMaskEvidenceBank,
     EvidenceThresholds,
@@ -42,12 +44,24 @@ def _materialize_identity_inputs(base: Path):
         if directory == values["rgb_ply"]:
             continue
         directory.mkdir(parents=True, exist_ok=True)
-    (values["sparse"] / "images.bin").write_bytes(b"colmap-images")
-    (values["sparse"] / "cameras.bin").write_bytes(b"colmap-cameras")
+    with (values["sparse"] / "cameras.bin").open("wb") as handle:
+        handle.write(struct.pack("<Q", 1))
+        handle.write(struct.pack("<iiQQ", 7, 1, 1, 1))
+        handle.write(struct.pack("<dddd", 1.0, 1.0, 0.0, 0.0))
+    with (values["sparse"] / "images.bin").open("wb") as handle:
+        handle.write(struct.pack("<Q", 1))
+        handle.write(
+            struct.pack(
+                "<idddddddi", 11, 1.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 7,
+            )
+        )
+        handle.write(b"zero.jpg\x00")
+        handle.write(struct.pack("<Q", 0))
     (values["images"] / "zero.jpg").write_bytes(b"rgb-frame")
-    (values["sam_masks"] / "zero.jpg.npz").write_bytes(b"packed-sam")
-    (values["grounded_masks"] / "zero.jpg.pt").write_bytes(b"grounded-mask")
-    (values["grounded_labels"] / "zero.jpg.pt").write_bytes(b"grounded-label")
+    (values["sam_masks"] / "zero.npz").write_bytes(b"packed-sam")
+    (values["grounded_masks"] / "zero.pt").write_bytes(b"grounded-mask")
+    (values["grounded_labels"] / "zero.pt").write_bytes(b"grounded-label")
     return worker.CleanSceneInputs(base_path=base, **values)
 
 
@@ -69,7 +83,7 @@ def _bank() -> AlphaMaskEvidenceBank:
     semantics[0, 3] = 1
     semantics[1, 7] = 1
     frame0 = build_frame_evidence(
-        frame_id=10,
+        frame_id=0,
         image_name="000010.jpg",
         alpha_mass=mass,
         global_mask_id_start=100,
@@ -77,7 +91,7 @@ def _bank() -> AlphaMaskEvidenceBank:
     )
     abstained_mass = _mass(None)
     frame1 = build_frame_evidence(
-        frame_id=20,
+        frame_id=1,
         image_name="000020.jpg",
         alpha_mass=abstained_mass,
         global_mask_id_start=200,
@@ -143,7 +157,7 @@ def test_thresholds_and_same_frame_ambiguity_are_explicit() -> None:
     bank = _bank()
     # Gaussian 0 passes both identical same-frame masks, so it is retained for
     # audit but excluded from positive consensus support by default.
-    np.testing.assert_array_equal(bank.ambiguous_for_frame(10), [0])
+    np.testing.assert_array_equal(bank.ambiguous_for_frame(0), [0])
     np.testing.assert_array_equal(bank.support_for_mask(100)[0], [])
     ids, mass, ratio, ambiguous = bank.support_for_mask(
         100, include_ambiguous=True
@@ -157,8 +171,46 @@ def test_thresholds_and_same_frame_ambiguity_are_explicit() -> None:
         bank.masks_for_gaussian(0, include_ambiguous=True), [100, 101]
     )
     frame_ids, visible_mass = bank.frames_for_gaussian(0)
-    np.testing.assert_array_equal(frame_ids, [10, 20])
+    np.testing.assert_array_equal(frame_ids, [0, 1])
     np.testing.assert_allclose(visible_mass, [0.85, 0.85])
+
+
+def test_bank_position_lookups_reject_lossy_scalar_coercion() -> None:
+    bank = _bank()
+    assert bank.frame_position(np.int64(0)) == 0
+    assert bank.mask_position(np.int32(100)) == 0
+    with pytest.raises(TypeError, match="frame_id must be an integer"):
+        bank.frame_position(0.0)
+    with pytest.raises(TypeError, match="global_mask_id must be an integer"):
+        bank.mask_position(True)
+
+
+def test_interrupted_overwrite_invalidates_old_completion_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "bank"
+    original = _bank()
+    replacement = replace(original, xyz_m=original.xyz_m + 10.0)
+    save_evidence_bank(original, output)
+    assert evidence_bank_is_complete(output)
+
+    with monkeypatch.context() as context:
+        def interrupt_json_write(path: Path, value: dict[str, object]) -> None:
+            del path, value
+            raise RuntimeError("simulated interruption after NPZ replacement")
+
+        context.setattr(evidence_module, "_write_json_atomic", interrupt_json_write)
+        with pytest.raises(RuntimeError, match="simulated interruption"):
+            save_evidence_bank(replacement, output, overwrite=True)
+
+    # A mixed new-array/old-metadata directory must never remain loadable.
+    assert not (output / "masks.json").exists()
+    assert not evidence_bank_is_complete(output)
+
+    # The incomplete directory remains recoverable by an ordinary overwrite.
+    save_evidence_bank(replacement, output, overwrite=True)
+    loaded = load_evidence_bank(output)
+    np.testing.assert_array_equal(loaded.xyz_m, replacement.xyz_m)
 
 
 def test_semantic_posterior_or_abstention_contract() -> None:
@@ -298,6 +350,32 @@ def test_load_rejects_corrupt_csr(tmp_path: Path) -> None:
         load_evidence_bank(output)
 
 
+def test_load_rejects_evidence_below_serialized_thresholds(tmp_path: Path) -> None:
+    output = tmp_path / "bank"
+    save_evidence_bank(_bank(), output)
+    with np.load(output / "evidence.npz", allow_pickle=False) as loaded:
+        arrays = {name: np.asarray(loaded[name]) for name in loaded.files}
+    arrays["frame_visible_mass"] = arrays["frame_visible_mass"].copy()
+    arrays["frame_visible_mass"][0] = 0.49
+    np.savez_compressed(output / "evidence.npz", **arrays)
+    with pytest.raises(ValueError, match="below the frozen threshold"):
+        load_evidence_bank(output)
+
+
+def test_bank_rejects_noncontiguous_frame_ids() -> None:
+    mass = _mass(None)
+    frame0 = build_frame_evidence(frame_id=0, image_name="zero.jpg", alpha_mass=mass)
+    frame2 = build_frame_evidence(frame_id=2, image_name="two.jpg", alpha_mass=mass)
+    with pytest.raises(ValueError, match="contiguous packed row IDs"):
+        AlphaMaskEvidenceBank.from_frames(
+            scene_id="scene0000_00",
+            point_count=3,
+            xyz_m=np.zeros((3, 3), dtype=np.float32),
+            class_names=CLASSES,
+            frames=(frame0, frame2),
+        )
+
+
 def test_arrays_are_immutable_after_validation() -> None:
     bank = _bank()
     assert not bank.mask_support.gaussian_ids.flags.writeable
@@ -388,6 +466,7 @@ def test_scene_worker_adapter_converts_raw_xyz_to_meters(
     bank = load_evidence_bank(output)
     np.testing.assert_allclose(bank.xyz_m, [[0.5, 0.0, 0.0]])
     assert bank.source["scene_scale_m_per_unit"] == 0.25
+    assert bank.frames[0].geometry_abstained is True
 
 
 def test_request_identity_prevents_scene_only_cache_reuse(
@@ -412,13 +491,14 @@ def test_request_identity_prevents_scene_only_cache_reuse(
     assert source["producer_commit"] == COMMIT
     assert source["class_names"] == list(CLASSES)
     identities = source["producer_inputs"]
-    assert identities["schema"] == "saga-clean-evidence-input-content-v1"
+    assert identities["schema"] == "saga-clean-evidence-input-content-v2"
     assert identities["gaussian_ply"]["file_count"] == 1
     assert identities["colmap_cameras"]["relative_paths"] == [
         "images.bin",
         "cameras.bin",
     ]
     assert identities["image_inputs"]["relative_paths"] == ["zero.jpg"]
+    assert identities["sam_everything_masks"]["relative_paths"] == ["zero.npz"]
     wrong_order = json.loads(json.dumps(request))
     wrong_order["classes"] = list(reversed(CLASSES))
     with pytest.raises(ValueError, match="registered 32-class"):
@@ -469,3 +549,33 @@ def test_request_identity_prevents_scene_only_cache_reuse(
         evidence_request_source(
             scene_id="scene0000_00", request=invalid_commit
         )
+
+
+def test_request_identity_tracks_abstention_and_ignores_unconsumed_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from category_priors.clean_baseline import worker
+
+    base = tmp_path / "scene"
+    base.mkdir()
+    inputs = _materialize_identity_inputs(base)
+    monkeypatch.setattr(worker, "resolve_clean_scene_inputs", lambda *_a, **_k: inputs)
+    request = {
+        "producer_commit": COMMIT,
+        "scene": {"scene_id": "scene0000_00", "base_path": str(base)},
+    }
+    source = evidence_request_source(scene_id="scene0000_00", request=request)
+    (inputs.images / "stale.part").write_bytes(b"not-consumed")
+    assert evidence_request_source(
+        scene_id="scene0000_00", request=request
+    ) == source
+
+    (inputs.grounded_masks / "zero.pt").unlink()
+    (inputs.grounded_labels / "zero.pt").unlink()
+    abstained = evidence_request_source(scene_id="scene0000_00", request=request)
+    assert abstained["producer_inputs"]["grounded_masks"]["missing_file_count"] == 1
+    assert abstained != source
+
+    (inputs.grounded_masks / "zero.pt").write_bytes(b"one-sided")
+    with pytest.raises(ValueError, match="both exist or both abstain"):
+        evidence_request_source(scene_id="scene0000_00", request=request)

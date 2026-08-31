@@ -14,8 +14,10 @@ from ..priors import validate_priors
 from ..taxonomy import load_taxonomy
 from .consensus import (
     ConsensusConfig,
+    ConsensusEdge,
     ConsensusObject,
     MaskObservation,
+    compute_pair_consensus,
     run_mask_consensus,
     split_disconnected_support,
 )
@@ -161,10 +163,18 @@ def _observations(bank: AlphaMaskEvidenceBank) -> tuple[MaskObservation, ...]:
 
 
 def _dense_visibility(bank: AlphaMaskEvidenceBank) -> np.ndarray:
-    """Expand only the compact frame visibility matrix, never pixel evidence."""
+    """Expand compact visibility while honoring geometry abstention.
+
+    A frame with no complete SAM mask retains alpha visibility in the evidence
+    bank for input auditing, but it has supplied no geometric observation.  It
+    therefore cannot vote against an association or lower a final detection
+    ratio merely because the mask input was absent.
+    """
 
     visible = np.zeros((bank.frame_count, bank.point_count), dtype=np.bool_)
     for row, frame in enumerate(bank.frames):
+        if frame.geometry_abstained:
+            continue
         ids, _ = bank.visibility_for_frame(frame.frame_id)
         visible[row, ids] = True
     return visible
@@ -277,14 +287,187 @@ class _TrackedSizeVeto:
         return accepted
 
 
+def _final_support_statistics(
+    *,
+    bank: AlphaMaskEvidenceBank,
+    mask_ids: Sequence[int],
+    gaussian_ids: np.ndarray,
+    accepted_edges: Sequence[ConsensusEdge],
+    rejected_undersegmented_mask_ids: Sequence[int] = (),
+    config: ConsensusConfig = ConsensusConfig(),
+    observations: Sequence[MaskObservation] | None = None,
+    visibility: np.ndarray | None = None,
+) -> tuple[tuple[int, ...], tuple[int, ...], float, float]:
+    """Recompute view support after overlap removal changes an object mask.
+
+    Consensus calculates detection ratios before residual object overlaps are
+    assigned uniquely.  Reusing those values after points have been removed
+    makes the exported AP score describe a different Gaussian set.  This
+    helper repeats the registered per-view numerator/denominator calculation
+    for the final support, excluding same-frame ambiguity and frames whose SAM
+    geometry abstained.
+    """
+
+    raw_support = np.asarray(gaussian_ids, dtype=np.int64)
+    if raw_support.ndim != 1 or len(raw_support) == 0:
+        return (), (), 0.0, 0.0
+    support = np.unique(raw_support)
+    supported_masks: list[int] = []
+    masks_by_frame: dict[int, list[int]] = {}
+    for mask_id in sorted(map(int, mask_ids)):
+        row = bank.mask_position(mask_id)
+        metadata = bank.masks[row]
+        association_ids = bank.support_for_mask(
+            mask_id, include_ambiguous=False
+        )[0]
+        if np.intersect1d(
+            support, association_ids, assume_unique=True
+        ).size == 0:
+            continue
+        supported_masks.append(mask_id)
+        masks_by_frame.setdefault(metadata.frame_id, []).append(mask_id)
+    frame_ids = tuple(sorted(masks_by_frame))
+    if not supported_masks:
+        return (), (), 0.0, 0.0
+
+    visible_counts = np.zeros(len(support), dtype=np.int64)
+    detected_counts = np.zeros(len(support), dtype=np.int64)
+    for frame in bank.frames:
+        if frame.geometry_abstained:
+            continue
+        visible_ids, _ = bank.visibility_for_frame(frame.frame_id)
+        _, support_positions, _ = np.intersect1d(
+            support,
+            visible_ids,
+            assume_unique=True,
+            return_indices=True,
+        )
+        if support_positions.size == 0:
+            continue
+        ambiguous = bank.ambiguous_for_frame(frame.frame_id)
+        if ambiguous.size:
+            support_positions = support_positions[
+                ~np.isin(
+                    support[support_positions], ambiguous, assume_unique=True
+                )
+            ]
+        if support_positions.size == 0:
+            continue
+        visible_counts[support_positions] += 1
+        frame_mask_ids = masks_by_frame.get(frame.frame_id, ())
+        if not frame_mask_ids:
+            continue
+        detected = np.unique(
+            np.concatenate(
+                [
+                    bank.support_for_mask(
+                        mask_id, include_ambiguous=False
+                    )[0]
+                    for mask_id in frame_mask_ids
+                ]
+            )
+        )
+        detected_positions = support_positions[
+            np.isin(
+                support[support_positions], detected, assume_unique=True
+            )
+        ]
+        detected_counts[detected_positions] += 1
+    ratios = np.divide(
+        detected_counts,
+        visible_counts,
+        out=np.zeros(len(support), dtype=np.float64),
+        where=visible_counts > 0,
+    )
+    retained = set(supported_masks)
+    relevant_edges = []
+    for edge in accepted_edges:
+        left_retained = tuple(
+            mask_id for mask_id in edge.left_mask_ids if mask_id in retained
+        )
+        right_retained = tuple(
+            mask_id for mask_id in edge.right_mask_ids if mask_id in retained
+        )
+        if left_retained and right_retained:
+            relevant_edges.append((edge, left_retained, right_retained))
+    # An accepted edge's stored consensus describes the component supports at
+    # merge time.  DBSCAN and unique ownership can later remove a disconnected
+    # or overlapping region, so reusing that number would make Q describe the
+    # parent object rather than this final exported part.  Restrict every mask
+    # to the final Gaussian domain and recompute the same observer/supporter
+    # statistic.  This changes metadata only; it cannot alter graph formation.
+    mean_consensus = 0.0
+    if relevant_edges:
+        base_observations = (
+            tuple(observations)
+            if observations is not None
+            else _observations(bank)
+        )
+        restricted_observations: list[MaskObservation] = []
+        for observation in base_observations:
+            restricted_full = np.intersect1d(
+                observation.gaussian_ids, support, assume_unique=True
+            )
+            restricted_ambiguous = np.intersect1d(
+                observation.ambiguous_ids, support, assume_unique=True
+            )
+            restricted_observations.append(
+                MaskObservation(
+                    mask_id=observation.mask_id,
+                    frame_id=observation.frame_id,
+                    gaussian_ids=restricted_full,
+                    ambiguous_ids=restricted_ambiguous,
+                )
+            )
+        position = {
+            observation.mask_id: index
+            for index, observation in enumerate(restricted_observations)
+        }
+        rejected_set = set(map(int, rejected_undersegmented_mask_ids))
+        active_indices = tuple(
+            index
+            for index, observation in enumerate(restricted_observations)
+            if observation.mask_id not in rejected_set
+        )
+        final_visibility = (
+            np.asarray(visibility)
+            if visibility is not None
+            else _dense_visibility(bank)
+        )
+        recomputed = []
+        for _edge, left_retained, right_retained in relevant_edges:
+            evidence = compute_pair_consensus(
+                tuple(position[mask_id] for mask_id in left_retained),
+                tuple(position[mask_id] for mask_id in right_retained),
+                restricted_observations,
+                final_visibility,
+                config=config,
+                active_indices=active_indices,
+                rejected_mask_ids=tuple(sorted(rejected_set)),
+            )
+            recomputed.append(evidence.consensus)
+        mean_consensus = float(np.mean(recomputed))
+    return (
+        tuple(supported_masks),
+        frame_ids,
+        mean_consensus,
+        float(np.mean(ratios)),
+    )
+
+
 def _resolve_unique_ownership(
     objects: Sequence[ConsensusObject],
-    xyz_m: np.ndarray,
+    bank: AlphaMaskEvidenceBank,
     *,
+    accepted_edges: Sequence[ConsensusEdge],
+    rejected_undersegmented_mask_ids: Sequence[int],
     config: ConsensusConfig,
+    observations: Sequence[MaskObservation],
+    visibility: np.ndarray,
 ) -> tuple[ConsensusObject, ...]:
-    """Resolve residual overlaps using geometry only, then re-split physically."""
+    """Resolve overlaps, then recompute metadata for the final Gaussian set."""
 
+    xyz_m = bank.xyz_m
     occupied = np.zeros(len(xyz_m), dtype=np.bool_)
     result: list[ConsensusObject] = []
     ranked = sorted(
@@ -306,16 +489,41 @@ def _resolve_unique_ownership(
             eps_m=config.dbscan_eps_m,
             min_samples=config.dbscan_min_samples,
         ):
+            (
+                part_mask_ids,
+                part_frame_ids,
+                mean_consensus,
+                mean_detection,
+            ) = _final_support_statistics(
+                bank=bank,
+                mask_ids=item.mask_ids,
+                gaussian_ids=part,
+                accepted_edges=accepted_edges,
+                rejected_undersegmented_mask_ids=(
+                    rejected_undersegmented_mask_ids
+                ),
+                config=config,
+                observations=observations,
+                visibility=visibility,
+            )
+            if len(part_frame_ids) < config.min_views:
+                continue
+            geometric_quality = float(
+                np.sqrt(
+                    max(0.0, mean_consensus)
+                    * max(0.0, mean_detection)
+                )
+            )
             occupied[part] = True
             result.append(
                 ConsensusObject(
                     object_id=len(result),
-                    mask_ids=item.mask_ids,
-                    frame_ids=item.frame_ids,
+                    mask_ids=part_mask_ids,
+                    frame_ids=part_frame_ids,
                     gaussian_ids=part,
-                    mean_view_consensus=item.mean_view_consensus,
-                    mean_detection_ratio=item.mean_detection_ratio,
-                    geometric_quality=item.geometric_quality,
+                    mean_view_consensus=mean_consensus,
+                    mean_detection_ratio=mean_detection,
+                    geometric_quality=geometric_quality,
                 )
             )
     return tuple(result)
@@ -437,15 +645,25 @@ def run_consensus_condition(
         except (OSError, TypeError, ValueError, KeyError):
             pass
 
+    observations = _observations(bank)
+    visibility = _dense_visibility(bank)
     result = run_mask_consensus(
-        _observations(bank),
-        _dense_visibility(bank),
+        observations,
+        visibility,
         bank.xyz_m,
         config=config,
         merge_veto=merge_veto,
     )
     unique_objects = _resolve_unique_ownership(
-        result.objects, bank.xyz_m, config=config
+        result.objects,
+        bank,
+        accepted_edges=result.accepted_edges,
+        rejected_undersegmented_mask_ids=(
+            result.rejected_undersegmented_mask_ids
+        ),
+        config=config,
+        observations=observations,
+        visibility=visibility,
     )
     candidates, object_rows = _classify_objects(unique_objects, bank)
     payload, contract = build_prediction_payload(

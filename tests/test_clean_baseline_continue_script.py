@@ -65,3 +65,12 @@ def test_continue_script_has_atomic_status_and_quoted_paths() -> None:
     assert '--config "$CONFIG_PATH"' in source
     assert '>> "$LOG_PATH" 2>&1' in source
     assert 'CONFIG_PATH=$1' in source
+
+
+def test_continue_script_distinguishes_registered_stop_from_completion() -> None:
+    source = _source()
+    assert '"$ARTIFACT_ROOT/clean_baseline_status.json"' in source
+    assert '"$EXPERIMENT_STATE" == "complete"' in source
+    assert '"$EXPERIMENT_STATE" == "stopped"' in source
+    assert "write_status stopped 0" in source
+    assert "success without a terminal state" in source

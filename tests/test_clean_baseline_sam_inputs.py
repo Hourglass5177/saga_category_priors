@@ -6,12 +6,16 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from category_priors.clean_baseline.sam_inputs import (
+    SAM_EVERYTHING_CONFIG,
     ColmapFrameSpec,
+    PackedMaskFrame,
     audit_scene_masks,
     colmap_frame_specs,
     ensure_scene_sam_masks,
+    load_packed_mask_frame,
     packed_frame_is_valid,
 )
 
@@ -119,7 +123,8 @@ def test_missing_packed_frame_is_generated_only_in_isolated_root(
         grounded_masks_root=masks, grounded_labels_root=labels,
         generation={
             "output_root": str(output), "checkpoint": str(checkpoint),
-            "sam_arch": "vit_h", "device": "cuda", "config": {},
+            "sam_arch": "vit_h", "device": "cuda",
+            "config": dict(SAM_EVERYTHING_CONFIG),
         },
         generator_factory=lambda *_args: Generator(),
     )
@@ -127,6 +132,71 @@ def test_missing_packed_frame_is_generated_only_in_isolated_root(
     assert result["source"] == "generated-isolated"
     assert not (primary / "frame.npz").exists()
     assert packed_frame_is_valid(output / "frame.npz", height=2, width=3)
+    assert (output / "generation_manifest.json").is_file()
+
+
+def test_generated_cache_is_bound_to_checkpoint_and_output_bytes(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    frame = ColmapFrameSpec("frame", "frame.jpg", 2, 3)
+    images, primary, output, masks, labels = [
+        tmp_path / value
+        for value in ("images", "historical-sam", "generated", "masks", "labels")
+    ]
+    for root in (images, primary, masks, labels):
+        root.mkdir()
+    (images / "frame.jpg").write_bytes(b"image")
+    checkpoint = tmp_path / "sam.pth"
+    checkpoint.write_bytes(b"weight-v1")
+    image = np.zeros((2, 3, 3), dtype=np.uint8)
+    monkeypatch.setitem(
+        sys.modules,
+        "cv2",
+        SimpleNamespace(
+            IMREAD_COLOR=1,
+            COLOR_BGR2RGB=2,
+            imread=lambda *_args, **_kwargs: image.copy(),
+            cvtColor=lambda value, _mode: value[..., ::-1],
+        ),
+    )
+    calls: list[int] = []
+
+    class Generator:
+        def __init__(self, fill: bool):
+            self.fill = fill
+
+        def generate(self, _image):
+            calls.append(1)
+            return [{"segmentation": np.full((2, 3), self.fill, dtype=np.bool_)}]
+
+    generation = {
+        "output_root": str(output), "checkpoint": str(checkpoint),
+        "sam_arch": "vit_h", "device": "cuda",
+        "config": dict(SAM_EVERYTHING_CONFIG),
+    }
+    kwargs = dict(
+        frames=(frame,), images_root=images, primary_root=primary,
+        grounded_masks_root=masks, grounded_labels_root=labels,
+        generation=generation,
+    )
+    first = ensure_scene_sam_masks(
+        **kwargs, generator_factory=lambda *_args: Generator(True)
+    )
+    assert first["generation_attempted"] is True
+    assert len(calls) == 1
+    second = ensure_scene_sam_masks(
+        **kwargs, generator_factory=lambda *_args: Generator(False)
+    )
+    assert second["generation_attempted"] is False
+    assert len(calls) == 1
+
+    checkpoint.write_bytes(b"weight-v2")
+    third = ensure_scene_sam_masks(
+        **kwargs, generator_factory=lambda *_args: Generator(False)
+    )
+    assert third["generation_attempted"] is True
+    assert len(calls) == 2
+    assert not load_packed_mask_frame(output / "frame.npz").dense_batch(0, 1).any()
 
 
 def test_missing_checkpoint_is_explicitly_unavailable_without_download(tmp_path: Path) -> None:
@@ -145,3 +215,79 @@ def test_missing_checkpoint_is_explicitly_unavailable_without_download(tmp_path:
     assert result["status"] == "unavailable"
     assert result["generation_attempted"] is False
     assert result["download_attempted"] is False
+
+
+@pytest.mark.parametrize("output_kind", ["empty", "same", "nested", "ancestor"])
+def test_generation_output_must_be_explicit_and_disjoint_from_history(
+    tmp_path: Path, output_kind: str,
+) -> None:
+    frame = ColmapFrameSpec("frame", "frame.jpg", 1, 1)
+    images = tmp_path / "images"
+    primary = tmp_path / "historical" / "sam"
+    masks, labels = tmp_path / "masks", tmp_path / "labels"
+    for root in (images, primary, masks, labels):
+        root.mkdir(parents=True)
+    checkpoint = tmp_path / "sam.pth"
+    checkpoint.write_bytes(b"weight")
+    if output_kind == "empty":
+        output: str | Path = ""
+    elif output_kind == "same":
+        output = primary
+    elif output_kind == "nested":
+        output = primary / "generated"
+    else:
+        output = primary.parent
+    result = ensure_scene_sam_masks(
+        frames=(frame,), images_root=images, primary_root=primary,
+        grounded_masks_root=masks, grounded_labels_root=labels,
+        generation={"output_root": output, "checkpoint": checkpoint},
+    )
+    assert result["status"] == "unavailable"
+    assert result["generation_attempted"] is False
+    assert "output_root" in result["reason"]
+
+
+def test_packed_masks_reject_dtype_coercion_and_nonzero_padding(tmp_path: Path) -> None:
+    wrong_dtype = tmp_path / "float.npz"
+    np.savez_compressed(
+        wrong_dtype,
+        packed=np.asarray([[128.0]], dtype=np.float32),
+        count=np.asarray(1), height=np.asarray(1), width=np.asarray(1),
+    )
+    assert not packed_frame_is_valid(wrong_dtype, height=1, width=1)
+    with pytest.raises(ValueError, match="invalid packed"):
+        load_packed_mask_frame(wrong_dtype, height=1, width=1)
+
+    bad_padding = tmp_path / "padding.npz"
+    np.savez_compressed(
+        bad_padding,
+        packed=np.asarray([[129]], dtype=np.uint8),
+        count=np.asarray(1), height=np.asarray(1), width=np.asarray(1),
+    )
+    assert not packed_frame_is_valid(bad_padding, height=1, width=1)
+    with pytest.raises(ValueError, match="count must be one integer"):
+        PackedMaskFrame(
+            packed=np.zeros((1, 1), dtype=np.uint8),
+            count=1.5, height=1, width=1,
+        )
+
+
+def test_generation_rejects_nonregistered_sam_parameters(tmp_path: Path) -> None:
+    frame = ColmapFrameSpec("frame", "frame.jpg", 1, 1)
+    roots = [tmp_path / value for value in ("images", "sam", "masks", "labels")]
+    for root in roots:
+        root.mkdir()
+    checkpoint = tmp_path / "sam.pth"
+    checkpoint.write_bytes(b"weight")
+    result = ensure_scene_sam_masks(
+        frames=(frame,), images_root=roots[0], primary_root=roots[1],
+        grounded_masks_root=roots[2], grounded_labels_root=roots[3],
+        generation={
+            "output_root": str(tmp_path / "generated"),
+            "checkpoint": str(checkpoint),
+            "config": {**SAM_EVERYTHING_CONFIG, "points_per_side": 16},
+        },
+    )
+    assert result["status"] == "unavailable"
+    assert result["generation_attempted"] is False
+    assert "frozen configuration" in result["reason"]

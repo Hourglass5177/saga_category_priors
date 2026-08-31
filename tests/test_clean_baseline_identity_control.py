@@ -21,6 +21,7 @@ from category_priors.clean_baseline.identity_control import (
     IdentityControlConfig,
     IdentitySceneInput,
     binary_auroc,
+    build_identity_control_run_identity,
     edge_components,
     edge_feature_matrix,
     fit_balanced_l2_logistic,
@@ -187,6 +188,13 @@ def test_three_scene_identity_control_is_offline_and_uses_held_out_gate(
             uniform_output_json=output,
             evaluation_class_names=EVALUATION_CLASSES,
         )
+        inputs[scene_id].bank_dir.mkdir(parents=True, exist_ok=True)
+        (inputs[scene_id].bank_dir / "evidence.npz").write_bytes(b"evidence")
+        (inputs[scene_id].bank_dir / "masks.json").write_bytes(b"masks")
+        (inputs[scene_id].bank_dir / "diagnostics.json").write_bytes(
+            b"diagnostics"
+        )
+        inputs[scene_id].gt_npz.write_bytes(b"gt")
     control = IdentityControlConfig(assets=assets)
 
     def prepared(scene_id: str):
@@ -240,7 +248,9 @@ def test_three_scene_identity_control_is_offline_and_uses_held_out_gate(
     assert result["validation"]["learned_edge_auroc"] == 1.0
     assert result["validation"]["new_matched_gt_iou050_count"] == 2
     assert result["gate"]["passed"] is True
-    assert load_json(output)["identity"] == control.identity()
+    expected_identity = build_identity_control_run_identity(control, inputs)
+    assert load_json(output)["identity"] == expected_identity
+    assert expected_identity["content_sha256"]
 
     monkeypatch.setattr(
         "category_priors.clean_baseline.identity_control._prepare_scene",
@@ -251,3 +261,20 @@ def test_three_scene_identity_control_is_offline_and_uses_held_out_gate(
     assert run_identity_edge_control(
         control=control, scenes=inputs, output_path=output
     ) == result
+
+    # A path-stable mutation changes the cache boundary and cannot silently
+    # reuse a control result fitted/evaluated on different predictions.
+    before = expected_identity["content_sha256"]
+    write_json(
+        inputs[validation_scene].uniform_output_json,
+        {
+            "scene_id": validation_scene,
+            "condition": "U-global",
+            "point_labels": [0] * 8,
+            "instances": {"0": {"class": "chair", "score": 1.0}},
+        },
+    )
+    after = build_identity_control_run_identity(control, inputs)[
+        "content_sha256"
+    ]
+    assert after != before

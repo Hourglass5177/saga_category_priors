@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 import hashlib
 from itertools import combinations
 import json
-from typing import Callable, Iterable, Sequence
+from typing import Callable, Iterable, Mapping, Sequence
 
 import numpy as np
 
@@ -214,13 +214,13 @@ def detect_undersegmented_masks(
     MaskClustering defines under-segmentation as a *frequency*: for every frame
     in which the target is sufficiently visible, form the frame's mask-ID
     distribution over that visible support.  A frame is diverse when no one
-    mask ID (including the unassigned/background ID) approximately contains the
-    target.  The target is rejected only when the fraction of diverse observer
-    frames is strictly greater than ``undersegment_filter_threshold``.
+    assigned mask ID approximately contains the target.  The target is rejected
+    only when the fraction of diverse observer frames is strictly greater than
+    ``undersegment_filter_threshold``.
 
     Same-frame ambiguous Gaussians abstain from the distribution.  A frame with
-    no remaining mask evidence is background-concentrated, not spuriously
-    diverse.
+    no remaining mask evidence is an abstention, not a background observation
+    and not a spuriously diverse observation.
     """
 
     config.validate()
@@ -238,6 +238,39 @@ def detect_undersegmented_masks(
             if rows
             else np.empty(0, dtype=np.int64)
         )
+    # For each physical frame, collapse all non-ambiguous mask assignments to
+    # one sorted ID/label row.  The old implementation intersected the target
+    # separately with every same-frame mask, giving target x frame x mask
+    # complexity.  This index preserves the same deterministic "later sorted
+    # mask wins" behavior for malformed overlapping inputs while requiring one
+    # intersection per target/frame.
+    assignments_by_frame: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    for frame_id, frame_items in by_frame.items():
+        assigned_ids: list[np.ndarray] = []
+        assigned_labels: list[np.ndarray] = []
+        for local_label, candidate in enumerate(
+            sorted(frame_items, key=lambda item: item.mask_id)
+        ):
+            ids = candidate.association_ids
+            if ids.size == 0:
+                continue
+            assigned_ids.append(ids)
+            assigned_labels.append(
+                np.full(ids.size, local_label, dtype=np.int64)
+            )
+        if not assigned_ids:
+            continue
+        concatenated_ids = np.concatenate(assigned_ids)
+        concatenated_labels = np.concatenate(assigned_labels)
+        order = np.argsort(concatenated_ids, kind="stable")
+        sorted_ids = concatenated_ids[order]
+        sorted_labels = concatenated_labels[order]
+        keep_last = np.ones(sorted_ids.size, dtype=bool)
+        keep_last[:-1] = sorted_ids[:-1] != sorted_ids[1:]
+        assignments_by_frame[frame_id] = (
+            sorted_ids[keep_last],
+            sorted_labels[keep_last],
+        )
 
     for target_index in sorted(range(len(items)), key=lambda index: items[index].mask_id):
         target = items[target_index]
@@ -246,7 +279,11 @@ def detect_undersegmented_masks(
             continue
         observable_frames = 0
         diverse_frames = 0
-        for frame_id in range(visible.shape[0]):
+        # Frames without any mask assignment are geometry abstentions for this
+        # statistic, so they can be skipped entirely.
+        for frame_id, (assigned_ids, assigned_labels) in sorted(
+            assignments_by_frame.items()
+        ):
             visible_target = target_ids[visible[frame_id, target_ids]]
             frame_ambiguous = ambiguous_by_frame.get(
                 frame_id, np.empty(0, dtype=np.int64)
@@ -261,28 +298,23 @@ def detect_undersegmented_masks(
                 < config.mask_visible_threshold
             ):
                 continue
-            observable_frames += 1
-
-            # -1 is the explicit unassigned/background mask ID.  Ambiguous
-            # points were removed above, so every remaining point contributes
-            # exactly one distribution vote or abstains as background.
-            labels = np.full(visible_target.size, -1, dtype=np.int64)
-            evidence_found = False
-            for local_label, candidate in enumerate(
-                sorted(by_frame.get(frame_id, ()), key=lambda item: item.mask_id)
-            ):
-                overlap = np.intersect1d(
-                    visible_target, candidate.association_ids, assume_unique=True
-                )
-                if overlap.size == 0:
-                    continue
-                evidence_found = True
-                positions = np.searchsorted(visible_target, overlap)
-                labels[positions] = local_label
-            if not evidence_found:
+            # -1 is the explicit unassigned/background mask ID.  MaskClustering
+            # only treats a frame as an observer after some *mask* evidence is
+            # present, and computes diversity over assigned mask IDs rather
+            # than letting uncovered/background support form a fake class.
+            _, _, assigned_positions = np.intersect1d(
+                visible_target,
+                assigned_ids,
+                assume_unique=True,
+                return_indices=True,
+            )
+            if assigned_positions.size == 0:
                 continue
-            _, counts = np.unique(labels, return_counts=True)
-            dominant_fraction = float(counts.max() / visible_target.size)
+            observable_frames += 1
+            _, counts = np.unique(
+                assigned_labels[assigned_positions], return_counts=True
+            )
+            dominant_fraction = float(counts.max() / assigned_positions.size)
             if dominant_fraction < config.contained_threshold:
                 diverse_frames += 1
 
@@ -321,19 +353,33 @@ def compute_pair_consensus(
     *,
     config: ConsensusConfig = ConsensusConfig(),
     active_indices: Sequence[int] | None = None,
+    rejected_mask_ids: Sequence[int] = (),
 ) -> PairConsensus:
     """Compute observer/supporter view consensus between two components."""
 
     config.validate()
     items, visible_raw, _ = _validate_inputs(observations, visibility)
     visible = _visible_boolean(visible_raw, config.mask_visible_threshold)
-    active = tuple(range(len(items))) if active_indices is None else tuple(active_indices)
+    rejected_set = {int(value) for value in rejected_mask_ids}
+    known_mask_ids = {item.mask_id for item in items}
+    if not rejected_set.issubset(known_mask_ids):
+        raise ValueError("rejected_mask_ids contains an unknown mask")
+    active_raw = (
+        tuple(range(len(items)))
+        if active_indices is None
+        else tuple(int(index) for index in active_indices)
+    )
     left = tuple(sorted(set(int(value) for value in left_indices)))
     right = tuple(sorted(set(int(value) for value in right_indices)))
     if not left or not right or set(left) & set(right):
         raise ValueError("pair components must be non-empty and disjoint")
-    if any(index < 0 or index >= len(items) for index in left + right + active):
+    if any(index < 0 or index >= len(items) for index in left + right + active_raw):
         raise ValueError("component index is outside observations")
+    active = tuple(
+        index for index in active_raw if items[index].mask_id not in rejected_set
+    )
+    if any(items[index].mask_id in rejected_set for index in left + right):
+        raise ValueError("a rejected mask cannot form a pair component")
 
     left_support = _component_support(left, items)
     right_support = _component_support(right, items)
@@ -342,6 +388,12 @@ def compute_pair_consensus(
     by_frame: dict[int, list[MaskObservation]] = {}
     for index in active:
         by_frame.setdefault(items[index].frame_id, []).append(items[index])
+    rejected_support_by_frame: dict[int, list[np.ndarray]] = {}
+    for item in items:
+        if item.mask_id in rejected_set and item.association_ids.size:
+            rejected_support_by_frame.setdefault(item.frame_id, []).append(
+                item.association_ids
+            )
     return _pair_consensus_from_support(
         left_support,
         right_support,
@@ -350,6 +402,7 @@ def compute_pair_consensus(
         by_frame,
         visible,
         config,
+        rejected_support_by_frame,
     )
 
 
@@ -361,6 +414,7 @@ def _pair_consensus_from_support(
     by_frame: dict[int, list[MaskObservation]],
     visible: np.ndarray,
     config: ConsensusConfig,
+    abstain_masks_by_frame: Mapping[int, Sequence[np.ndarray]] | None = None,
 ) -> PairConsensus:
     if left_support.size == 0 or right_support.size == 0:
         return PairConsensus(left_masks, right_masks, 0, 0, 0.0)
@@ -392,6 +446,37 @@ def _pair_consensus_from_support(
             left_visible.size / left_support.size < config.mask_visible_threshold
             or right_visible.size / right_support.size < config.mask_visible_threshold
         ):
+            continue
+        # Filtering an under-segmented mask must only withdraw the target/frame
+        # visibility entries for which that rejected mask was actually the
+        # containing witness.  Clearing its whole physical frame globally
+        # would erase valid negative evidence for unrelated objects.
+        abstainers = (
+            ()
+            if abstain_masks_by_frame is None
+            else abstain_masks_by_frame.get(frame_id, ())
+        )
+        target_abstains = False
+        for rejected_support in abstainers:
+            left_coverage = (
+                np.intersect1d(
+                    left_visible, rejected_support, assume_unique=True
+                ).size
+                / left_visible.size
+            )
+            right_coverage = (
+                np.intersect1d(
+                    right_visible, rejected_support, assume_unique=True
+                ).size
+                / right_visible.size
+            )
+            if (
+                left_coverage >= config.contained_threshold
+                or right_coverage >= config.contained_threshold
+            ):
+                target_abstains = True
+                break
+        if target_abstains:
             continue
         observers += 1
         for candidate in frame_masks:
@@ -589,16 +674,15 @@ def run_mask_consensus(
             if rows
             else np.empty(0, dtype=np.int64)
         )
-    # A rejected under-segmented mask is removed both as a graph node and as
-    # evidence supplied by its source frame.  This mirrors MaskClustering's
-    # removal of that frame from F/M sets instead of letting a rejected mask
-    # inflate or depress another pair's consensus.
-    rejected_frames = {
-        item.frame_id for item in items if item.mask_id in rejected_set
-    }
-    if rejected_frames:
-        visible = visible.copy()
-        visible[np.asarray(sorted(rejected_frames), dtype=np.int64), :] = False
+    # Rejected masks are removed as graph nodes/supporters.  Their effect on an
+    # observer denominator is target-specific: only a target that was actually
+    # contained by that rejected mask abstains in its source frame.
+    rejected_support_by_frame: dict[int, list[np.ndarray]] = {}
+    for item in items:
+        if item.mask_id in rejected_set and item.association_ids.size:
+            rejected_support_by_frame.setdefault(item.frame_id, []).append(
+                item.association_ids
+            )
     uf = _DeterministicUnionFind(len(items))
     components: dict[int, set[int]] = {index: {index} for index in active}
     component_supports = {
@@ -622,6 +706,7 @@ def run_mask_consensus(
             by_frame,
             visible,
             config,
+            rejected_support_by_frame,
         )
 
     def rebuild_pair_cache() -> dict[tuple[int, int], PairConsensus]:
@@ -820,27 +905,35 @@ def run_mask_consensus(
         components.values(),
         key=lambda members: tuple(sorted(items[index].mask_id for index in members)),
     ):
-        frame_ids = tuple(sorted({items[index].frame_id for index in component}))
-        if len(frame_ids) < config.min_views:
+        component_frame_ids_final = tuple(
+            sorted({items[index].frame_id for index in component})
+        )
+        if len(component_frame_ids_final) < config.min_views:
             dropped_by_views += 1
             continue
         full_ids = _component_full(component, items)
         if full_ids.size == 0:
             dropped_by_detection += 1
             continue
-        eligible_visibility = visible[:, full_ids].copy()
-        for frame_id, ambiguous_ids in ambiguity_by_frame_all.items():
-            if ambiguous_ids.size == 0:
-                continue
-            ambiguous_positions = np.isin(
-                full_ids, ambiguous_ids, assume_unique=True
-            )
-            eligible_visibility[frame_id, ambiguous_positions] = False
+        # Accumulate one frame at a time.  Materialising visible[:, full_ids]
+        # used memory proportional to frames x component points, even though
+        # only the two per-point counts survive this loop.
+        visible_counts = np.zeros(full_ids.size, dtype=np.int64)
         detection_counts = np.zeros(full_ids.size, dtype=np.int64)
         member_indices_by_frame: dict[int, list[int]] = {}
         for index in component:
             member_indices_by_frame.setdefault(items[index].frame_id, []).append(index)
-        for frame_id, frame_indices in member_indices_by_frame.items():
+        for frame_id in range(visible.shape[0]):
+            eligible_in_frame = visible[frame_id, full_ids].copy()
+            ambiguous_ids = ambiguity_by_frame_all[frame_id]
+            if ambiguous_ids.size:
+                eligible_in_frame &= ~np.isin(
+                    full_ids, ambiguous_ids, assume_unique=True
+                )
+            visible_counts += eligible_in_frame.astype(np.int64)
+            frame_indices = member_indices_by_frame.get(frame_id, ())
+            if not frame_indices:
+                continue
             detected_in_frame = np.zeros(full_ids.size, dtype=bool)
             for index in frame_indices:
                 detected_in_frame |= np.isin(
@@ -850,9 +943,8 @@ def run_mask_consensus(
             # evidence as its denominator.  In particular, invisible and
             # same-frame ambiguous points can neither help nor hurt the ratio.
             detection_counts += (
-                detected_in_frame & eligible_visibility[frame_id]
+                detected_in_frame & eligible_in_frame
             ).astype(np.int64)
-        visible_counts = eligible_visibility.sum(axis=0)
         ratios = np.divide(
             detection_counts,
             visible_counts,
@@ -865,23 +957,51 @@ def run_mask_consensus(
         if filtered_ids.size == 0:
             dropped_by_detection += 1
             continue
-        mask_ids = tuple(sorted(items[index].mask_id for index in component))
-        component_edges = [
-            edge
-            for edge in accepted_edges
-            if set(edge.left_mask_ids + edge.right_mask_ids).issubset(mask_ids)
-        ]
-        mean_consensus = (
-            float(np.mean([edge.consensus for edge in component_edges]))
-            if component_edges
-            else 0.0
-        )
-        for part in split_disconnected_support(
+        physical_parts = split_disconnected_support(
             filtered_ids,
             xyz,
             eps_m=config.dbscan_eps_m,
             min_samples=config.dbscan_min_samples,
-        ):
+        )
+        if not physical_parts:
+            dropped_by_connectivity += 1
+            continue
+        for part in physical_parts:
+            # Physical splitting creates distinct output objects.  Each part
+            # retains only complete masks that actually support that part;
+            # otherwise a one-view fragment inherits unrelated parent-track
+            # views and can masquerade as a valid multi-view object.
+            part_indices = tuple(
+                index
+                for index in sorted(
+                    component, key=lambda value: items[value].mask_id
+                )
+                if np.intersect1d(
+                    part, items[index].association_ids, assume_unique=True
+                ).size
+                > 0
+            )
+            part_frame_ids = tuple(
+                sorted({items[index].frame_id for index in part_indices})
+            )
+            if len(part_frame_ids) < config.min_views:
+                dropped_by_views += 1
+                continue
+            part_mask_ids = tuple(
+                sorted(items[index].mask_id for index in part_indices)
+            )
+            component_edges = [
+                edge
+                for edge in accepted_edges
+                if set(edge.left_mask_ids + edge.right_mask_ids).issubset(
+                    part_mask_ids
+                )
+            ]
+            mean_consensus = (
+                float(np.mean([edge.consensus for edge in component_edges]))
+                if component_edges
+                else 0.0
+            )
             positions = np.searchsorted(filtered_ids, part)
             mean_detection = float(np.mean(filtered_ratios[positions]))
             geometric_quality = float(
@@ -890,18 +1010,14 @@ def run_mask_consensus(
             provisional.append(
                 ConsensusObject(
                     object_id=-1,
-                    mask_ids=mask_ids,
-                    frame_ids=frame_ids,
+                    mask_ids=part_mask_ids,
+                    frame_ids=part_frame_ids,
                     gaussian_ids=part,
                     mean_view_consensus=mean_consensus,
                     mean_detection_ratio=mean_detection,
                     geometric_quality=geometric_quality,
                 )
             )
-        if not any(
-            set(candidate.mask_ids) == set(mask_ids) for candidate in provisional
-        ):
-            dropped_by_connectivity += 1
 
     deduplicated = remove_contained_objects(
         provisional, contained_threshold=config.contained_threshold
@@ -933,6 +1049,7 @@ def run_mask_consensus(
         "raw_pair_evidence_count": len(initial_pair_rows),
         "pair_evaluation_count": pair_evaluation_count,
         "undersegmented_mask_count": len(rejected),
+        "undersegmented_source_frame_count": len(rejected_support_by_frame),
         "accepted_edge_count": len(accepted_edges),
         "observer_schedule": completed_schedule,
         "component_count_before_output_filters": len(components),

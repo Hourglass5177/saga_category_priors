@@ -25,7 +25,7 @@ from category_priors.clean_baseline.identity_control import (
     IdentityControlConfig,
 )
 from category_priors.evaluator import GroundTruthScene
-from category_priors.io import load_json, write_json
+from category_priors.io import hash_json, load_json, sha256_file, write_json
 from category_priors.clean_baseline.worker import DEFAULT_CLASSES
 from category_priors.taxonomy import load_taxonomy
 
@@ -76,7 +76,15 @@ def _write_scene_inputs(root: Path, scene_id: str) -> dict[str, object]:
 
 def _config(tmp_path: Path) -> CleanExperimentConfig:
     prior = tmp_path / "priors.json"
-    write_json(prior, {})
+    prior_payload = {
+        "kind": "category_priors",
+        "schema_version": "1.0",
+        "provenance": {"splits": ["train"]},
+        "global": {},
+        "categories": {},
+    }
+    prior_payload["content_sha256"] = hash_json(prior_payload)
+    write_json(prior, prior_payload)
     size_bins = tmp_path / "size-bins.json"
     boundaries = {
         "tiny_max_m": 0.5,
@@ -148,6 +156,15 @@ def _config(tmp_path: Path) -> CleanExperimentConfig:
                 "prepared_request": str(config.scenes[scene_id].evidence_request),
                 "gt_npz": str(config.scenes[scene_id].gt_npz),
                 "gaussian_ply": str(config.scenes[scene_id].gaussian_ply),
+                "content_identity": {
+                    "prepared_request_sha256": sha256_file(
+                        config.scenes[scene_id].evidence_request
+                    ),
+                    "gt_npz_sha256": sha256_file(config.scenes[scene_id].gt_npz),
+                    "gaussian_ply_sha256": sha256_file(
+                        config.scenes[scene_id].gaussian_ply
+                    ),
+                },
                 "tiny_small_instance_ids": [0],
                 "sam": {
                     "status": "complete",
@@ -162,21 +179,60 @@ def _config(tmp_path: Path) -> CleanExperimentConfig:
 def _oracle_result(scene_id: str, *, passed: bool = True) -> dict[str, object]:
     matches = 3 if passed else 0
     return {
-        "schema": "saga-clean-alpha-mask-geometry-oracle-v1",
+        "schema": "saga-clean-alpha-mask-geometry-oracle-v2",
         "scene_id": scene_id,
         "aggregate": {
             "official_valid": {
                 "gt_count": 4,
-                "perfect_association": {"match_050_count": matches},
+                "perfect_trim": {"match_050_count": matches},
             },
             "tiny_small_official_valid": {
                 "gt_count": 2,
-                "perfect_association": {
+                "perfect_trim": {
                     "match_025_count": 1 if passed else 0,
                 },
             },
         },
     }
+
+
+def test_prepared_scene_rejects_same_path_content_replacement(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    scene_id = config.dev2[0]
+    assert config.prepared_scene_spec(scene_id).scene_id == scene_id
+
+    # A resume must not silently evaluate an old evidence bank against a new
+    # GT payload merely because the filesystem path stayed the same.
+    config.scenes[scene_id].gt_npz.write_bytes(b"replacement")
+    with pytest.raises(ValueError, match="input content changed"):
+        config.prepared_scene_spec(scene_id)
+    with pytest.raises(ValueError, match="registration changed or became incomplete"):
+        experiment_module._prepare_registered_scene(config, scene_id)
+
+
+def test_geometry_gate_uses_true_support_ceiling_not_greedy_subset() -> None:
+    rows = []
+    for _scene in DEV2:
+        rows.append(
+            {
+                "aggregate": {
+                    "official_valid": {
+                        "gt_count": 4,
+                        "greedy_association": {"match_050_count": 0},
+                        "perfect_trim": {"match_050_count": 3},
+                    },
+                    "tiny_small_official_valid": {
+                        "gt_count": 2,
+                        "greedy_association": {"match_025_count": 0},
+                        "perfect_trim": {"match_025_count": 1},
+                    },
+                }
+            }
+        )
+    gate = experiment_module._aggregate_oracle_gate(rows)
+    assert gate["passed"] is True
+    assert gate["gate_metric"] == "perfect_trim_support_ceiling"
+    assert gate["greedy_association_used_for_gate"] is False
 
 
 def test_evidence_and_official_evaluation_vocabularies_cannot_be_conflated(
@@ -203,6 +259,23 @@ def test_old_config_without_explicit_vocabulary_split_is_rejected(
     payload.pop("evaluation_class_names")
     write_json(config.config_path, payload)
     with pytest.raises(KeyError):
+        CleanExperimentConfig.from_json(config.config_path)
+
+
+def test_nested_gt_field_cannot_reenter_formal_runtime_request(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    payload = load_json(config.config_path)
+    scene_id = DEV2[0]
+    payload["runtime_registration"][scene_id]["nested"] = {
+        "ground_truth_path": "forbidden.npz"
+    }
+    request = load_json(config.scenes[scene_id].evidence_request)
+    request["runtime_registration"] = payload["runtime_registration"][scene_id]
+    write_json(config.scenes[scene_id].evidence_request, request)
+    write_json(config.config_path, payload)
+    with pytest.raises(ValueError, match="evaluation-only fields leaked"):
         CleanExperimentConfig.from_json(config.config_path)
 
 
@@ -258,6 +331,52 @@ def test_geometry_oracle_receives_complete_masks_including_ambiguity(
     assert [ids.tolist() for ids in captured["supports"]] == [[0, 1, 2]]
 
 
+def test_offline_oracle_excludes_geometry_abstained_visibility(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    bank = SimpleNamespace(
+        masks=(),
+        frames=(
+            SimpleNamespace(frame_id=0, geometry_abstained=False),
+            SimpleNamespace(frame_id=1, geometry_abstained=True),
+        ),
+        frame_count=2,
+        point_count=3,
+        xyz_m=np.zeros((3, 3), dtype=np.float64),
+        visibility_for_frame=lambda _frame_id: (
+            np.arange(3, dtype=np.int64),
+            np.ones(3),
+        ),
+    )
+    captured: dict[str, np.ndarray] = {}
+    monkeypatch.setattr(experiment_module, "load_evidence_bank", lambda *_a, **_k: bank)
+    monkeypatch.setattr(
+        experiment_module,
+        "_scene_gt_adapter",
+        lambda *_a, **_k: (None, (), np.empty(0, dtype=np.int64), {}),
+    )
+    monkeypatch.setattr(
+        experiment_module.SizePriorTable,
+        "from_category_priors",
+        lambda _payload: object(),
+    )
+
+    def capture(_observations, visibility, _xyz, **_kwargs):
+        captured["visibility"] = np.asarray(visibility)
+        return SimpleNamespace(objects=(), accepted_edges=())
+
+    monkeypatch.setattr(experiment_module, "run_mask_consensus", capture)
+    candidates, decisions, rows = experiment_module._oracle_candidates(
+        config, DEV2[0], tmp_path
+    )
+    assert candidates == [] and decisions == [] and rows == []
+    np.testing.assert_array_equal(
+        captured["visibility"],
+        np.asarray([[True, True, True], [False, False, False]]),
+    )
+
+
 def _offline_identity_bank(
     bank_dir: Path, scene_id: str = DEV2[0]
 ) -> SimpleNamespace:
@@ -269,7 +388,7 @@ def _offline_identity_bank(
     ):
         (bank_dir / name).write_bytes(payload)
     bank = SimpleNamespace(
-        schema="saga-clean-alpha-mask-evidence-v1",
+        schema="saga-clean-alpha-mask-evidence-v2",
         scene_id=scene_id,
         masks=(SimpleNamespace(global_mask_id=7, frame_id=3),),
         point_count=3,
@@ -288,7 +407,7 @@ def _offline_identity_bank(
     return bank
 
 
-def test_geometry_oracle_recomputes_when_same_gt_path_content_changes(
+def test_geometry_oracle_rejects_registered_gt_change_and_recomputes_bank_change(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = _config(tmp_path)
@@ -331,8 +450,20 @@ def test_geometry_oracle_recomputes_when_same_gt_path_content_changes(
 
     # The path is unchanged.  Only its bytes change, so a path-only cache
     # would incorrectly reuse the old diagnostic.
+    original_gt = config.scenes[scene_id].gt_npz.read_bytes()
     with config.scenes[scene_id].gt_npz.open("ab") as handle:
         handle.write(b"changed-gt-content")
+    with pytest.raises(ValueError, match="input content changed"):
+        experiment_module._default_geometry_oracle(
+            config,
+            scene_id=scene_id,
+            bank_dir=bank_dir,
+            output_path=output,
+        )
+    assert calls == 1
+    config.scenes[scene_id].gt_npz.write_bytes(original_gt)
+    with (bank_dir / "evidence.npz").open("ab") as handle:
+        handle.write(b"changed-bank-content")
     third = experiment_module._default_geometry_oracle(
         config,
         scene_id=scene_id,
@@ -344,20 +475,6 @@ def test_geometry_oracle_recomputes_when_same_gt_path_content_changes(
     assert (
         first["run_identity"]["content_sha256"]
         != third["run_identity"]["content_sha256"]
-    )
-    with (bank_dir / "evidence.npz").open("ab") as handle:
-        handle.write(b"changed-bank-content")
-    fourth = experiment_module._default_geometry_oracle(
-        config,
-        scene_id=scene_id,
-        bank_dir=bank_dir,
-        output_path=output,
-    )
-    assert calls == 3
-    assert fourth["runner_status"] == "complete"
-    assert (
-        third["run_identity"]["content_sha256"]
-        != fourth["run_identity"]["content_sha256"]
     )
 
 
@@ -622,6 +739,8 @@ def test_happy_path_reaches_dev8_and_keeps_formal_runtime_gt_free(
 
     assert result["status"] == "complete"
     assert result["checkpoint"] == "final48-complete"
+    assert result["current_stage"] is None
+    assert experiment_module._load_state(config)["status"] == "complete"
     assert result["candidate_prior_tested"] is True
     assert result["oracle_class_formal_output"] is False
     assert len([call for call in calls if call[0] == "formal"]) == 184
@@ -794,6 +913,94 @@ def test_interrupted_stage_resumes_from_last_complete_checkpoint(
     assert [entry["stage"] for entry in result["history"]].count("validated") == 1
 
 
+def test_state_content_and_stage_chain_reject_tampering(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    state = experiment_module._load_state(config)
+    raw = load_json(config.state_path)
+    raw["checkpoint"] = "tune24-evaluate"
+    write_json(config.state_path, raw)
+    with pytest.raises(ValueError, match="content identity mismatch"):
+        experiment_module._load_state(config)
+
+    # Even an internally re-hashed file cannot authorize a skipped stage.
+    raw.pop("content_sha256", None)
+    raw["content_sha256"] = hash_json(raw)
+    write_json(config.state_path, raw)
+    with pytest.raises(ValueError, match="history skips or reorders"):
+        experiment_module._load_state(config)
+
+
+def test_terminal_resume_revalidates_commit_and_dirty_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    monkeypatch.setattr(
+        experiment_module,
+        "_validate_registered_inputs",
+        lambda _: {"gt_as_prediction_parity": True},
+    )
+    result = run_clean_baseline_experiment(
+        config, _hooks([], geometry_passed=False)
+    )
+    assert result["status"] == "stopped"
+
+    monkeypatch.setattr(
+        experiment_module,
+        "_validate_deployment_environment",
+        lambda _config: (_ for _ in ()).throw(
+            RuntimeError("deployment identity changed")
+        ),
+    )
+    with pytest.raises(RuntimeError, match="deployment identity changed"):
+        run_clean_baseline_experiment(config)
+
+
+def test_interrupted_identity_control_rewinds_to_registered_dev8_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple] = []
+    config = _config(tmp_path)
+    identity_assets = {
+        scene_id: IdentityAssetPaths(
+            tmp_path / f"{scene_id}-feature.ply",
+            tmp_path / f"{scene_id}-gaussian.ply",
+        )
+        for scene_id in (*DEV2, "scene0046_00")
+    }
+    config = replace(
+        config,
+        identity_control=IdentityControlConfig(assets=identity_assets),
+        identity_control_registration={
+            "schema": IDENTITY_CONTROL_REGISTRATION_SCHEMA,
+            "status": "available",
+            "train_scene_ids": list(DEV2),
+            "validation_scene_id": "scene0046_00",
+            "issues": [],
+        },
+    )
+    hooks = replace(
+        _hooks(calls),
+        run_identity_control=lambda **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("interrupted identity control")
+        ),
+    )
+    monkeypatch.setattr(
+        experiment_module,
+        "_validate_registered_inputs",
+        lambda _: {"gt_as_prediction_parity": True},
+    )
+    monkeypatch.setattr(experiment_module, "_dev8_health_gate", lambda *_: {"passed": False})
+    with pytest.raises(RuntimeError, match="interrupted identity control"):
+        run_clean_baseline_experiment(config, hooks)
+    persisted = load_json(config.state_path)
+    assert persisted["checkpoint"] == "dev8-evidence"
+    assert persisted["current_stage"] is None
+    assert persisted["next_stage"] == "dev8-uniform"
+    # The persisted state is loadable and will safely replay the parent stage.
+    loaded = experiment_module._load_state(config)
+    assert loaded["next_stage"] == "dev8-uniform"
+
+
 def test_registered_splits_cannot_overlap(tmp_path: Path) -> None:
     config = _config(tmp_path)
     payload = load_json(config.config_path)
@@ -859,7 +1066,8 @@ def test_stage0_records_provenance_sai3d_skip_and_exact_commit(
             "schema": "saga-clean-baseline-provenance-v1",
             "current_commit": config.code_commit,
         }
-        write_json(Path(kwargs["output_path"]), payload)
+        if kwargs.get("output_path") is not None:
+            write_json(Path(kwargs["output_path"]), payload)
         return payload
 
     monkeypatch.setattr(

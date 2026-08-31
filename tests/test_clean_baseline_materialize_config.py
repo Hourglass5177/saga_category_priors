@@ -168,6 +168,25 @@ def _fixture(tmp_path: Path) -> dict[str, Path]:
     }
 
 
+def test_formal_runtime_sanitizer_removes_nested_evaluation_inputs() -> None:
+    source = {
+        "scene_id": "scene0000_00",
+        "gt_npz": "top-level-gt.npz",
+        "nested": {
+            "ground_truth_path": "nested-gt.npz",
+            "keep": {"value": 7},
+        },
+        "items": [
+            {"replacement_gt": "replacement.npz", "image": "frame.jpg"}
+        ],
+    }
+    assert module._formal_runtime_fields(source) == {
+        "scene_id": "scene0000_00",
+        "nested": {"keep": {"value": 7}},
+        "items": [{"image": "frame.jpg"}],
+    }
+
+
 def test_materializes_strict_config_and_separates_32_from_20(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

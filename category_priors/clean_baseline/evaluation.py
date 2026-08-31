@@ -320,7 +320,7 @@ def _best_single(
     return best_iou, best_id, best_support
 
 
-def _greedy_perfect_association(
+def _greedy_association(
     supports: Sequence[np.ndarray],
     mask_ids: Sequence[Any],
     gt: np.ndarray,
@@ -372,7 +372,7 @@ def _aggregate_oracle_rows(
 ) -> dict[str, Any]:
     selected = list(rows) if selector is None else [row for row in rows if bool(row[selector])]
     result: dict[str, Any] = {"gt_count": len(selected)}
-    for metric in ("best_single", "perfect_association", "perfect_trim"):
+    for metric in ("best_single", "greedy_association", "perfect_trim"):
         values = [float(row[metric]) for row in selected]
         result[metric] = {
             "mean_iou": float(np.mean(values)) if values else 0.0,
@@ -415,9 +415,10 @@ def evaluate_geometry_oracles(
 ) -> dict[str, Any]:
     """Evaluate class-agnostic mask support ceilings in official point space.
 
-    ``perfect_association`` is a deterministic monotonic GT-only greedy union.
-    ``perfect_trim`` additionally assumes every false-positive point can be
-    removed and therefore measures support/coverage rather than deployable IoU.
+    ``greedy_association`` is a deterministic, monotonic GT-only greedy union;
+    it is a conservative diagnostic, not a mathematical upper bound.
+    ``perfect_trim`` assumes every false-positive point can be removed and
+    therefore is the true support/coverage ceiling rather than deployable IoU.
     """
 
     mapping = np.asarray(gt_point_to_gaussian)
@@ -447,7 +448,7 @@ def evaluate_geometry_oracles(
     rows: list[dict[str, Any]] = []
     for gt in gt_objects:
         single, single_id, _ = _best_single(projected, mask_ids, gt.point_ids)
-        associated, associated_ids = _greedy_perfect_association(
+        associated, associated_ids = _greedy_association(
             projected,
             mask_ids,
             gt.point_ids,
@@ -470,14 +471,19 @@ def evaluate_geometry_oracles(
                 "is_tiny_small": bool(gt.is_tiny_small),
                 "best_single": float(single),
                 "best_single_mask_id": single_id,
-                "perfect_association": float(associated),
-                "perfect_association_mask_ids": associated_ids,
+                "greedy_association": float(associated),
+                "greedy_association_mask_ids": associated_ids,
                 "perfect_trim": float(perfect_trim),
                 "perfect_trim_mask_ids": contributing,
             }
         )
     return {
-        "schema": "saga-clean-alpha-mask-geometry-oracle-v1",
+        "schema": "saga-clean-alpha-mask-geometry-oracle-v2",
+        "oracle_semantics": {
+            "greedy_association_is_upper_bound": False,
+            "perfect_trim_is_support_ceiling": True,
+            "perfect_trim_removes_false_positives": True,
+        },
         "mask_count": len(mask_gaussian_ids),
         "per_gt": rows,
         "aggregate": {

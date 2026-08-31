@@ -9,13 +9,15 @@ complete 2D masks, their sparse Gaussian support, and per-frame visibility.
 
 from dataclasses import dataclass, field
 import json
+import operator
+from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
 import numpy as np
 
 
-EVIDENCE_SCHEMA = "saga-clean-alpha-mask-evidence-v1"
-DIAGNOSTICS_SCHEMA = "saga-clean-alpha-mask-evidence-diagnostics-v1"
+EVIDENCE_SCHEMA = "saga-clean-alpha-mask-evidence-v2"
+DIAGNOSTICS_SCHEMA = "saga-clean-alpha-mask-evidence-diagnostics-v2"
 
 
 def _readonly(array: Any, dtype: Any, *, ndim: int, name: str) -> np.ndarray:
@@ -25,6 +27,37 @@ def _readonly(array: Any, dtype: Any, *, ndim: int, name: str) -> np.ndarray:
     result = np.ascontiguousarray(result)
     result.setflags(write=False)
     return result
+
+
+def _readonly_integer(
+    array: Any, dtype: Any, *, ndim: int, name: str
+) -> np.ndarray:
+    raw = np.asarray(array)
+    if raw.ndim != ndim:
+        raise ValueError(f"{name} must be {ndim}-dimensional")
+    if raw.size == 0:
+        result = np.ascontiguousarray(raw, dtype=dtype)
+        result.setflags(write=False)
+        return result
+    if np.issubdtype(raw.dtype, np.bool_) or not np.issubdtype(
+        raw.dtype, np.integer
+    ):
+        raise TypeError(f"{name} must use an integer dtype")
+    limits = np.iinfo(np.dtype(dtype))
+    if np.any(raw < limits.min) or np.any(raw > limits.max):
+        raise ValueError(f"{name} cannot be represented as {np.dtype(dtype)}")
+    result = np.ascontiguousarray(raw, dtype=dtype)
+    result.setflags(write=False)
+    return result
+
+
+def _integer_scalar(value: Any, name: str) -> int:
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{name} must be an integer")
+    try:
+        return int(operator.index(value))
+    except TypeError as exc:
+        raise TypeError(f"{name} must be an integer") from exc
 
 
 def _json_mapping(value: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -104,7 +137,7 @@ class AlphaMassFrame:
         tolerance = 5e-6 * np.maximum(visible[None, :], 1.0)
         if inside.size and np.any(inside - visible[None, :] > tolerance):
             raise ValueError("inside mass cannot exceed visible mass")
-        pixel_count = int(self.valid_pixel_count)
+        pixel_count = _integer_scalar(self.valid_pixel_count, "valid_pixel_count")
         if pixel_count < 0:
             raise ValueError("valid_pixel_count must be non-negative")
         if bool(self.geometry_abstained) and inside.shape[0] != 0:
@@ -132,15 +165,19 @@ class FrameMetadata:
     semantic_abstained: bool
 
     def __post_init__(self) -> None:
-        if int(self.frame_id) < 0:
+        frame_id = _integer_scalar(self.frame_id, "frame_id")
+        valid_pixel_count = _integer_scalar(
+            self.valid_pixel_count, "valid_pixel_count"
+        )
+        if frame_id < 0:
             raise ValueError("frame_id must be non-negative")
         if not isinstance(self.image_name, str) or not self.image_name.strip():
             raise ValueError("image_name must be a non-empty string")
-        if int(self.valid_pixel_count) < 0:
+        if valid_pixel_count < 0:
             raise ValueError("valid_pixel_count must be non-negative")
-        object.__setattr__(self, "frame_id", int(self.frame_id))
+        object.__setattr__(self, "frame_id", frame_id)
         object.__setattr__(self, "image_name", self.image_name.strip())
-        object.__setattr__(self, "valid_pixel_count", int(self.valid_pixel_count))
+        object.__setattr__(self, "valid_pixel_count", valid_pixel_count)
         object.__setattr__(self, "geometry_abstained", bool(self.geometry_abstained))
         object.__setattr__(self, "semantic_abstained", bool(self.semantic_abstained))
 
@@ -153,15 +190,18 @@ class MaskMetadata:
     mask_index: int
 
     def __post_init__(self) -> None:
-        if int(self.global_mask_id) < 0:
+        global_mask_id = _integer_scalar(self.global_mask_id, "global_mask_id")
+        frame_id = _integer_scalar(self.frame_id, "frame_id")
+        mask_index = _integer_scalar(self.mask_index, "mask_index")
+        if global_mask_id < 0:
             raise ValueError("global_mask_id must be non-negative")
-        if int(self.frame_id) < 0 or int(self.mask_index) < 0:
+        if frame_id < 0 or mask_index < 0:
             raise ValueError("frame_id and mask_index must be non-negative")
         if not isinstance(self.image_name, str) or not self.image_name.strip():
             raise ValueError("mask image_name must be non-empty")
-        object.__setattr__(self, "global_mask_id", int(self.global_mask_id))
-        object.__setattr__(self, "frame_id", int(self.frame_id))
-        object.__setattr__(self, "mask_index", int(self.mask_index))
+        object.__setattr__(self, "global_mask_id", global_mask_id)
+        object.__setattr__(self, "frame_id", frame_id)
+        object.__setattr__(self, "mask_index", mask_index)
         object.__setattr__(self, "image_name", self.image_name.strip())
 
 
@@ -200,8 +240,10 @@ class MaskSupportCSR:
     point_count: int
 
     def __post_init__(self) -> None:
-        indptr = _readonly(self.indptr, np.int64, ndim=1, name="support.indptr")
-        ids = _readonly(
+        indptr = _readonly_integer(
+            self.indptr, np.int64, ndim=1, name="support.indptr"
+        )
+        ids = _readonly_integer(
             self.gaussian_ids, np.int32, ndim=1, name="support.gaussian_ids"
         )
         mass = _readonly(
@@ -213,7 +255,8 @@ class MaskSupportCSR:
         ambiguous = _readonly(
             self.ambiguous, np.bool_, ndim=1, name="support.ambiguous"
         )
-        rows, points = int(self.row_count), int(self.point_count)
+        rows = _integer_scalar(self.row_count, "support.row_count")
+        points = _integer_scalar(self.point_count, "support.point_count")
         if rows < 0 or points <= 0:
             raise ValueError("support row_count must be non-negative and point_count positive")
         _validate_csr(
@@ -266,14 +309,17 @@ class PackedVisibility:
     point_count: int
 
     def __post_init__(self) -> None:
-        indptr = _readonly(self.indptr, np.int64, ndim=1, name="visibility.indptr")
-        ids = _readonly(
+        indptr = _readonly_integer(
+            self.indptr, np.int64, ndim=1, name="visibility.indptr"
+        )
+        ids = _readonly_integer(
             self.gaussian_ids, np.int32, ndim=1, name="visibility.gaussian_ids"
         )
         mass = _readonly(
             self.visible_mass, np.float32, ndim=1, name="visibility.visible_mass"
         )
-        rows, points = int(self.row_count), int(self.point_count)
+        rows = _integer_scalar(self.row_count, "visibility.row_count")
+        points = _integer_scalar(self.point_count, "visibility.point_count")
         if rows < 0 or points <= 0:
             raise ValueError("visibility row_count must be non-negative and point_count positive")
         _validate_csr(
@@ -306,9 +352,14 @@ class PackedIndexRows:
     name: str = "packed_indices"
 
     def __post_init__(self) -> None:
-        indptr = _readonly(self.indptr, np.int64, ndim=1, name=f"{self.name}.indptr")
-        ids = _readonly(self.ids, np.int32, ndim=1, name=f"{self.name}.ids")
-        rows, upper = int(self.row_count), int(self.upper_bound)
+        indptr = _readonly_integer(
+            self.indptr, np.int64, ndim=1, name=f"{self.name}.indptr"
+        )
+        ids = _readonly_integer(
+            self.ids, np.int32, ndim=1, name=f"{self.name}.ids"
+        )
+        rows = _integer_scalar(self.row_count, f"{self.name}.row_count")
+        upper = _integer_scalar(self.upper_bound, f"{self.name}.upper_bound")
         if rows < 0 or upper <= 0:
             raise ValueError("packed rows require non-negative rows and positive upper bound")
         _validate_csr(indptr, ids, row_count=rows, column_count=upper, name=self.name)
@@ -342,7 +393,7 @@ class FrameEvidence:
             raise ValueError("frame support/visibility row counts are inconsistent")
         if self.support.point_count != self.visibility.point_count:
             raise ValueError("frame support and visibility point counts differ")
-        ambiguous = _readonly(
+        ambiguous = _readonly_integer(
             self.ambiguous_gaussians,
             np.int32,
             ndim=1,
@@ -413,10 +464,16 @@ class AlphaMaskEvidenceBank:
     semantic_abstained: np.ndarray
     source: Mapping[str, Any] = field(default_factory=dict)
     schema: str = EVIDENCE_SCHEMA
+    _frame_positions: Mapping[int, int] = field(
+        init=False, repr=False, compare=False
+    )
+    _mask_positions: Mapping[int, int] = field(
+        init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         scene = str(self.scene_id).strip()
-        points = int(self.point_count)
+        points = _integer_scalar(self.point_count, "point_count")
         classes = tuple(str(value).strip() for value in self.class_names)
         frames = tuple(self.frames)
         masks = tuple(self.masks)
@@ -436,8 +493,10 @@ class AlphaMaskEvidenceBank:
         if not frames:
             raise ValueError("an evidence bank must contain at least one frame")
         frame_ids = [frame.frame_id for frame in frames]
-        if frame_ids != sorted(frame_ids) or len(frame_ids) != len(set(frame_ids)):
-            raise ValueError("frames must be sorted by unique frame_id")
+        if frame_ids != list(range(len(frames))):
+            raise ValueError(
+                "bank frame_id values must be contiguous packed row IDs starting at zero"
+            )
         global_ids = [mask.global_mask_id for mask in masks]
         if len(global_ids) != len(set(global_ids)):
             raise ValueError("global_mask_id values must be unique across the bank")
@@ -446,6 +505,12 @@ class AlphaMaskEvidenceBank:
             frame = frame_by_id.get(mask.frame_id)
             if frame is None or frame.image_name != mask.image_name:
                 raise ValueError("mask references an unknown or different frame")
+        frame_position = {frame.frame_id: index for index, frame in enumerate(frames)}
+        mask_order = [
+            (frame_position[mask.frame_id], mask.mask_index) for mask in masks
+        ]
+        if mask_order != sorted(mask_order):
+            raise ValueError("masks must be ordered by frame and local mask index")
         if (
             self.mask_support.row_count != len(masks)
             or self.mask_support.point_count != points
@@ -486,9 +551,42 @@ class AlphaMaskEvidenceBank:
         object.__setattr__(self, "semantic_posteriors", posterior)
         object.__setattr__(self, "semantic_abstained", abstained)
         object.__setattr__(self, "source", source)
+        object.__setattr__(
+            self,
+            "_frame_positions",
+            MappingProxyType(
+                {frame.frame_id: index for index, frame in enumerate(frames)}
+            ),
+        )
+        object.__setattr__(
+            self,
+            "_mask_positions",
+            MappingProxyType(
+                {
+                    mask.global_mask_id: index
+                    for index, mask in enumerate(masks)
+                }
+            ),
+        )
         self._validate_cross_arrays()
 
     def _validate_cross_arrays(self) -> None:
+        if len(self.frame_visibility.visible_mass) and np.any(
+            self.frame_visibility.visible_mass
+            < self.thresholds.visible_min_mass
+        ):
+            raise ValueError("packed visibility contains mass below the frozen threshold")
+        if len(self.mask_support.inside_mass) and (
+            np.any(
+                self.mask_support.inside_mass
+                < self.thresholds.inside_min_mass
+            )
+            or np.any(
+                self.mask_support.inside_ratio
+                < self.thresholds.inside_min_ratio
+            )
+        ):
+            raise ValueError("packed support contains evidence below frozen thresholds")
         frame_position = {frame.frame_id: index for index, frame in enumerate(self.frames)}
         masks_by_frame: dict[int, list[int]] = {frame.frame_id: [] for frame in self.frames}
         for mask_row, mask in enumerate(self.masks):
@@ -513,6 +611,11 @@ class AlphaMaskEvidenceBank:
                 raise ValueError("support ambiguity flags disagree with frame ambiguity")
         for frame in self.frames:
             rows = masks_by_frame[frame.frame_id]
+            local_indices = [self.masks[row].mask_index for row in rows]
+            if local_indices != sorted(local_indices) or len(local_indices) != len(
+                set(local_indices)
+            ):
+                raise ValueError("mask_index values must be sorted and unique per frame")
             ambiguous = self.frame_ambiguity.row(frame_position[frame.frame_id])
             counts: dict[int, int] = {}
             for row in rows:
@@ -539,18 +642,18 @@ class AlphaMaskEvidenceBank:
         return len(self.masks)
 
     def frame_position(self, frame_id: int) -> int:
-        target = int(frame_id)
-        for index, frame in enumerate(self.frames):
-            if frame.frame_id == target:
-                return index
-        raise KeyError(f"unknown frame_id: {target}")
+        target = _integer_scalar(frame_id, "frame_id")
+        try:
+            return self._frame_positions[target]
+        except KeyError as exc:
+            raise KeyError(f"unknown frame_id: {target}") from exc
 
     def mask_position(self, global_mask_id: int) -> int:
-        target = int(global_mask_id)
-        for index, mask in enumerate(self.masks):
-            if mask.global_mask_id == target:
-                return index
-        raise KeyError(f"unknown global_mask_id: {target}")
+        target = _integer_scalar(global_mask_id, "global_mask_id")
+        try:
+            return self._mask_positions[target]
+        except KeyError as exc:
+            raise KeyError(f"unknown global_mask_id: {target}") from exc
 
     def support_for_mask(
         self, global_mask_id: int, *, include_ambiguous: bool = False

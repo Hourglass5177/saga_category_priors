@@ -188,8 +188,33 @@ set -e
 
 FINISHED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 if (( EXPERIMENT_EXIT == 0 )); then
-    printf '[%s] clean baseline completed\n' "$FINISHED_AT" >> "$LOG_PATH"
-    write_status completed 0
+    EXPERIMENT_STATE=$(
+        "$PYTHON_BIN" - "$ARTIFACT_ROOT/clean_baseline_status.json" <<'PY'
+import json
+import pathlib
+import sys
+
+source = pathlib.Path(sys.argv[1])
+try:
+    payload = json.loads(source.read_text(encoding="utf-8"))
+except (OSError, ValueError):
+    print("invalid")
+else:
+    print(payload.get("status", "invalid"))
+PY
+    )
+    if [[ "$EXPERIMENT_STATE" == "complete" ]]; then
+        printf '[%s] clean baseline completed\n' "$FINISHED_AT" >> "$LOG_PATH"
+        write_status completed 0
+    elif [[ "$EXPERIMENT_STATE" == "stopped" ]]; then
+        printf '[%s] clean baseline reached a registered stop gate\n' "$FINISHED_AT" >> "$LOG_PATH"
+        write_status stopped 0
+    else
+        EXPERIMENT_EXIT=70
+        printf '[%s] clean baseline returned success without a terminal state (%s)\n' \
+            "$FINISHED_AT" "$EXPERIMENT_STATE" >> "$LOG_PATH"
+        write_status failed "$EXPERIMENT_EXIT"
+    fi
 else
     printf '[%s] clean baseline failed exit=%s\n' "$FINISHED_AT" "$EXPERIMENT_EXIT" >> "$LOG_PATH"
     write_status failed "$EXPERIMENT_EXIT"

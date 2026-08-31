@@ -13,6 +13,7 @@ from typing import Callable, Literal, Mapping, Sequence
 import numpy as np
 
 from ..priors import validate_priors
+from ..scannet import pca_obb
 
 
 RuntimePriorMode = Literal["none", "global", "predicted"]
@@ -119,14 +120,12 @@ def pca_sorted_extents_m(points_m: object) -> np.ndarray:
         raise ValueError("points_m must be finite")
     if len(points) == 0:
         raise ValueError("at least one point is required")
-    centered = points - points.mean(axis=0, keepdims=True)
-    if len(points) == 1:
-        result = np.zeros(3, dtype=np.float64)
-    else:
-        _, _, axes = np.linalg.svd(centered, full_matrices=True)
-        projected = centered @ axes.T
-        result = np.sort(np.ptp(projected, axis=0))
-    result = np.asarray(result, dtype=np.float64)
+    # Use the exact train-prior PCA OBB definition.  A mathematically similar
+    # SVD implementation disagrees for one/two-point and other degenerate
+    # supports, putting runtime candidates and train q95 values in different
+    # measurement systems near the small-object boundary.
+    extents, _, _ = pca_obb(points)
+    result = np.sort(np.maximum(np.asarray(extents, dtype=np.float64), 0.0))
     result.setflags(write=False)
     return result
 
