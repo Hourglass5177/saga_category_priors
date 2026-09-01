@@ -29,10 +29,10 @@ CLASSES = (
 )
 
 
-def _frame(frame_id: int, mask_id: int) -> object:
+def _frame(frame_id: int, mask_id: int, *, semantic_class_index: int = 0) -> object:
     ids = np.arange(4, dtype=np.int32)
     posterior = np.zeros((1, len(CLASSES)), dtype=np.float32)
-    posterior[0, 0] = 1.0
+    posterior[0, int(semantic_class_index)] = 1.0
     return build_sparse_frame_evidence(
         frame_id=frame_id,
         image_name=f"frame-{frame_id}",
@@ -69,7 +69,7 @@ def _geometry_abstained_frame(frame_id: int) -> object:
     )
 
 
-def _write_bank(path: Path) -> None:
+def _write_bank(path: Path, *, semantic_class_index: int = 0) -> None:
     xyz = np.asarray(
         [[0.00, 0.00, 0.00], [0.02, 0.00, 0.00], [0.04, 0.00, 0.00], [0.06, 0.00, 0.00]],
         dtype=np.float32,
@@ -79,7 +79,10 @@ def _write_bank(path: Path) -> None:
         point_count=4,
         xyz_m=xyz,
         class_names=CLASSES,
-        frames=[_frame(0, 0), _frame(1, 1)],
+        frames=[
+            _frame(0, 0, semantic_class_index=semantic_class_index),
+            _frame(1, 1, semantic_class_index=semantic_class_index),
+        ],
         source={"test": True},
     )
     save_evidence_bank(bank, path)
@@ -260,6 +263,67 @@ def test_same_bank_runs_no_prior_global_and_predicted_size(tmp_path: Path) -> No
     )
     assert u_diag["size_merge_decisions"][0]["accepted"] is True
     assert d_diag["size_merge_decisions"][0]["accepted"] is False
+
+
+def test_c0_geometry_is_invariant_to_semantic_posteriors(tmp_path: Path) -> None:
+    chair_bank = tmp_path / "chair-bank"
+    table_bank = tmp_path / "table-bank"
+    _write_bank(chair_bank, semantic_class_index=0)
+    _write_bank(table_bank, semantic_class_index=1)
+    allowed = load_taxonomy().canonical_classes
+
+    chair = run_consensus_condition(
+        scene_id="scene-test",
+        bank_dir=chair_bank,
+        condition="C0-no-prior",
+        output_dir=tmp_path / "chair-output",
+        allowed_classes=allowed,
+        consumer_commit="a" * 40,
+    )
+    table = run_consensus_condition(
+        scene_id="scene-test",
+        bank_dir=table_bank,
+        condition="C0-no-prior",
+        output_dir=tmp_path / "table-output",
+        allowed_classes=allowed,
+        consumer_commit="a" * 40,
+    )
+    chair_output = json.loads(
+        (tmp_path / "chair-output" / "output.json").read_text("utf-8")
+    )
+    table_output = json.loads(
+        (tmp_path / "table-output" / "output.json").read_text("utf-8")
+    )
+
+    assert chair["consensus"]["raw_graph_identity"] == table["consensus"][
+        "raw_graph_identity"
+    ]
+    assert chair["accepted_edges"] == table["accepted_edges"]
+    assert chair["rejected_undersegmented_mask_ids"] == table[
+        "rejected_undersegmented_mask_ids"
+    ]
+    assert chair_output["point_labels"] == table_output["point_labels"]
+    assert chair_output["instances"]["0"]["class"] == "chair"
+    assert table_output["instances"]["0"]["class"] == "table"
+
+
+def test_c0_rejects_prior_or_gt_runtime_inputs(tmp_path: Path) -> None:
+    bank_dir = tmp_path / "bank"
+    _write_bank(bank_dir)
+    priors = tmp_path / "priors.json"
+    _write_priors(priors)
+    shared = {
+        "scene_id": "scene-test",
+        "bank_dir": bank_dir,
+        "condition": "C0-no-prior",
+        "output_dir": tmp_path / "output",
+        "allowed_classes": load_taxonomy().canonical_classes,
+        "consumer_commit": "a" * 40,
+    }
+    with pytest.raises(ValueError, match="forbids a category-prior input"):
+        run_consensus_condition(**shared, priors_path=priors)
+    with pytest.raises(TypeError):
+        run_consensus_condition(**shared, gt_path=tmp_path / "gt.npz")
 
 
 def test_prediction_resume_is_bound_to_commit_bank_and_diagnostics(

@@ -157,10 +157,18 @@ def _load_evidence_imports(
             bank = load_evidence_bank(bank_dir, expected_scene_id=scene_id)
             legacy_expected = dict(expected_source)
             requested_mode = legacy_expected.pop("mask_observation_mode", None)
+            requested_values = legacy_expected.pop("evidence_values", None)
+            requested_continuous = legacy_expected.pop(
+                "continuous_alpha_mass_persisted", None
+            )
             actual_source = dict(bank.source)
             proven = bool(
                 requested_mode == "hierarchy"
+                and requested_values == "thresholded-membership-indicator"
+                and requested_continuous is False
                 and "mask_observation_mode" not in actual_source
+                and "evidence_values" not in actual_source
+                and "continuous_alpha_mass_persisted" not in actual_source
                 and actual_source == legacy_expected
                 and str(actual_source.get("producer_commit", "")) == producer
             )
@@ -168,7 +176,11 @@ def _load_evidence_imports(
                 legacy_mode_proof = {
                     "producer_commit": producer,
                     "assumed_mode": "hierarchy",
-                    "missing_fields": ["mask_observation_mode"],
+                    "missing_fields": [
+                        "mask_observation_mode",
+                        "evidence_values",
+                        "continuous_alpha_mass_persisted",
+                    ],
                 }
             complete = proven
         if not complete:

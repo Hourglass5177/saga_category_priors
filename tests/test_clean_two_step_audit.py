@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import shutil
 
 import numpy as np
 import pandas as pd
@@ -262,6 +263,23 @@ def test_read_only_dev_audit_writes_all_products_and_passes_gates(
         "unique_gaussian_ownership",
         "final_export",
     }
+    assert "all_geometry_025_false_positive_count" in funnel_table.columns
+    assert "all_geometry_025_false_negative_count" in funnel_table.columns
+    assert "all_geometry_025_precision" in funnel_table.columns
+    assert "gaussian_geometry_pollution_fraction_5cm" in funnel_table.columns
+    stages = result["funnel"]["funnels"]["scene-test"]["C0-no-prior"][
+        "stages"
+    ]
+    for stage in stages:
+        metrics = stage["metrics"]
+        if stage["name"] == "final_export":
+            assert metrics["semantic_classification_applied"] is True
+            assert "all_same_class_025_match_count" in metrics
+            assert "official_evaluable_same_class_050_precision" in metrics
+        else:
+            assert metrics["semantic_classification_applied"] is False
+            assert not any("same_class" in key for key in metrics)
+            assert "all_geometry_025_precision" in metrics
 
 
 def test_manifest_must_supply_old_metrics_instead_of_guessing(
@@ -291,7 +309,11 @@ def test_audit_rejects_forged_legacy_hierarchy_proof(
         "legacy_hierarchy_mode_proof": {
             "producer_commit": unknown_producer,
             "assumed_mode": "hierarchy",
-            "missing_fields": ["mask_observation_mode"],
+            "missing_fields": [
+                "mask_observation_mode",
+                "evidence_values",
+                "continuous_alpha_mass_persisted",
+            ],
         },
     }
     manifest_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -300,6 +322,8 @@ def test_audit_rejects_forged_legacy_hierarchy_proof(
         lambda **_: {
             "test": "frozen-source",
             "mask_observation_mode": "hierarchy",
+            "evidence_values": "thresholded-membership-indicator",
+            "continuous_alpha_mass_persisted": False,
         },
     )
 
@@ -340,3 +364,94 @@ def test_manifest_may_be_colocated_with_registered_audit_products(
     )
 
     assert result["technical_gates"]["passed"] is True
+
+
+def test_audit_fail_closed_on_mixed_output_and_diagnostics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_path, _ = _fixture(tmp_path, monkeypatch)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    scene = manifest["scenes"][0]
+    original = scene["conditions"]["C0-no-prior"]
+    alternate = tmp_path / "alternate-c0"
+    run_consensus_condition(
+        scene_id="scene-test",
+        bank_dir=scene["bank_dir"],
+        condition="C0-no-prior",
+        output_dir=alternate,
+        allowed_classes=load_taxonomy().canonical_classes,
+        consumer_commit="b" * 40,
+    )
+    alternate_output = alternate / "output.json"
+    shutil.copy2(alternate_output, original["output"])
+    alternate_payload = json.loads(alternate_output.read_text(encoding="utf-8"))
+    original["output_sha256"] = sha256_file(Path(original["output"]))
+    original["run_identity_sha256"] = alternate_payload["run_identity"][
+        "content_sha256"
+    ]
+    original["consumer_commit"] = "b" * 40
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="artifact identity binding failed"):
+        audit_clean_baseline_manifest(
+            manifest_path,
+            output_dir=tmp_path / "audit",
+            expected_scene_count=1,
+        )
+
+
+def test_audit_fail_closed_on_mixed_nested_prediction_contract_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_path, _ = _fixture(tmp_path, monkeypatch)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    conditions = manifest["scenes"][0]["conditions"]
+    c0_diagnostics_path = Path(conditions["C0-no-prior"]["diagnostics"])
+    u_diagnostics_path = Path(conditions["U-global"]["diagnostics"])
+    c0_diagnostics = json.loads(c0_diagnostics_path.read_text(encoding="utf-8"))
+    u_diagnostics = json.loads(u_diagnostics_path.read_text(encoding="utf-8"))
+    c0_diagnostics["prediction_contract"]["run_identity"] = u_diagnostics[
+        "prediction_contract"
+    ]["run_identity"]
+    c0_diagnostics_path.write_text(json.dumps(c0_diagnostics), encoding="utf-8")
+    conditions["C0-no-prior"]["diagnostics_sha256"] = sha256_file(
+        c0_diagnostics_path
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="artifact identity binding failed"):
+        audit_clean_baseline_manifest(
+            manifest_path,
+            output_dir=tmp_path / "audit",
+            expected_scene_count=1,
+        )
+
+
+def test_audit_fail_closed_on_output_bound_to_another_bank(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_path, _ = _fixture(tmp_path, monkeypatch)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    scene = manifest["scenes"][0]
+    xyz = _xyz()
+    altered_xyz = xyz.copy()
+    altered_xyz[0, 2] = 0.001
+    altered_bank = AlphaMaskEvidenceBank.from_frames(
+        scene_id="scene-test",
+        point_count=len(altered_xyz),
+        xyz_m=altered_xyz,
+        class_names=CLASSES,
+        frames=[_frame(0, 0, len(xyz)), _frame(1, 1, len(xyz))],
+        source={"test": "frozen-source"},
+    )
+    altered_bank_dir = tmp_path / "altered-bank"
+    save_evidence_bank(altered_bank, altered_bank_dir)
+    scene["bank_dir"] = str(altered_bank_dir)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="artifact identity binding failed"):
+        audit_clean_baseline_manifest(
+            manifest_path,
+            output_dir=tmp_path / "audit",
+            expected_scene_count=1,
+        )

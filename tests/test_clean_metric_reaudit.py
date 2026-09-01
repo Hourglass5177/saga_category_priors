@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from category_priors.clean_baseline import metric_reaudit
 from category_priors.clean_baseline.evaluation import (
     CleanCandidate,
     GroundTruthObject,
@@ -10,7 +11,9 @@ from category_priors.clean_baseline.evaluation import (
 from category_priors.clean_baseline.metric_reaudit import (
     HISTORICAL_OVERLAPS,
     SCANNET_OFFICIAL_OVERLAPS,
+    BidirectionalNearest,
     build_bidirectional_nearest,
+    deterministic_one_to_one_matches,
     evaluate_candidate_set_three_spaces,
     evaluate_dual_protocols,
     evaluate_gt_as_prediction_dual_protocols,
@@ -102,6 +105,45 @@ def test_gaussian_directional_bins_are_mutually_exclusive() -> None:
     assert radius["gaussian_same_class_wrong_instance_count"] == 1
     assert radius["gaussian_wrong_class_count"] == 1
     assert radius["gaussian_unsupported_count"] == 1
+    assert radius["gaussian_geometry_target_instance_count"] == 1
+    assert radius["gaussian_mapped_other_instance_count"] == 2
+    assert radius["gaussian_to_gt_geometry_target_precision"] == pytest.approx(0.25)
+    assert radius["gaussian_to_gt_geometry_pollution_fraction"] == pytest.approx(0.75)
+
+
+def test_classless_funnel_candidate_has_geometry_only_pollution_diagnostic() -> None:
+    nearest = build_bidirectional_nearest(
+        np.asarray([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]),
+        np.asarray([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [10.0, 0.0, 0.0]]),
+    )
+    result = evaluate_candidate_set_three_spaces(
+        candidates=[
+            {
+                "object_id": "pre-semantic-stage",
+                "gaussian_ids": np.asarray([0, 1, 2]),
+                "class_id": None,
+                "winner_probability": 1.0,
+                "view_consensus": 1.0,
+                "detection_ratio": 1.0,
+            }
+        ],
+        gt_objects=[
+            GroundTruthObject(1, "chair", np.asarray([0])),
+            GroundTruthObject(2, "table", np.asarray([1])),
+        ],
+        nearest=nearest,
+        min_region_size=1,
+    )
+
+    row = result["candidate_rows"][0]
+    radius = row["radii"]["0.05"]
+    assert row["geometric_precision_target_gt_instance_id"] == 1
+    assert radius["gaussian_geometry_target_instance_count"] == 1
+    assert radius["gaussian_mapped_other_instance_count"] == 1
+    assert radius["gaussian_unsupported_count"] == 1
+    assert radius["gaussian_to_gt_geometry_target_precision"] == pytest.approx(1 / 3)
+    # There is intentionally no predicted semantic class at this stage.
+    assert radius["gaussian_to_gt_target_precision"] == 0.0
 
 
 def test_duplicate_candidates_are_one_tp_and_one_fp_after_one_to_one_matching() -> None:
@@ -197,6 +239,133 @@ def test_formal_projection_never_appends_synthetic_points() -> None:
     mask = formal_gt_point_mask([0, 1], nearest)
     assert mask.shape == (1,)
     assert mask.tolist() == [True]
+
+
+def test_sparse_formal_evaluation_matches_dense_reference_fixture() -> None:
+    xyz = np.column_stack(
+        (np.arange(8, dtype=np.float64), np.zeros(8), np.zeros(8))
+    )
+    nearest = build_bidirectional_nearest(xyz, xyz.copy())
+    ground_truth = [
+        GroundTruthObject(1, "chair", np.asarray([0, 1, 2])),
+        GroundTruthObject(2, "table", np.asarray([3, 4])),
+    ]
+    candidates = [
+        _candidate(10, [0, 1, 2], "chair"),
+        _candidate(20, [2, 3], "chair"),
+        _candidate(30, [3, 4], "table"),
+        _candidate(40, [0, 1, 2], "chair"),
+    ]
+    dense_masks = [
+        formal_gt_point_mask(candidate.gaussian_ids, nearest)
+        for candidate in candidates
+    ]
+    dense_iou = np.zeros((len(candidates), len(ground_truth)), dtype=np.float64)
+    for candidate_index, mask in enumerate(dense_masks):
+        predicted_count = int(np.count_nonzero(mask))
+        for gt_index, gt in enumerate(ground_truth):
+            intersection = int(np.count_nonzero(mask[gt.point_ids]))
+            union = predicted_count + len(gt.point_ids) - intersection
+            dense_iou[candidate_index, gt_index] = intersection / union
+
+    result = evaluate_candidate_set_three_spaces(
+        candidates=candidates,
+        gt_objects=ground_truth,
+        nearest=nearest,
+        radii_m=(0.05,),
+        min_region_size=1,
+    )
+
+    for candidate_index, row in enumerate(result["candidate_rows"]):
+        assert row["formal_gt_point_count_5cm"] == int(
+            np.count_nonzero(dense_masks[candidate_index])
+        )
+        assert row["formal_geometry_iou_5cm"] == pytest.approx(
+            float(dense_iou[candidate_index].max())
+        )
+        compatible = [
+            dense_iou[candidate_index, gt_index]
+            for gt_index, gt in enumerate(ground_truth)
+            if str(gt.class_id) == str(candidates[candidate_index].class_id)
+        ]
+        assert row["formal_same_class_iou_5cm"] == pytest.approx(
+            max(compatible, default=0.0)
+        )
+    dense_matches = deterministic_one_to_one_matches(
+        candidate_ids=[candidate.object_id for candidate in candidates],
+        candidate_class_ids=[candidate.class_id for candidate in candidates],
+        gt_objects=ground_truth,
+        iou_matrix=dense_iou,
+        threshold=0.50,
+        same_class=False,
+    )
+    assert result["subsets"]["all"]["matching"]["geometry"]["0.50"][
+        "matches"
+    ] == dense_matches
+    assert result["formal_metric_space"] == {
+        "domain": "real_gt_points",
+        "radius_m": 0.05,
+        "synthetic_false_positive_sentinels": False,
+    }
+
+
+def test_sparse_formal_evaluation_scales_without_dense_candidate_gt_masks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A dense candidate-by-GT-point representation would require 800 million
+    # boolean cells here.  The sparse representation stores only two formal
+    # point assignments per candidate, plus one linear inverse index.
+    gt_count = 400_000
+    candidate_count = 2_000
+    point_ids = np.arange(gt_count, dtype=np.int64)
+    nearest = BidirectionalNearest(
+        point_ids,
+        np.zeros(gt_count, dtype=np.float64),
+        point_ids,
+        np.zeros(gt_count, dtype=np.float64),
+    )
+    candidates = [
+        _candidate(
+            candidate_id,
+            [candidate_id * 2, candidate_id * 2 + 1],
+            "not-a-gt-class",
+        )
+        for candidate_id in range(candidate_count)
+    ]
+    ground_truth = [GroundTruthObject(1, "chair", point_ids)]
+
+    def dense_projection_forbidden(*args: object, **kwargs: object) -> np.ndarray:
+        raise AssertionError("dense formal GT mask helper must not be called")
+
+    monkeypatch.setattr(
+        metric_reaudit, "formal_gt_point_mask", dense_projection_forbidden
+    )
+    result = evaluate_candidate_set_three_spaces(
+        candidates=candidates,
+        gt_objects=ground_truth,
+        nearest=nearest,
+        radii_m=(0.05,),
+        min_region_size=1,
+    )
+
+    assert len(result["candidate_rows"]) == candidate_count
+    assert sum(
+        row["formal_gt_point_count_5cm"] for row in result["candidate_rows"]
+    ) == candidate_count * 2
+
+
+def test_sparse_projection_rejects_out_of_range_gaussian_before_indexing() -> None:
+    nearest = build_bidirectional_nearest(
+        np.asarray([[0.0, 0.0, 0.0]]),
+        np.asarray([[0.0, 0.0, 0.0]]),
+    )
+    with pytest.raises(ValueError, match="out-of-range"):
+        evaluate_candidate_set_three_spaces(
+            candidates=[_candidate(1, [1])],
+            gt_objects=[GroundTruthObject(1, "chair", np.asarray([0]))],
+            nearest=nearest,
+            min_region_size=1,
+        )
 
 
 def test_official_and_historical_protocol_endpoints_and_gt_parity() -> None:

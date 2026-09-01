@@ -21,9 +21,12 @@ def audit_teacher_mask_roles(
     """Classify the roles of masks in the teacher-handoff candidate.
 
     This is deliberately a source-level audit rather than a behavioural claim:
-    it records that masks supervise learned features and late category voting,
-    while the automatic instance partition is reconstructed by clustering and
-    smoothing after the per-frame mask identity has been discarded.
+    it records that masks supervise learned features and late category voting.
+    Their information is therefore indirectly compressed into learned
+    similarity features; what is not retained by the automatic instance path
+    is the exact per-frame mask membership and an explicit cross-view object
+    correspondence graph.  The partition is reconstructed later by clustering
+    and smoothing those Gaussian-level features.
     """
 
     training = str(training_source)

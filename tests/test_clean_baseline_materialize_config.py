@@ -356,6 +356,8 @@ def test_legacy_hierarchy_mode_compatibility_is_explicit_and_single_field_only(
         "producer_commit": producer,
         "sam_masks": "/frozen/hierarchy",
         "mask_observation_mode": "hierarchy",
+        "evidence_values": "thresholded-membership-indicator",
+        "continuous_alpha_mass_persisted": False,
     }
     monkeypatch.setattr(module, "evidence_request_source", lambda **_: expected)
     monkeypatch.setattr(module, "evidence_bank_is_complete", lambda *_, **__: False)
@@ -363,7 +365,16 @@ def test_legacy_hierarchy_mode_compatibility_is_explicit_and_single_field_only(
         module,
         "load_evidence_bank",
         lambda *_args, **_kwargs: SimpleNamespace(
-            source={key: value for key, value in expected.items() if key != "mask_observation_mode"}
+            source={
+                key: value
+                for key, value in expected.items()
+                if key
+                not in {
+                    "mask_observation_mode",
+                    "evidence_values",
+                    "continuous_alpha_mass_persisted",
+                }
+            }
         ),
     )
     with pytest.raises(ValueError, match="incomplete"):
@@ -375,7 +386,11 @@ def test_legacy_hierarchy_mode_compatibility_is_explicit_and_single_field_only(
     assert loaded[scene_id]["legacy_hierarchy_mode_proof"] == {
         "producer_commit": producer,
         "assumed_mode": "hierarchy",
-        "missing_fields": ["mask_observation_mode"],
+        "missing_fields": [
+            "mask_observation_mode",
+            "evidence_values",
+            "continuous_alpha_mass_persisted",
+        ],
     }
 
     flat_expected = {**expected, "mask_observation_mode": "flat-highest-quality"}
@@ -387,7 +402,12 @@ def test_legacy_hierarchy_mode_compatibility_is_explicit_and_single_field_only(
             source={
                 key: value
                 for key, value in flat_expected.items()
-                if key != "mask_observation_mode"
+                if key
+                not in {
+                    "mask_observation_mode",
+                    "evidence_values",
+                    "continuous_alpha_mass_persisted",
+                }
             }
         ),
     )

@@ -159,6 +159,9 @@ def test_scientific_failure_completes_without_midrun_pause(
         (tmp_path / "artifacts" / "clean_two_step_analysis.json").read_text()
     )
     assert analysis["category_prior_tested"] is False
+    assert analysis["affinity_feature_used_for_geometric_association"] is False
+    assert analysis["geometric_identity_unit"] == "complete-frame-mask-observation"
+    assert analysis["semantic_category_role"] == "late-object-classification-only"
     assert analysis["step2_scientific_gates"]["passed"] is False
 
 

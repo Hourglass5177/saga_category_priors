@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -9,12 +10,17 @@ import pandas as pd
 import pytest
 
 from category_priors.clean_baseline import mask_ablation
+from category_priors.clean_baseline.consensus import ConsensusConfig
 from category_priors.clean_baseline.evidence import (
+    EVIDENCE_ARRAY_FILE,
+    EVIDENCE_DIAGNOSTICS_FILE,
+    EVIDENCE_METADATA_FILE,
     build_sparse_frame_evidence,
     save_evidence_bank,
 )
+from category_priors.clean_baseline.evaluation import RUN_IDENTITY_SCHEMA
 from category_priors.clean_baseline.models import AlphaMaskEvidenceBank
-from category_priors.io import sha256_file
+from category_priors.io import hash_json, sha256_file
 
 
 CLASSES = ("chair",) + tuple(f"unused-{index}" for index in range(31))
@@ -103,7 +109,50 @@ def _bank(
     )
 
 
-def _output(scene_id: str, kept_objects: list[int]) -> dict[str, object]:
+def _run_identity(
+    scene_id: str, bank: AlphaMaskEvidenceBank, bank_dir: Path
+) -> dict[str, object]:
+    identity: dict[str, object] = {
+        "schema": RUN_IDENTITY_SCHEMA,
+        "consumer_commit": "a" * 40,
+        "scene_id": scene_id,
+        "condition": "C0-no-prior",
+        "evidence": {
+            "schema": bank.schema,
+            "scene_id": bank.scene_id,
+            "point_count": bank.point_count,
+            "frame_count": bank.frame_count,
+            "mask_count": bank.mask_count,
+            "thresholds": bank.thresholds.to_dict(),
+            "source": dict(bank.source),
+            "class_names": list(bank.class_names),
+            "files": {
+                name: sha256_file(bank_dir / name)
+                for name in (
+                    EVIDENCE_ARRAY_FILE,
+                    EVIDENCE_DIAGNOSTICS_FILE,
+                    EVIDENCE_METADATA_FILE,
+                )
+            },
+        },
+        "consensus_config": asdict(ConsensusConfig()),
+        "taxonomy": {"content_sha256": "test", "allowed_classes": ["chair"]},
+        "ap_score": {
+            "formula": "winner_probability*sqrt(view_consensus*detection_ratio)",
+            "prior_in_score": False,
+        },
+        "prior": None,
+    }
+    identity["content_sha256"] = hash_json(identity)
+    return identity
+
+
+def _output(
+    scene_id: str,
+    kept_objects: list[int],
+    *,
+    run_identity: dict[str, object],
+) -> dict[str, object]:
     labels = np.full(300, -1, dtype=np.int64)
     instances: dict[str, dict[str, object]] = {}
     for export_id, object_index in enumerate(kept_objects):
@@ -121,15 +170,51 @@ def _output(scene_id: str, kept_objects: list[int]) -> dict[str, object]:
         "condition": "C0-no-prior",
         "point_labels": labels.tolist(),
         "instances": instances,
+        "run_identity": run_identity,
     }
 
 
-def _diagnostics(scene_id: str) -> dict[str, object]:
+def _diagnostics(
+    scene_id: str,
+    kept_objects: list[int],
+    *,
+    run_identity: dict[str, object],
+    bank_schema: str,
+) -> dict[str, object]:
+    kept = tuple(sorted(set(map(int, kept_objects))))
+    rejected = [
+        frame_id * 3 + object_index
+        for frame_id in range(2)
+        for object_index in range(3)
+        if object_index not in kept
+    ]
+    accepted_edges = [
+        {
+            "left_mask_ids": [object_index],
+            "right_mask_ids": [object_index + 3],
+            "observer_count": 2,
+            "supporter_count": 2,
+            "consensus": 1.0,
+            "observer_level": 2,
+        }
+        for object_index in kept
+    ]
     return {
+        "schema": "saga-clean-alpha-mask-condition-diagnostics-v1",
         "scene_id": scene_id,
         "condition": "C0-no-prior",
-        "config": {"same": True},
+        "run_identity": run_identity,
+        "bank_schema": bank_schema,
+        "config": asdict(ConsensusConfig()),
+        "consensus": {
+            "component_count_before_output_filters": len(kept),
+        },
+        "accepted_edges": accepted_edges,
+        "rejected_undersegmented_mask_ids": rejected,
         "prediction_contract": {
+            "scene_id": scene_id,
+            "condition": "C0-no-prior",
+            "run_identity": run_identity,
             "contract": {
                 "orphan_gaussian_count": 0,
                 "negative_metadata_count": 0,
@@ -173,11 +258,23 @@ def _scene(
         )
         banks[arm] = bank
         save_evidence_bank(bank, bank_dir)
+        run_identity = _run_identity(scene_id, bank, bank_dir)
         condition_root = root / "C0-no-prior"
         output_path = condition_root / "output.json"
         diagnostics_path = condition_root / "diagnostics.json"
-        _write_json(output_path, _output(scene_id, objects))
-        _write_json(diagnostics_path, _diagnostics(scene_id))
+        _write_json(
+            output_path,
+            _output(scene_id, objects, run_identity=run_identity),
+        )
+        _write_json(
+            diagnostics_path,
+            _diagnostics(
+                scene_id,
+                objects,
+                run_identity=run_identity,
+                bank_schema=bank.schema,
+            ),
+        )
         conditions[arm] = {
             "bank_dir": str(bank_dir),
             "output": str(output_path),
@@ -339,11 +436,152 @@ def test_registered_two_scene_gate_passes_and_writes_flat_rows(
         "official_geometry_025_tiny_small_recall"
     ] == 1.0
     assert analysis["gt_as_prediction"]["gt_as_prediction_parity"] is True
+    assert analysis["category_prior_tested"] is False
+    assert analysis["affinity_feature_used_for_geometric_association"] is False
+    assert analysis["geometric_identity_unit"] == "complete-frame-mask-observation"
     table = pd.read_parquet(
         tmp_path / "analysis" / "mask_contract_ablation_dev2.parquet"
     )
-    assert len(table) == 6
-    assert set(table["scope"]) == {"scene", "aggregate"}
+    assert len(table) == 38
+    assert set(table["scope"]) == {"scene", "stage", "aggregate"}
+    stage_rows = table[table["scope"] == "stage"]
+    assert len(stage_rows) == 2 * 2 * 8
+    assert set(stage_rows["stage"]) == {
+        "complete_mask_support",
+        "association_support",
+        "undersegmentation_filtered",
+        "accepted_edge_components",
+        "detection_ratio_filtered",
+        "physical_split_and_deduplicated",
+        "unique_gaussian_ownership",
+        "final_export",
+    }
+    assert "all_geometry_025_fp" in table.columns
+    assert "geometric_pollution_fraction_5cm" in table.columns
+    preclassification = stage_rows[stage_rows["stage"] != "final_export"]
+    classified = stage_rows[stage_rows["stage"] == "final_export"]
+    assert set(preclassification["semantic_classification_applied"]) == {False}
+    assert preclassification["all_same_class_025_match_count"].isna().all()
+    assert preclassification["official_evaluable_same_class_050_precision"].isna().all()
+    assert set(classified["semantic_classification_applied"]) == {True}
+    assert classified["all_same_class_025_match_count"].notna().all()
+    assert classified["official_evaluable_same_class_050_precision"].notna().all()
+    for scene_id in (SCENE_A, SCENE_B):
+        for arm in mask_ablation.MASK_ARMS:
+            arm_result = analysis["scene_analysis"][scene_id]["arms"][arm]
+            assert arm_result["stage_funnel_diagnostics_schema_current"] is True
+            assert arm_result["stage_funnel_lineage_complete"] is True
+            assert arm_result["stage_funnel_final_equivalence_exact"] is True
+            assert arm_result["stage_funnel_contract_pass"] is True
+
+
+@pytest.mark.parametrize("schema", [None, "unknown-condition-diagnostics-v999"])
+def test_missing_or_unknown_diagnostics_schema_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    schema: str | None,
+) -> None:
+    scenes = [_scene(tmp_path, SCENE_A), _scene(tmp_path, SCENE_B)]
+    spec = scenes[0]["mask_control_conditions"]["H-hierarchy"]
+    diagnostics_path = Path(spec["diagnostics"])
+    diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+    if schema is None:
+        diagnostics.pop("schema")
+    else:
+        diagnostics["schema"] = schema
+    _write_json(diagnostics_path, diagnostics)
+    monkeypatch.setattr(mask_ablation, "load_ply_xyz", lambda _: _xyz())
+
+    result = mask_ablation.evaluate_mask_contract_ablation_manifest(
+        _manifest(tmp_path, scenes), tmp_path / "analysis"
+    )
+
+    arm = result["analysis"]["scene_analysis"][SCENE_A]["arms"][
+        "H-hierarchy"
+    ]
+    assert arm["stage_funnel_diagnostics_schema_current"] is False
+    assert arm["stage_funnel_lineage_complete"] is False
+    assert arm["stage_funnel_final_equivalence_exact"] is False
+    assert arm["stage_funnel_contract_pass"] is False
+    assert result["analysis"]["mechanical_gate"]["passed"] is False
+    assert result["analysis"]["scientific_gate"]["eligible"] is False
+
+
+def test_current_schema_with_incomplete_lineage_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scenes = [_scene(tmp_path, SCENE_A), _scene(tmp_path, SCENE_B)]
+    spec = scenes[0]["mask_control_conditions"]["P-flat"]
+    diagnostics_path = Path(spec["diagnostics"])
+    diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+    diagnostics.pop("accepted_edges")
+    _write_json(diagnostics_path, diagnostics)
+    monkeypatch.setattr(mask_ablation, "load_ply_xyz", lambda _: _xyz())
+
+    result = mask_ablation.evaluate_mask_contract_ablation_manifest(
+        _manifest(tmp_path, scenes), tmp_path / "analysis"
+    )
+
+    arm = result["analysis"]["scene_analysis"][SCENE_A]["arms"]["P-flat"]
+    assert arm["stage_funnel_diagnostics_schema_current"] is True
+    assert arm["stage_funnel_lineage_complete"] is False
+    assert arm["stage_funnel_final_equivalence_exact"] is False
+    assert arm["stage_funnel_contract_pass"] is False
+    assert result["analysis"]["mechanical_gate"]["passed"] is False
+
+
+def test_mixed_nested_prediction_identity_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scenes = [_scene(tmp_path, SCENE_A), _scene(tmp_path, SCENE_B)]
+    hierarchy_spec = scenes[0]["mask_control_conditions"]["H-hierarchy"]
+    flat_spec = scenes[0]["mask_control_conditions"]["P-flat"]
+    hierarchy_diagnostics_path = Path(hierarchy_spec["diagnostics"])
+    hierarchy_diagnostics = json.loads(
+        hierarchy_diagnostics_path.read_text(encoding="utf-8")
+    )
+    flat_output = json.loads(Path(flat_spec["output"]).read_text(encoding="utf-8"))
+    hierarchy_diagnostics["prediction_contract"]["run_identity"] = flat_output[
+        "run_identity"
+    ]
+    _write_json(hierarchy_diagnostics_path, hierarchy_diagnostics)
+    monkeypatch.setattr(mask_ablation, "load_ply_xyz", lambda _: _xyz())
+
+    result = mask_ablation.evaluate_mask_contract_ablation_manifest(
+        _manifest(tmp_path, scenes), tmp_path / "analysis"
+    )
+
+    contract = result["analysis"]["scene_analysis"][SCENE_A]["arms"][
+        "H-hierarchy"
+    ]["output_contract"]
+    assert contract["passed"] is False
+    assert contract["identity_checks"][
+        "nested_prediction_contract_identity_exact"
+    ] is False
+    assert result["analysis"]["mechanical_gate"]["passed"] is False
+
+
+def test_output_from_other_bank_cannot_bind_to_selected_bank(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scenes = [_scene(tmp_path, SCENE_A), _scene(tmp_path, SCENE_B)]
+    hierarchy_spec = scenes[0]["mask_control_conditions"]["H-hierarchy"]
+    flat_spec = scenes[0]["mask_control_conditions"]["P-flat"]
+    hierarchy_spec["output"] = flat_spec["output"]
+    hierarchy_spec["diagnostics"] = flat_spec["diagnostics"]
+    monkeypatch.setattr(mask_ablation, "load_ply_xyz", lambda _: _xyz())
+
+    result = mask_ablation.evaluate_mask_contract_ablation_manifest(
+        _manifest(tmp_path, scenes), tmp_path / "analysis"
+    )
+
+    contract = result["analysis"]["scene_analysis"][SCENE_A]["arms"][
+        "H-hierarchy"
+    ]["output_contract"]
+    assert contract["passed"] is False
+    assert contract["identity_checks"]["evidence_bank_identity_exact"] is False
+    assert contract["identity_checks"]["evidence_files_current"] is False
+    assert result["analysis"]["mechanical_gate"]["passed"] is False
 
 
 def test_missing_actual_pixel_or_repeat_audit_blocks_mechanical_gate(
@@ -383,7 +621,12 @@ def test_duplicate_predictions_receive_only_one_one_to_one_true_positive(
     # the same GT object's 100 Gaussians into two declared candidates.
     for scene in scenes:
         spec = scene["mask_control_conditions"]["P-flat"]
-        payload = _output(str(scene["scene_id"]), [0, 1])
+        original = json.loads(Path(spec["output"]).read_text(encoding="utf-8"))
+        payload = _output(
+            str(scene["scene_id"]),
+            [0, 1],
+            run_identity=original["run_identity"],
+        )
         labels = np.asarray(payload["point_labels"], dtype=np.int64)
         labels[:] = -1
         labels[:50] = 0

@@ -11,6 +11,7 @@ consensus worker.
 """
 
 from collections.abc import Mapping, Sequence
+import json
 from pathlib import Path
 from typing import Any
 
@@ -25,8 +26,18 @@ from ..evaluator import (
 )
 from ..io import build_file_manifest, load_json, sha256_file, write_json, write_rows
 from ..prediction_contract import validate_prediction_contract
-from .evidence import load_evidence_bank
-from .evaluation import CleanCandidate, ground_truth_objects_from_arrays
+from .evidence import (
+    EVIDENCE_ARRAY_FILE,
+    EVIDENCE_DIAGNOSTICS_FILE,
+    EVIDENCE_METADATA_FILE,
+    load_evidence_bank,
+)
+from .evaluation import (
+    RUN_IDENTITY_SCHEMA,
+    CleanCandidate,
+    ground_truth_objects_from_arrays,
+    validate_embedded_identity,
+)
 from .metric_reaudit import (
     FORMAL_RADIUS_M,
     build_bidirectional_nearest,
@@ -36,9 +47,12 @@ from .metric_reaudit import (
     formal_gt_point_mask,
 )
 from .models import AlphaMaskEvidenceBank
+from .pipeline import CONDITION_DIAGNOSTICS_SCHEMA
+from .stage_funnel import STAGE_NAMES, audit_frozen_clean_scene
 from .two_step_audit import (
     MANIFEST_SCHEMA,
     REGISTERED_DEV2_SCENE_IDS,
+    _funnel_metric_callback,
     _size_boundaries,
     _taxonomy,
     _transform,
@@ -529,6 +543,8 @@ def _prediction_contract_audit(
     scene_id: str,
     gaussian_count: int,
     allowed_classes: Sequence[str],
+    bank_dir: Path,
+    bank: AlphaMaskEvidenceBank,
 ) -> dict[str, Any]:
     labels = np.asarray(payload.get("point_labels"))
     instances = payload.get("instances")
@@ -552,6 +568,7 @@ def _prediction_contract_audit(
             orphan = int(
                 np.count_nonzero((labels >= 0) & ~np.isin(labels, sorted(parsed_ids)))
             )
+    identity_checks: dict[str, bool] = {}
     try:
         if str(payload.get("scene_id")) != scene_id:
             raise ValueError("output scene identity mismatch")
@@ -570,7 +587,99 @@ def _prediction_contract_audit(
             raise ValueError("diagnostics scene identity mismatch")
         if str(diagnostics.get("condition")) != CONDITION:
             raise ValueError("diagnostics condition identity mismatch")
-    except (TypeError, ValueError, KeyError) as exc:
+        output_identity = validate_embedded_identity(
+            payload.get("run_identity"), expected_schema=RUN_IDENTITY_SCHEMA
+        )
+        diagnostics_identity = validate_embedded_identity(
+            diagnostics.get("run_identity"), expected_schema=RUN_IDENTITY_SCHEMA
+        )
+        prediction_contract = diagnostics.get("prediction_contract")
+        if not isinstance(prediction_contract, Mapping):
+            raise ValueError("diagnostics omitted the nested prediction contract")
+        contract_identity = validate_embedded_identity(
+            prediction_contract.get("run_identity"),
+            expected_schema=RUN_IDENTITY_SCHEMA,
+        )
+        evidence_identity = output_identity.get("evidence")
+        if not isinstance(evidence_identity, Mapping):
+            raise ValueError("run identity omitted evidence identity")
+        expected_file_names = {
+            EVIDENCE_ARRAY_FILE,
+            EVIDENCE_METADATA_FILE,
+            EVIDENCE_DIAGNOSTICS_FILE,
+        }
+        actual_files = {
+            name: sha256_file(bank_dir / name)
+            for name in sorted(expected_file_names)
+        }
+        expected_evidence_identity = {
+            "schema": str(bank.schema),
+            "scene_id": str(bank.scene_id),
+            "point_count": int(bank.point_count),
+            "frame_count": int(bank.frame_count),
+            "mask_count": int(bank.mask_count),
+            "thresholds": bank.thresholds.to_dict(),
+            "source": dict(bank.source),
+            "class_names": list(map(str, bank.class_names)),
+            "files": actual_files,
+        }
+        identity_checks = {
+            "output_diagnostics_identity_exact": output_identity
+            == diagnostics_identity,
+            "nested_prediction_contract_identity_exact": contract_identity
+            == output_identity,
+            "identity_scene_exact": str(output_identity.get("scene_id", ""))
+            == scene_id,
+            "identity_condition_exact": str(output_identity.get("condition", ""))
+            == CONDITION,
+            "consumer_matches_bank_producer_commit": str(
+                output_identity.get("consumer_commit", "")
+            )
+            == str(bank.source.get("producer_commit", "")),
+            "identity_taxonomy_classes_exact": tuple(
+                map(
+                    str,
+                    (
+                        output_identity.get("taxonomy", {})
+                        if isinstance(output_identity.get("taxonomy"), Mapping)
+                        else {}
+                    ).get("allowed_classes", ()),
+                )
+            )
+            == tuple(map(str, allowed_classes)),
+            "nested_payload_scene_exact": str(
+                prediction_contract.get("scene_id", "")
+            )
+            == scene_id,
+            "nested_payload_condition_exact": str(
+                prediction_contract.get("condition", "")
+            )
+            == CONDITION,
+            "evidence_file_set_exact": set(
+                map(str, evidence_identity.get("files", ()))
+            )
+            == expected_file_names,
+            "evidence_files_current": evidence_identity.get("files")
+            == actual_files,
+            "evidence_bank_identity_exact": dict(evidence_identity)
+            == expected_evidence_identity,
+            "diagnostics_bank_schema_exact": str(
+                diagnostics.get("bank_schema", "")
+            )
+            == str(bank.schema),
+            "diagnostics_config_exact": diagnostics.get("config")
+            == output_identity.get("consensus_config"),
+            "no_prior_identity": output_identity.get("prior") is None,
+        }
+        failed_identity_checks = sorted(
+            key for key, passed in identity_checks.items() if not passed
+        )
+        if failed_identity_checks:
+            raise ValueError(
+                "condition artifact identity binding failed: "
+                + ", ".join(failed_identity_checks)
+            )
+    except (OSError, TypeError, ValueError, KeyError) as exc:
         violation = str(exc)
     embedded = diagnostics.get("prediction_contract")
     embedded_audit: Mapping[str, Any] = {}
@@ -586,6 +695,8 @@ def _prediction_contract_audit(
         and negative_metadata == 0
         and empty == 0
         and duplicate == 0
+        and bool(identity_checks)
+        and all(identity_checks.values())
     )
     return {
         "passed": passed,
@@ -594,6 +705,7 @@ def _prediction_contract_audit(
         "negative_metadata_count": negative_metadata,
         "empty_instance_count": empty,
         "duplicate_ownership_count": duplicate,
+        "identity_checks": identity_checks,
     }
 
 
@@ -644,17 +756,33 @@ def _candidates_and_predictions(
 def _aggregate_gaussian_diagnostics(candidate_rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     gaussian_count = 0
     correct = 0
+    geometric_correct = 0
+    mapped_other = 0
     unsupported = 0
     for row in candidate_rows:
         radius = row["radii"]["0.05"]
         gaussian_count += int(row["candidate_gaussian_count"])
         correct += int(radius["gaussian_correct_target_instance_count"])
+        geometric_correct += int(
+            radius["gaussian_geometry_target_instance_count"]
+        )
+        mapped_other += int(radius["gaussian_mapped_other_instance_count"])
         unsupported += int(radius["gaussian_unsupported_count"])
     return {
         "gaussian_count": gaussian_count,
         "correct_target_count_5cm": correct,
+        "geometric_target_count_5cm": geometric_correct,
+        "mapped_other_instance_count_5cm": mapped_other,
         "unsupported_count_5cm": unsupported,
         "target_precision_5cm": float(correct / gaussian_count)
+        if gaussian_count
+        else 0.0,
+        "geometric_target_precision_5cm": float(geometric_correct / gaussian_count)
+        if gaussian_count
+        else 0.0,
+        "geometric_pollution_fraction_5cm": float(
+            (mapped_other + unsupported) / gaussian_count
+        )
         if gaussian_count
         else 0.0,
         "unsupported_fraction_5cm": float(unsupported / gaussian_count)
@@ -874,6 +1002,11 @@ def _aggregate_rows(rows: Sequence[Mapping[str, Any]], *, arm: str) -> dict[str,
             "official_same_class_050_tp",
             "official_gt_count",
             "official_tiny_small_gt_count",
+            "gaussian_count",
+            "correct_target_count_5cm",
+            "geometric_target_count_5cm",
+            "mapped_other_instance_count_5cm",
+            "unsupported_count_5cm",
         )
     }
     tiny_matched_025 = sum(
@@ -888,6 +1021,7 @@ def _aggregate_rows(rows: Sequence[Mapping[str, Any]], *, arm: str) -> dict[str,
     )
     denominator = summed["official_tiny_small_gt_count"]
     candidates = summed["official_candidate_count"]
+    gaussian_count = summed["gaussian_count"]
     return {
         "scope": "aggregate",
         "scene_id": None,
@@ -919,6 +1053,30 @@ def _aggregate_rows(rows: Sequence[Mapping[str, Any]], *, arm: str) -> dict[str,
         else 0.0,
         "official_geometry_050_tiny_small_recall": float(tiny_matched_050 / denominator)
         if denominator
+        else 0.0,
+        "target_precision_5cm": float(
+            summed["correct_target_count_5cm"] / gaussian_count
+        )
+        if gaussian_count
+        else 0.0,
+        "geometric_target_precision_5cm": float(
+            summed["geometric_target_count_5cm"] / gaussian_count
+        )
+        if gaussian_count
+        else 0.0,
+        "geometric_pollution_fraction_5cm": float(
+            (
+                summed["mapped_other_instance_count_5cm"]
+                + summed["unsupported_count_5cm"]
+            )
+            / gaussian_count
+        )
+        if gaussian_count
+        else 0.0,
+        "unsupported_fraction_5cm": float(
+            summed["unsupported_count_5cm"] / gaussian_count
+        )
+        if gaussian_count
         else 0.0,
     }
 
@@ -1111,13 +1269,15 @@ def evaluate_mask_contract_ablation_manifest(
         scene_analysis[scene_id] = {"pair_contract": pair_contract, "arms": {}}
 
         for arm in MASK_ARMS:
-            bank, output, diagnostics, _ = loaded[arm]
+            bank, output, diagnostics, bank_dir = loaded[arm]
             output_contract = _prediction_contract_audit(
                 payload=output,
                 diagnostics=diagnostics,
                 scene_id=scene_id,
                 gaussian_count=bank.point_count,
                 allowed_classes=allowed_classes,
+                bank_dir=bank_dir,
+                bank=bank,
             )
             candidates, predictions = _candidates_and_predictions(
                 payload=output,
@@ -1136,6 +1296,68 @@ def evaluate_mask_contract_ablation_manifest(
             scene_protocols = evaluate_dual_protocols(
                 [gt_scene], predictions, class_names, min_region_size=min_region_size
             )
+            # This is the formal H'/P evaluator, not a historical-artifact
+            # browser.  Every arm must therefore carry the *current*
+            # condition-diagnostics schema and enough lineage to reconstruct
+            # every registered stage.  Missing/unknown schemas and partial
+            # lineage fail the mechanical gate instead of being treated as an
+            # opt-out from the reconstruction contract.
+            diagnostics_schema_current = bool(
+                diagnostics.get("schema") == CONDITION_DIAGNOSTICS_SCHEMA
+            )
+            funnel = None
+            funnel_pass = False
+            funnel_error: str | None = None
+            lineage_complete = False
+            final_equivalence_exact = False
+            if diagnostics_schema_current:
+                try:
+                    funnel = audit_frozen_clean_scene(
+                        bank_dir=bank_dir,
+                        diagnostics_path=_resolve(
+                            base,
+                            specs[arm].get("diagnostics"),
+                            name=f"{arm}.diagnostics",
+                        ),
+                        output_path=_resolve(
+                            base, specs[arm].get("output"), name=f"{arm}.output"
+                        ),
+                        allowed_classes=allowed_classes,
+                        metric_callback=_funnel_metric_callback(
+                            gt_objects=gt_objects,
+                            nearest=nearest,
+                            min_region_size=min_region_size,
+                        ),
+                    )
+                except (IndexError, KeyError, TypeError, ValueError) as exc:
+                    funnel_error = str(exc)
+            else:
+                funnel_error = (
+                    "missing or unsupported condition diagnostics schema: "
+                    f"expected {CONDITION_DIAGNOSTICS_SCHEMA!r}, got "
+                    f"{diagnostics.get('schema')!r}"
+                )
+            if funnel is not None:
+                lineage_complete = bool(
+                    tuple(stage.name for stage in funnel.stages) == STAGE_NAMES
+                    and all(stage.available for stage in funnel.stages)
+                )
+                equivalence = funnel.final_equivalence
+                final_equivalence_exact = bool(
+                    equivalence is not None
+                    and equivalence.equivalent
+                    and equivalence.changed_points == 0
+                    and equivalence.class_exact
+                    and equivalence.point_count_exact
+                    and equivalence.reconstructed_instance_count
+                    == equivalence.frozen_instance_count
+                )
+                funnel_pass = bool(
+                    diagnostics_schema_current
+                    and lineage_complete
+                    and final_equivalence_exact
+                    and not funnel.issues
+                )
             rows.append(
                 _arm_row(
                     scene_id=scene_id,
@@ -1146,13 +1368,47 @@ def evaluate_mask_contract_ablation_manifest(
                     bank=bank,
                 )
             )
+            if funnel is not None:
+                for stage in funnel.stages:
+                    rows.append(
+                        {
+                            "schema": MASK_ABLATION_ROW_SCHEMA,
+                            "scope": "stage",
+                            "scene_id": scene_id,
+                            "arm": arm,
+                            "condition": CONDITION,
+                            "stage": stage.name,
+                            **stage.summary,
+                            **dict(stage.metrics),
+                            "details_json": json.dumps(
+                                dict(stage.details),
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ),
+                        }
+                    )
             scene_analysis[scene_id]["arms"][arm] = {
                 "three_spaces": metrics,
                 "dual_protocols": scene_protocols,
                 "output_contract": output_contract,
+                "stage_funnel": (
+                    None if funnel is None else funnel.to_summary()
+                ),
+                "stage_funnel_exact": funnel_pass,
+                "stage_funnel_lineage_required": True,
+                "stage_funnel_diagnostics_schema_current": (
+                    diagnostics_schema_current
+                ),
+                "stage_funnel_lineage_complete": lineage_complete,
+                "stage_funnel_final_equivalence_exact": (
+                    final_equivalence_exact
+                ),
+                "stage_funnel_contract_error": funnel_error,
+                "stage_funnel_contract_pass": funnel_pass,
             }
 
-    scene_rows = tuple(rows)
+    scene_rows = tuple(row for row in rows if row.get("scope") == "scene")
     combined_protocols = {
         arm: evaluate_dual_protocols(
             gt_scenes,
@@ -1172,12 +1428,24 @@ def evaluate_mask_contract_ablation_manifest(
         for scene_id in scene_analysis
         for arm in MASK_ARMS
     )
+    stage_funnel_pass = all(
+        bool(
+            scene_analysis[scene_id]["arms"][arm][
+                "stage_funnel_contract_pass"
+            ]
+        )
+        for scene_id in scene_analysis
+        for arm in MASK_ARMS
+    )
     mechanical = {
         "pair_contracts": pair_contracts,
         "output_contract_pass": output_contract_pass,
+        "stage_funnel_final_partition_exact": stage_funnel_pass,
     }
     mechanical["passed"] = bool(
-        output_contract_pass and all(bool(row["passed"]) for row in pair_contracts)
+        output_contract_pass
+        and stage_funnel_pass
+        and all(bool(row["passed"]) for row in pair_contracts)
     )
     science = _scientific_gate(scene_rows=scene_rows, aggregate=aggregate)
     science["eligible"] = bool(mechanical["passed"])
@@ -1210,6 +1478,10 @@ def evaluate_mask_contract_ablation_manifest(
         "condition": CONDITION,
         "evaluation_only": True,
         "gt_used_by_runtime": False,
+        "category_prior_tested": False,
+        "affinity_feature_used_for_geometric_association": False,
+        "geometric_identity_unit": "complete-frame-mask-observation",
+        "semantic_category_role": "late-object-classification-only",
         "three_metric_spaces_kept_separate": True,
         "synthetic_false_positive_sentinels": False,
         "scene_analysis": scene_analysis,

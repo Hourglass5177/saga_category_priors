@@ -27,6 +27,19 @@ DEFAULT_CLASSES: tuple[str, ...] = (
 )
 
 
+# The differentiable rasterizer accumulates per-Gaussian color gradients with
+# CUDA atomic additions.  Their least-significant floating-point bits are not
+# reproducible across launches even though the thresholded membership is.  The
+# clean consensus graph is deliberately set based: it consumes only the
+# visibility/support IDs, never the raw accumulated masses.  We therefore use
+# the continuous values transiently for every threshold and P-flat ownership
+# decision, then persist a canonical indicator for each accepted membership.
+# This is an evidence-value contract, not a numerical approximation of mass.
+EVIDENCE_VALUE_CONTRACT = "thresholded-membership-indicator"
+CONTINUOUS_ALPHA_MASS_PERSISTED = False
+_MEMBERSHIP_INDICATOR = np.float32(1.0)
+
+
 @dataclass(frozen=True)
 class CleanSceneInputs:
     base_path: Path
@@ -254,6 +267,62 @@ def sparse_support_from_mass(
             )
         )
     return tuple(result)
+
+
+def decision_canonical_evidence(
+    support_rows: Sequence[tuple[np.ndarray, np.ndarray, np.ndarray]],
+    visible_mass: np.ndarray,
+    *,
+    visible_threshold: float = 0.5,
+) -> tuple[
+    tuple[tuple[np.ndarray, np.ndarray, np.ndarray], ...],
+    np.ndarray,
+    np.ndarray,
+]:
+    """Persist only thresholded membership after all raw-mass decisions.
+
+    ``support_rows`` must already reflect the registered inside-mass and ratio
+    thresholds and, for P-flat, the unique-owner decision.  The returned IDs
+    therefore change whenever a threshold or owner decision changes.  Only the
+    unused continuous payload is replaced by the exact indicator ``1.0`` so
+    CUDA atomic-add roundoff cannot make otherwise identical banks differ.
+    """
+
+    threshold = float(visible_threshold)
+    if not np.isfinite(threshold) or threshold <= 0:
+        raise ValueError("visible_threshold must be finite and positive")
+    visible = np.asarray(visible_mass, dtype=np.float64).reshape(-1)
+    if np.any(~np.isfinite(visible)) or np.any(visible < -1e-7):
+        raise ValueError("visible alpha mass must be finite and non-negative")
+    visible_ids = np.flatnonzero(
+        np.maximum(visible, 0.0) >= threshold
+    ).astype(np.int32)
+    canonical_rows: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+    for ids, inside, ratio in support_rows:
+        point_ids = np.asarray(ids, dtype=np.int32)
+        inside_values = np.asarray(inside)
+        ratio_values = np.asarray(ratio)
+        if inside_values.shape != point_ids.shape or ratio_values.shape != point_ids.shape:
+            raise ValueError("support IDs and raw decision values must align")
+        if (
+            np.any(~np.isfinite(inside_values))
+            or np.any(inside_values < 0)
+            or np.any(~np.isfinite(ratio_values))
+            or np.any(ratio_values < 0)
+            or np.any(ratio_values > 1 + 1e-6)
+        ):
+            raise ValueError("raw support decision values are invalid")
+        if len(point_ids) and (
+            np.any(point_ids < 0)
+            or np.any(np.diff(point_ids.astype(np.int64, copy=False)) <= 0)
+        ):
+            raise ValueError("support IDs must be sorted, unique, and non-negative")
+        indicator = np.full(point_ids.shape, _MEMBERSHIP_INDICATOR, dtype=np.float32)
+        canonical_rows.append((point_ids.copy(), indicator, indicator.copy()))
+    visible_indicator = np.full(
+        visible_ids.shape, _MEMBERSHIP_INDICATOR, dtype=np.float32
+    )
+    return tuple(canonical_rows), visible_ids, visible_indicator
 
 
 def mark_same_frame_ambiguity(
@@ -661,6 +730,15 @@ def render_frame_evidence(
         ambiguous = mark_same_frame_ambiguity(
             [row[0] for row in support_rows], point_count
         )
+    # All registered raw thresholds and the optional P-flat owner comparison
+    # have now run.  From this point onward the clean baseline is a set-valued
+    # object graph, so persist canonical membership indicators rather than the
+    # nondeterministic tail bits of CUDA atomic sums.
+    canonical_rows, visible_ids, visible_indicator = decision_canonical_evidence(
+        support_rows,
+        visible_mass,
+        visible_threshold=0.5,
+    )
     supports = tuple(
         RenderedMaskSupport(
             mask_index=index,
@@ -670,14 +748,13 @@ def render_frame_evidence(
             ambiguous_ids=ambiguous[index],
             class_probabilities=np.asarray(semantic_rows[index], dtype=np.float32),
         )
-        for index, row in enumerate(support_rows)
+        for index, row in enumerate(canonical_rows)
     )
-    visible_ids = np.flatnonzero(visible_mass >= 0.5).astype(np.int32)
     return RenderedFrameEvidence(
         frame_id=int(getattr(camera, "uid", 0)),
         image_name=str(camera.image_name),
         visible_ids=visible_ids,
-        visible_mass=visible_mass[visible_ids].astype(np.float32),
+        visible_mass=visible_indicator,
         masks=supports,
         grounded_abstained=grounded_abstained,
         valid_pixel_count=valid_pixel_count,

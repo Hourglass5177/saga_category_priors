@@ -762,6 +762,11 @@ def run_consensus_condition(
     tracked_veto: _TrackedSizeVeto | None = None
     prior_payload: Mapping[str, Any] | None = None
     if mode == "none":
+        if priors_path is not None:
+            raise ValueError(
+                "C0-no-prior forbids a category-prior input; geometry must be "
+                "constructed without category statistics"
+            )
         merge_veto = None
     else:
         if priors_path is None:

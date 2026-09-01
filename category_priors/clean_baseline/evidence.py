@@ -31,6 +31,12 @@ EVIDENCE_ARRAY_FILE = "evidence.npz"
 EVIDENCE_METADATA_FILE = "masks.json"
 EVIDENCE_DIAGNOSTICS_FILE = "diagnostics.json"
 
+_DECISION_CANONICAL_VALUE_CONTRACT = "thresholded-membership-indicator"
+_VALUE_CONTRACT_SOURCE_KEYS = {
+    "evidence_values",
+    "continuous_alpha_mass_persisted",
+}
+
 # Durable resume data lives beside, never inside, the three-file evidence
 # bank.  The final files above remain the only completion contract consumed by
 # downstream code.  Checkpoints contain only already-reduced sparse evidence;
@@ -782,7 +788,7 @@ def _metadata(bank: AlphaMaskEvidenceBank) -> dict[str, Any]:
 
 
 def _diagnostics(bank: AlphaMaskEvidenceBank) -> dict[str, Any]:
-    return {
+    result = {
         "schema": DIAGNOSTICS_SCHEMA,
         "scene_id": bank.scene_id,
         "point_count": bank.point_count,
@@ -806,6 +812,55 @@ def _diagnostics(bank: AlphaMaskEvidenceBank) -> dict[str, Any]:
         "semantic_abstention_mask_count": int(np.count_nonzero(bank.semantic_abstained)),
         "valid_pixel_count": int(sum(frame.valid_pixel_count for frame in bank.frames)),
     }
+    # Legacy hierarchy banks predate the decision-canonical persistence
+    # contract and must remain byte-valid read-only inputs.  New banks declare
+    # the contract in their source identity and repeat it in diagnostics so a
+    # stored indicator can never be mistaken for measured alpha mass.
+    if "evidence_values" in bank.source:
+        result["evidence_values"] = str(bank.source["evidence_values"])
+        result["continuous_alpha_mass_persisted"] = bool(
+            bank.source.get("continuous_alpha_mass_persisted", True)
+        )
+    return result
+
+
+def _validate_evidence_value_contract(bank: AlphaMaskEvidenceBank) -> None:
+    """Keep legacy mass banks and decision-canonical banks unambiguous.
+
+    Historical hierarchy evidence stores measured continuous alpha mass and
+    predates an explicit value-contract discriminator.  New evidence instead
+    persists only the already-thresholded membership decisions, represented by
+    exact one-valued entries.  A partial or forged discriminator would let one
+    representation be interpreted as the other, so it is rejected both before
+    persistence and after loading.
+    """
+
+    present = _VALUE_CONTRACT_SOURCE_KEYS.intersection(bank.source)
+    if not present:
+        return
+    if present != _VALUE_CONTRACT_SOURCE_KEYS:
+        missing = sorted(_VALUE_CONTRACT_SOURCE_KEYS - present)
+        raise ValueError(
+            "evidence value contract is incomplete; missing source fields: "
+            + ", ".join(missing)
+        )
+    if bank.source["evidence_values"] != _DECISION_CANONICAL_VALUE_CONTRACT:
+        raise ValueError("unsupported evidence value contract")
+    if bank.source["continuous_alpha_mass_persisted"] is not False:
+        raise ValueError(
+            "decision-canonical evidence must declare "
+            "continuous_alpha_mass_persisted=false"
+        )
+    indicator_arrays = {
+        "frame_visible_mass": bank.frame_visibility.visible_mass,
+        "mask_support_inside_mass": bank.mask_support.inside_mass,
+        "mask_support_inside_ratio": bank.mask_support.inside_ratio,
+    }
+    for name, values in indicator_arrays.items():
+        if not np.all(np.asarray(values) == 1.0):
+            raise ValueError(
+                f"{name} must contain exact one-valued membership indicators"
+            )
 
 
 def _arrays(bank: AlphaMaskEvidenceBank) -> dict[str, np.ndarray]:
@@ -1242,6 +1297,8 @@ def save_evidence_bank(
 ) -> None:
     """Serialize one bank without hashes, pickle, or hidden compatibility paths."""
 
+    _validate_evidence_value_contract(bank)
+
     target = Path(directory)
     target.mkdir(parents=True, exist_ok=True)
     files = (
@@ -1352,6 +1409,7 @@ def load_evidence_bank(
         semantic_abstained=arrays["mask_semantic_abstained"],
         source=metadata.get("source", {}),
     )
+    _validate_evidence_value_contract(bank)
     if not np.array_equal(
         arrays["frame_id"], np.asarray([frame.frame_id for frame in frames], dtype=np.int64)
     ) or not np.array_equal(
@@ -1419,7 +1477,12 @@ def _resolve_evidence_request(
     or metric scale.
     """
 
-    from .worker import DEFAULT_CLASSES, resolve_clean_scene_inputs
+    from .worker import (
+        CONTINUOUS_ALPHA_MASS_PERSISTED,
+        DEFAULT_CLASSES,
+        EVIDENCE_VALUE_CONTRACT,
+        resolve_clean_scene_inputs,
+    )
 
     if not isinstance(request, Mapping):
         raise TypeError("evidence request must be a mapping")
@@ -1497,6 +1560,8 @@ def _resolve_evidence_request(
         "producer_inputs": _producer_input_identity(inputs),
         "producer_commit": producer_text,
         "mask_observation_mode": mask_observation_mode,
+        "evidence_values": EVIDENCE_VALUE_CONTRACT,
+        "continuous_alpha_mass_persisted": CONTINUOUS_ALPHA_MASS_PERSISTED,
     }
     # The producer revision and the actual producer input contents jointly
     # define the resume boundary.  This identity lives inside masks.json; no

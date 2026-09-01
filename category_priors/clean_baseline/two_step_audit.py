@@ -43,6 +43,7 @@ from .evaluation import (
 )
 from .metric_reaudit import (
     FORMAL_RADIUS_M,
+    _FormalProjectionIndex,
     build_bidirectional_nearest,
     evaluate_candidate_set_three_spaces,
     evaluate_dual_protocols,
@@ -267,21 +268,82 @@ def _output_candidates(
     return candidates, predictions
 
 
-def _compact_candidate_metrics(result: Mapping[str, Any]) -> dict[str, Any]:
-    output: dict[str, Any] = {}
+def _compact_candidate_metrics(
+    result: Mapping[str, Any],
+    *,
+    semantic_classification_applied: bool,
+) -> dict[str, Any]:
+    """Flatten stage metrics without fabricating pre-classification failures.
+
+    The first seven funnel stages are geometric object hypotheses.  They do
+    not yet carry the post-hoc semantic class assigned during final export, so
+    a same-class score of zero would mean "classified and wrong" when the
+    truthful state is "not classified yet".  Geometry metrics remain available
+    at every stage; same-class metrics are emitted only after classification.
+    """
+
+    output: dict[str, Any] = {
+        "semantic_classification_applied": bool(
+            semantic_classification_applied
+        )
+    }
     for subset_name in ("all", "official_evaluable"):
         subset = result["subsets"][subset_name]
         output[f"{subset_name}_candidate_count"] = int(subset["candidate_count"])
-        for match_name in ("geometry", "same_class"):
+        match_names = (
+            ("geometry", "same_class")
+            if semantic_classification_applied
+            else ("geometry",)
+        )
+        for match_name in match_names:
             for threshold in ("0.25", "0.50"):
                 row = subset["matching"][match_name][threshold]
                 prefix = f"{subset_name}_{match_name}_{threshold.replace('.', '')}"
                 output[f"{prefix}_match_count"] = int(row["true_positive_count"])
+                output[f"{prefix}_false_positive_count"] = int(
+                    row["false_positive_count"]
+                )
+                output[f"{prefix}_false_negative_count"] = int(
+                    row["false_negative_count"]
+                )
                 output[f"{prefix}_precision"] = float(row["precision"])
                 output[f"{prefix}_recall"] = float(row["recall"])
                 output[f"{prefix}_tiny_small_recall"] = float(
                     row["tiny_small_recall"]
                 )
+                output[f"{prefix}_total_matched_iou"] = float(
+                    row["total_matched_iou"]
+                )
+
+    gaussian_count = 0
+    correct_count = 0
+    mapped_other_count = 0
+    unsupported_count = 0
+    for candidate in result["candidate_rows"]:
+        radius = candidate["radii"][f"{FORMAL_RADIUS_M:.2f}"]
+        gaussian_count += int(candidate["candidate_gaussian_count"])
+        correct_count += int(radius["gaussian_geometry_target_instance_count"])
+        mapped_other_count += int(radius["gaussian_mapped_other_instance_count"])
+        unsupported_count += int(radius["gaussian_unsupported_count"])
+    output.update(
+        {
+            "gaussian_assignment_count_5cm": gaussian_count,
+            "gaussian_geometry_target_count_5cm": correct_count,
+            "gaussian_mapped_other_instance_count_5cm": mapped_other_count,
+            "gaussian_unsupported_count_5cm": unsupported_count,
+            "gaussian_geometry_target_precision_5cm": (
+                float(correct_count / gaussian_count) if gaussian_count else 0.0
+            ),
+            "gaussian_geometry_pollution_fraction_5cm": (
+                float((mapped_other_count + unsupported_count) / gaussian_count)
+                if gaussian_count
+                else 0.0
+            ),
+            "gaussian_unsupported_fraction_5cm": (
+                float(unsupported_count / gaussian_count) if gaussian_count else 0.0
+            ),
+        }
+    )
     return output
 
 
@@ -291,8 +353,10 @@ def _funnel_metric_callback(
     nearest: Any,
     min_region_size: int,
 ) -> Any:
+    projection_index = _FormalProjectionIndex.build(nearest)
+
     def callback(stage: str, objects: tuple[FunnelObject, ...]) -> dict[str, Any]:
-        del stage
+        semantic_classification_applied = stage == "final_export"
         candidates = [
             {
                 "object_id": item.stable_id,
@@ -310,8 +374,12 @@ def _funnel_metric_callback(
             nearest=nearest,
             radii_m=(FORMAL_RADIUS_M,),
             min_region_size=min_region_size,
+            _projection_index=projection_index,
         )
-        return _compact_candidate_metrics(result)
+        return _compact_candidate_metrics(
+            result,
+            semantic_classification_applied=semantic_classification_applied,
+        )
 
     return callback
 
@@ -589,7 +657,14 @@ def audit_condition_run_identity(
     bank_dir: Path,
     bank: Any,
 ) -> dict[str, Any]:
-    """Bind output, diagnostics and their embedded identity to one bank."""
+    """Bind every condition artifact to the same on-disk evidence bank.
+
+    The manifest hashes prevent an unregistered byte change, but they do not
+    by themselves prove that ``output.json``, ``diagnostics.json``, the nested
+    prediction contract, and the selected bank came from one run.  Validate
+    that producer/consumer boundary explicitly so a refreshed manifest cannot
+    accidentally bless a mixture of otherwise valid historical artifacts.
+    """
 
     checks: dict[str, bool] = {}
     reason: str | None = None
@@ -599,6 +674,13 @@ def audit_condition_run_identity(
         )
         diagnostic_identity = validate_embedded_identity(
             diagnostics.get("run_identity"), expected_schema=RUN_IDENTITY_SCHEMA
+        )
+        prediction_contract = diagnostics.get("prediction_contract")
+        if not isinstance(prediction_contract, Mapping):
+            raise ValueError("diagnostics omitted the nested prediction contract")
+        contract_identity = validate_embedded_identity(
+            prediction_contract.get("run_identity"),
+            expected_schema=RUN_IDENTITY_SCHEMA,
         )
         evidence = output_identity.get("evidence")
         if not isinstance(evidence, Mapping):
@@ -614,6 +696,17 @@ def audit_condition_run_identity(
         actual_evidence = {
             name: sha256_file(bank_dir / name) for name in sorted(expected_names)
         }
+        expected_evidence = {
+            "schema": str(bank.schema),
+            "scene_id": str(bank.scene_id),
+            "point_count": int(bank.point_count),
+            "frame_count": int(bank.frame_count),
+            "mask_count": int(bank.mask_count),
+            "thresholds": bank.thresholds.to_dict(),
+            "source": dict(bank.source),
+            "class_names": list(map(str, bank.class_names)),
+            "files": actual_evidence,
+        }
         registered_output_sha = str(spec.get("output_sha256", ""))
         registered_diagnostics_sha = str(spec.get("diagnostics_sha256", ""))
         registered_identity_sha = str(spec.get("run_identity_sha256", ""))
@@ -621,6 +714,21 @@ def audit_condition_run_identity(
         checks = {
             "output_and_diagnostics_identity_exact": output_identity
             == diagnostic_identity,
+            "nested_prediction_contract_identity_exact": contract_identity
+            == output_identity,
+            "output_payload_identity_exact": str(output.get("scene_id", ""))
+            == scene_id
+            and str(output.get("condition", "")) == condition,
+            "diagnostics_payload_identity_exact": str(
+                diagnostics.get("scene_id", "")
+            )
+            == scene_id
+            and str(diagnostics.get("condition", "")) == condition,
+            "prediction_contract_payload_identity_exact": str(
+                prediction_contract.get("scene_id", "")
+            )
+            == scene_id
+            and str(prediction_contract.get("condition", "")) == condition,
             "scene_exact": str(output_identity.get("scene_id")) == scene_id,
             "condition_exact": str(output_identity.get("condition")) == condition,
             "consumer_commit_registered": str(
@@ -635,6 +743,7 @@ def audit_condition_run_identity(
             == registered_diagnostics_sha,
             "evidence_files_current": actual_evidence
             == {str(key): str(value) for key, value in files.items()},
+            "evidence_bank_identity_exact": dict(evidence) == expected_evidence,
             "evidence_scene_exact": str(evidence.get("scene_id")) == scene_id,
             "evidence_schema_exact": str(evidence.get("schema")) == str(bank.schema),
             "evidence_point_count_exact": int(evidence.get("point_count", -1))
@@ -783,7 +892,11 @@ def audit_clean_baseline_manifest(
             expected_proof = {
                 "producer_commit": str(registration.get("producer_commit", "")),
                 "assumed_mode": "hierarchy",
-                "missing_fields": ["mask_observation_mode"],
+                "missing_fields": [
+                    "mask_observation_mode",
+                    "evidence_values",
+                    "continuous_alpha_mass_persisted",
+                ],
             }
             if (
                 dict(proof) != expected_proof
@@ -794,6 +907,17 @@ def audit_clean_baseline_manifest(
             if registered_source.pop("mask_observation_mode", None) != "hierarchy":
                 raise ValueError(
                     "legacy hierarchy proof is incompatible with the source request"
+                )
+            if (
+                registered_source.pop("evidence_values", None)
+                != "thresholded-membership-indicator"
+                or registered_source.pop(
+                    "continuous_alpha_mass_persisted", None
+                )
+                is not False
+            ):
+                raise ValueError(
+                    "legacy evidence-value proof is incompatible with the source request"
                 )
         bank_dir = _resolve(base, scene.get("bank_dir"), name="scene.bank_dir")
         bank = load_evidence_bank(
@@ -830,19 +954,29 @@ def audit_clean_baseline_manifest(
                 diagnostics.get("condition")
             ) != condition:
                 raise ValueError("condition diagnostics identity mismatch")
-            condition_identity_rows.append(
-                audit_condition_run_identity(
-                    scene_id=scene_id,
-                    condition=condition,
-                    spec=spec,
-                    output_path=output_path,
-                    diagnostics_path=diagnostics_path,
-                    output=output,
-                    diagnostics=diagnostics,
-                    bank_dir=bank_dir,
-                    bank=bank,
-                )
+            identity_audit = audit_condition_run_identity(
+                scene_id=scene_id,
+                condition=condition,
+                spec=spec,
+                output_path=output_path,
+                diagnostics_path=diagnostics_path,
+                output=output,
+                diagnostics=diagnostics,
+                bank_dir=bank_dir,
+                bank=bank,
             )
+            if not identity_audit["passed"]:
+                failed = sorted(
+                    key
+                    for key, passed in identity_audit.get("checks", {}).items()
+                    if not passed
+                )
+                detail = identity_audit.get("violation") or ", ".join(failed)
+                raise ValueError(
+                    f"{scene_id}/{condition}: condition artifact identity "
+                    f"binding failed: {detail}"
+                )
+            condition_identity_rows.append(identity_audit)
             candidates, predictions = _output_candidates(
                 payload=output,
                 scene_id=scene_id,

@@ -107,6 +107,27 @@ def _bank() -> AlphaMaskEvidenceBank:
     )
 
 
+def _indicator_bank() -> AlphaMaskEvidenceBank:
+    bank = _bank()
+    return replace(
+        bank,
+        mask_support=replace(
+            bank.mask_support,
+            inside_mass=np.ones_like(bank.mask_support.inside_mass),
+            inside_ratio=np.ones_like(bank.mask_support.inside_ratio),
+        ),
+        frame_visibility=replace(
+            bank.frame_visibility,
+            visible_mass=np.ones_like(bank.frame_visibility.visible_mass),
+        ),
+        source={
+            **dict(bank.source),
+            "evidence_values": "thresholded-membership-indicator",
+            "continuous_alpha_mass_persisted": False,
+        },
+    )
+
+
 def test_alpha_tprev_mass_is_normalized_per_pixel() -> None:
     mass = _mass(np.asarray([[[1, 0]]], dtype=bool))
     np.testing.assert_allclose(mass.visible_mass, [0.85, 1.15, 0.0])
@@ -325,6 +346,77 @@ def test_save_load_round_trip_and_strict_completion(tmp_path: Path) -> None:
         save_evidence_bank(bank, output)
 
 
+def test_decision_canonical_value_contract_round_trips_strictly(
+    tmp_path: Path,
+) -> None:
+    bank = _indicator_bank()
+    output = tmp_path / "indicator-bank"
+    save_evidence_bank(bank, output)
+    loaded = load_evidence_bank(output)
+    assert loaded.source["evidence_values"] == "thresholded-membership-indicator"
+    assert loaded.source["continuous_alpha_mass_persisted"] is False
+    np.testing.assert_array_equal(
+        loaded.mask_support.inside_mass,
+        np.ones_like(loaded.mask_support.inside_mass),
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        {"evidence_values": "thresholded-membership-indicator"},
+        {"continuous_alpha_mass_persisted": False},
+        {
+            "evidence_values": "continuous-alpha-mass",
+            "continuous_alpha_mass_persisted": False,
+        },
+        {
+            "evidence_values": "thresholded-membership-indicator",
+            "continuous_alpha_mass_persisted": True,
+        },
+    ],
+)
+def test_partial_or_unknown_value_contract_is_rejected(
+    tmp_path: Path, source: dict[str, object]
+) -> None:
+    bank = replace(_bank(), source={**dict(_bank().source), **source})
+    with pytest.raises(ValueError, match="value contract|continuous_alpha"):
+        save_evidence_bank(bank, tmp_path / "invalid")
+
+
+def test_claimed_indicator_rejects_non_indicator_values(tmp_path: Path) -> None:
+    bank = _indicator_bank()
+    forged = replace(
+        bank,
+        mask_support=replace(
+            bank.mask_support,
+            inside_mass=np.full_like(bank.mask_support.inside_mass, 0.75),
+        ),
+        frame_visibility=replace(
+            bank.frame_visibility,
+            visible_mass=np.full_like(bank.frame_visibility.visible_mass, 0.75),
+        ),
+    )
+    with pytest.raises(ValueError, match="one-valued membership indicators"):
+        save_evidence_bank(forged, tmp_path / "forged")
+
+
+def test_load_rejects_corrupted_indicator_even_above_threshold(tmp_path: Path) -> None:
+    output = tmp_path / "indicator-bank"
+    save_evidence_bank(_indicator_bank(), output)
+    with np.load(output / "evidence.npz", allow_pickle=False) as loaded:
+        arrays = {name: np.asarray(loaded[name]) for name in loaded.files}
+    arrays["frame_visible_mass"] = np.full_like(
+        arrays["frame_visible_mass"], 0.75
+    )
+    arrays["mask_support_inside_mass"] = np.full_like(
+        arrays["mask_support_inside_mass"], 0.75
+    )
+    np.savez_compressed(output / "evidence.npz", **arrays)
+    with pytest.raises(ValueError, match="one-valued membership indicators"):
+        load_evidence_bank(output)
+
+
 def test_load_rejects_diagnostics_or_metadata_that_disagree(tmp_path: Path) -> None:
     output = tmp_path / "bank"
     save_evidence_bank(_bank(), output)
@@ -512,7 +604,7 @@ def test_request_identity_prevents_scene_only_cache_reuse(
     ) != source
 
     output = tmp_path / "bank"
-    bank = replace(_bank(), source=source)
+    bank = replace(_indicator_bank(), source=source)
     save_evidence_bank(bank, output)
     assert evidence_bank_is_complete(
         output,

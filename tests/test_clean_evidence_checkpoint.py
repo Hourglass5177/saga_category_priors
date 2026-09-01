@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import struct
 from pathlib import Path
 
@@ -15,6 +16,8 @@ from category_priors.clean_baseline.worker import (
     CleanSceneInputs,
     RenderedFrameEvidence,
     RenderedMaskSupport,
+    decision_canonical_evidence,
+    sparse_support_from_mass,
 )
 
 
@@ -88,6 +91,60 @@ def _record(frame_id: int) -> RenderedFrameEvidence:
     )
 
 
+def test_atomic_tail_variation_produces_identical_serialized_frame_payload() -> None:
+    from category_priors.clean_baseline.evidence import (
+        _frame_checkpoint_payload,
+        _rendered_record_to_frame,
+    )
+
+    posterior = np.zeros(32, dtype=np.float32)
+    posterior[0] = 1.0
+
+    def payload(inside: np.ndarray, visible: np.ndarray) -> dict[str, np.ndarray]:
+        rows = sparse_support_from_mass(inside, visible)
+        canonical, visible_ids, visible_values = decision_canonical_evidence(
+            rows, visible
+        )
+        masks = tuple(
+            RenderedMaskSupport(
+                mask_index=index,
+                gaussian_ids=row[0],
+                inside_mass=row[1],
+                inside_ratio=row[2],
+                ambiguous_ids=np.empty(0, dtype=np.int32),
+                class_probabilities=posterior,
+            )
+            for index, row in enumerate(canonical)
+        )
+        record = RenderedFrameEvidence(
+            frame_id=0,
+            image_name="frame-0.jpg",
+            visible_ids=visible_ids,
+            visible_mass=visible_values,
+            masks=masks,
+            grounded_abstained=False,
+            valid_pixel_count=12,
+        )
+        frame = _rendered_record_to_frame(
+            record,
+            point_count=3,
+            class_count=32,
+            image_name="frame-0",
+        )
+        return _frame_checkpoint_payload(frame)
+
+    left = payload(
+        np.asarray([[0.50001, 0.8, 0.0]]),
+        np.asarray([1.0, 1.2, 0.49]),
+    )
+    right = payload(
+        np.asarray([[0.50003, 0.82, 0.0]]),
+        np.asarray([1.00002, 1.22002, 0.48]),
+    )
+    assert left.keys() == right.keys()
+    assert all(np.array_equal(left[key], right[key]) for key in left)
+
+
 def test_interrupted_scene_resumes_and_only_corrupt_frame_is_rendered(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -147,6 +204,11 @@ def test_interrupted_scene_resumes_and_only_corrupt_frame_is_rendered(
     bank = load_evidence_bank(output)
     assert bank.frame_count == 3
     assert bank.mask_count == 3
+    assert bank.source["evidence_values"] == "thresholded-membership-indicator"
+    assert bank.source["continuous_alpha_mass_persisted"] is False
+    diagnostics = json.loads((output / "diagnostics.json").read_text("utf-8"))
+    assert diagnostics["evidence_values"] == "thresholded-membership-indicator"
+    assert diagnostics["continuous_alpha_mass_persisted"] is False
 
     # Force a final-bank rebuild, then damage exactly one sparse frame.  The
     # intact scene and other frame checkpoints must remain reusable.
