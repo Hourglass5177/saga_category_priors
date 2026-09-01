@@ -28,6 +28,32 @@ from category_priors.clean_baseline.worker import CleanSceneInputs
 COMMIT = "1" * 40
 
 
+def test_cv2_loader_uses_only_explicit_appended_local_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from category_priors.clean_baseline import mask_control
+
+    package_root = tmp_path / "site-packages"
+    (package_root / "cv2").mkdir(parents=True)
+    (package_root / "cv2" / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.setenv(
+        "SAGA_EXISTING_OPENCV_SITE_PACKAGES", str(package_root)
+    )
+    monkeypatch.setattr(mask_control.sys, "path", list(mask_control.sys.path))
+    sentinel = object()
+    calls: list[str] = []
+
+    def fake_import(name: str):
+        calls.append(name)
+        if len(calls) == 1:
+            raise ModuleNotFoundError("missing cv2", name="cv2")
+        assert mask_control.sys.path[-1] == str(package_root.resolve())
+        return sentinel
+
+    assert mask_control._load_cv2(fake_import) is sentinel
+    assert calls == ["cv2", "cv2"]
+
+
 def _source_request(tmp_path: Path, checkpoint: Path) -> dict[str, object]:
     return {
         "scene": {

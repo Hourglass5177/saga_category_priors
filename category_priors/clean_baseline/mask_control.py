@@ -9,9 +9,11 @@ are then deterministic projections of that same payload.
 """
 
 import hashlib
+import importlib
 import json
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -37,6 +39,46 @@ from .worker import DEFAULT_CLASSES, resolve_clean_scene_inputs
 MASK_CONTROL_REQUEST_SCHEMA = "saga-clean-mask-control-request-v1"
 MASK_CONTROL_STATE_SCHEMA = "saga-clean-mask-control-state-v1"
 _FULL_COMMIT = re.compile(r"[0-9a-f]{40}")
+_OPENCV_FALLBACK_ENV = "SAGA_EXISTING_OPENCV_SITE_PACKAGES"
+
+
+def _load_cv2(
+    import_module: Callable[[str], Any] = importlib.import_module,
+) -> Any:
+    """Load OpenCV, optionally reusing one explicitly registered local tree.
+
+    The RTX 5090 runtime intentionally uses the existing Torch/CUDA 12.8
+    environment.  Some hosts keep OpenCV only in an older local environment.
+    An explicit fallback path is appended (never prepended) so it cannot
+    shadow the active Torch, NumPy, or SciPy packages.  Nothing is installed
+    or downloaded.
+    """
+
+    try:
+        return import_module("cv2")
+    except ModuleNotFoundError as exc:
+        if exc.name not in {None, "cv2"}:
+            raise
+        raw = os.environ.get(_OPENCV_FALLBACK_ENV, "").strip()
+        if not raw:
+            raise RuntimeError(
+                "OpenCV is unavailable; set SAGA_EXISTING_OPENCV_SITE_PACKAGES "
+                "to an existing local site-packages directory"
+            ) from exc
+        root = Path(raw).resolve(strict=True)
+        if not root.is_dir() or not (root / "cv2" / "__init__.py").is_file():
+            raise RuntimeError(
+                "SAGA_EXISTING_OPENCV_SITE_PACKAGES does not contain cv2"
+            ) from exc
+        value = str(root)
+        if value not in sys.path:
+            sys.path.append(value)
+        try:
+            return import_module("cv2")
+        except ModuleNotFoundError as fallback_exc:
+            raise RuntimeError(
+                "the registered local OpenCV package cannot be imported"
+            ) from fallback_exc
 
 
 def _file_identity(path: Path) -> dict[str, Any]:
@@ -91,6 +133,7 @@ def _save_flat_map(path: Path, source_mask_ids: np.ndarray) -> None:
 def _default_generator_factory(
     checkpoint: Path, arch: str, device: str, config: Mapping[str, Any]
 ) -> Any:
+    _load_cv2()
     from segment_anything import SamAutomaticMaskGenerator, sam_model_registry
 
     model = sam_model_registry[str(arch)](checkpoint=str(checkpoint)).to(device)
@@ -98,7 +141,7 @@ def _default_generator_factory(
 
 
 def _default_image_loader(path: Path) -> np.ndarray:
-    import cv2
+    cv2 = _load_cv2()
 
     image = cv2.imread(str(path), cv2.IMREAD_COLOR)
     if image is None:
