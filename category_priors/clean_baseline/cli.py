@@ -220,6 +220,36 @@ def _evaluate_clean_baseline(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _audit_clean_baseline(args: argparse.Namespace) -> dict[str, Any]:
+    from .two_step_experiment import audit_clean_baseline
+
+    return audit_clean_baseline(
+        manifest_path=Path(args.manifest).resolve(),
+        output_root=Path(args.output_root).resolve(),
+    )
+
+
+def _prepare_flat_mask_control(args: argparse.Namespace) -> dict[str, Any]:
+    from .two_step_experiment import prepare_flat_mask_control
+
+    return prepare_flat_mask_control(
+        manifest_path=Path(args.manifest).resolve(),
+        output_root=Path(args.output_root).resolve(),
+        producer_commit=str(args.producer_commit),
+    )
+
+
+def _run_clean_baseline_two_step(args: argparse.Namespace) -> dict[str, Any]:
+    from .two_step_experiment import run_clean_baseline_two_step
+
+    return run_clean_baseline_two_step(
+        manifest_path=Path(args.manifest).resolve(),
+        output_root=Path(args.output_root).resolve(),
+        run_root=Path(args.run_root).resolve(),
+        producer_commit=str(args.producer_commit),
+    )
+
+
 def _add_condition_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--scene-id", required=True)
     parser.add_argument("--bank-dir", required=True)
@@ -271,6 +301,33 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--radius-m", type=float, default=0.05)
     evaluate.add_argument("--min-region-size", type=int, default=100)
     evaluate.set_defaults(handler=_evaluate_clean_baseline)
+
+    audit = subparsers.add_parser(
+        "audit-clean-baseline",
+        help="read-only corrected DEV8 metrics and production-stage funnel",
+    )
+    audit.add_argument("--manifest", required=True)
+    audit.add_argument("--output-root", required=True)
+    audit.set_defaults(handler=_audit_clean_baseline)
+
+    prepare_flat = subparsers.add_parser(
+        "prepare-flat-mask-control",
+        help="generate one SAM stack and derive paired hierarchy/flat masks",
+    )
+    prepare_flat.add_argument("--manifest", required=True)
+    prepare_flat.add_argument("--output-root", required=True)
+    prepare_flat.add_argument("--producer-commit", required=True)
+    prepare_flat.set_defaults(handler=_prepare_flat_mask_control)
+
+    two_step = subparsers.add_parser(
+        "run-clean-baseline-two-step",
+        help="run the metric correction and paired H'/P DEV2 control",
+    )
+    two_step.add_argument("--manifest", required=True)
+    two_step.add_argument("--output-root", required=True)
+    two_step.add_argument("--run-root", required=True)
+    two_step.add_argument("--producer-commit", required=True)
+    two_step.set_defaults(handler=_run_clean_baseline_two_step)
     return parser
 
 

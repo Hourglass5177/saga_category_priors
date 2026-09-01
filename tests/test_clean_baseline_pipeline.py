@@ -312,3 +312,35 @@ def test_prediction_resume_is_bound_to_commit_bank_and_diagnostics(
         consumer_commit="b" * 40,
     )
     assert repaired["runner_status"] == "complete"
+
+    complete_diagnostics = json.loads(
+        (output / "diagnostics.json").read_text("utf-8")
+    )
+    (output / "diagnostics.json").write_text(
+        json.dumps({"run_identity": complete_diagnostics["run_identity"]}),
+        encoding="utf-8",
+    )
+    rebuilt_sidecar = run_consensus_condition(
+        scene_id="scene-test",
+        bank_dir=bank_dir,
+        condition="C0-no-prior",
+        output_dir=output,
+        allowed_classes=allowed,
+        consumer_commit="b" * 40,
+    )
+    assert rebuilt_sidecar["runner_status"] == "complete"
+    restored = json.loads((output / "diagnostics.json").read_text("utf-8"))
+    assert restored["schema"] == "saga-clean-alpha-mask-condition-diagnostics-v1"
+    assert "consensus" in restored
+    assert "objects" in restored
+    assert "prediction_contract" in restored
+
+    complete_again = run_consensus_condition(
+        scene_id="scene-test",
+        bank_dir=bank_dir,
+        condition="C0-no-prior",
+        output_dir=output,
+        allowed_classes=allowed,
+        consumer_commit="b" * 40,
+    )
+    assert complete_again["runner_status"] == "skipped-complete"

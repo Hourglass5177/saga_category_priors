@@ -102,6 +102,30 @@ def _run_clean_baseline_cli(args: argparse.Namespace) -> None:
         )
         if args.taxonomy:
             argv.extend(["--taxonomy", args.taxonomy])
+    elif command in {"audit-clean-baseline", "prepare-flat-mask-control"}:
+        argv.extend(
+            [
+                "--manifest",
+                args.manifest,
+                "--output-root",
+                args.output_root,
+            ]
+        )
+        if command == "prepare-flat-mask-control":
+            argv.extend(["--producer-commit", args.producer_commit])
+    elif command == "run-clean-baseline-two-step":
+        argv.extend(
+            [
+                "--manifest",
+                args.manifest,
+                "--output-root",
+                args.output_root,
+                "--run-root",
+                args.run_root,
+                "--producer-commit",
+                args.producer_commit,
+            ]
+        )
     else:  # pragma: no cover - argparse owns the command set
         raise ValueError(f"unknown clean-baseline command: {command}")
     clean_main(argv)
@@ -902,6 +926,42 @@ def build_parser() -> argparse.ArgumentParser:
     clean_evaluate.set_defaults(
         func=_run_clean_baseline_cli,
         clean_baseline_command="evaluate-clean-baseline",
+    )
+
+    clean_audit = commands.add_parser(
+        "audit-clean-baseline",
+        help="read-only corrected DEV8 metrics and production-stage funnel",
+    )
+    clean_audit.add_argument("--manifest", required=True)
+    clean_audit.add_argument("--output-root", required=True)
+    clean_audit.set_defaults(
+        func=_run_clean_baseline_cli,
+        clean_baseline_command="audit-clean-baseline",
+    )
+
+    clean_flat = commands.add_parser(
+        "prepare-flat-mask-control",
+        help="generate one SAM stack and derive paired hierarchy/flat masks",
+    )
+    clean_flat.add_argument("--manifest", required=True)
+    clean_flat.add_argument("--output-root", required=True)
+    clean_flat.add_argument("--producer-commit", required=True)
+    clean_flat.set_defaults(
+        func=_run_clean_baseline_cli,
+        clean_baseline_command="prepare-flat-mask-control",
+    )
+
+    clean_two_step = commands.add_parser(
+        "run-clean-baseline-two-step",
+        help="run metric correction then the paired H'/P DEV2 control",
+    )
+    clean_two_step.add_argument("--manifest", required=True)
+    clean_two_step.add_argument("--output-root", required=True)
+    clean_two_step.add_argument("--run-root", required=True)
+    clean_two_step.add_argument("--producer-commit", required=True)
+    clean_two_step.set_defaults(
+        func=_run_clean_baseline_cli,
+        clean_baseline_command="run-clean-baseline-two-step",
     )
 
     lifting_v8 = commands.add_parser(

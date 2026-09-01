@@ -51,6 +51,172 @@ CONDITION_TO_PRIOR_MODE = {
     "D-predicted": "predicted",
 }
 
+CONDITION_DIAGNOSTICS_SCHEMA = "saga-clean-alpha-mask-condition-diagnostics-v1"
+
+
+def _condition_diagnostics_is_complete(
+    payload: object,
+    *,
+    expected_scene_id: str,
+    expected_condition: str,
+    expected_bank_schema: str,
+    expected_config: ConsensusConfig,
+    expected_run_identity: Mapping[str, Any],
+    expected_gaussian_count: int,
+    expected_exported_instance_count: int,
+) -> bool:
+    """Validate the sidecar before treating a condition as a cache hit.
+
+    ``output.json`` is the write-last marker, but ``diagnostics.json`` is also
+    a production input to the stage-funnel audit.  A matching identity alone
+    must not make a truncated sidecar look complete.
+    """
+
+    try:
+        if not isinstance(payload, Mapping):
+            return False
+        if payload.get("schema") != CONDITION_DIAGNOSTICS_SCHEMA:
+            return False
+        if payload.get("scene_id") != str(expected_scene_id):
+            return False
+        if payload.get("condition") != str(expected_condition):
+            return False
+        if payload.get("bank_schema") != str(expected_bank_schema):
+            return False
+        if payload.get("config") != asdict(expected_config):
+            return False
+        identity = validate_embedded_identity(
+            payload.get("run_identity"), expected_schema=RUN_IDENTITY_SCHEMA
+        )
+        expected_identity = validate_embedded_identity(
+            expected_run_identity, expected_schema=RUN_IDENTITY_SCHEMA
+        )
+        if identity != expected_identity:
+            return False
+
+        consensus = payload.get("consensus")
+        required_consensus = {
+            "observation_count",
+            "active_observation_count",
+            "raw_graph_identity",
+            "accepted_edge_count",
+            "undersegmented_mask_count",
+            "component_count_before_output_filters",
+            "dropped_by_min_views",
+            "dropped_by_detection_ratio",
+            "dropped_by_physical_connectivity",
+            "contained_duplicate_count",
+            "object_count",
+        }
+        if not isinstance(consensus, Mapping) or not required_consensus.issubset(
+            consensus
+        ):
+            return False
+
+        objects = payload.get("objects")
+        accepted_edges = payload.get("accepted_edges")
+        rejected = payload.get("rejected_undersegmented_mask_ids")
+        size_decisions = payload.get("size_merge_decisions")
+        if not isinstance(objects, list):
+            return False
+        if not isinstance(accepted_edges, list):
+            return False
+        if not isinstance(rejected, list):
+            return False
+        if not isinstance(size_decisions, list):
+            return False
+        if payload.get("unique_object_count") != len(objects):
+            return False
+        if consensus.get("accepted_edge_count") != len(accepted_edges):
+            return False
+        if consensus.get("undersegmented_mask_count") != len(rejected):
+            return False
+        required_object_fields = {
+            "object_id",
+            "mask_ids",
+            "frame_ids",
+            "gaussian_count",
+            "class",
+            "winner_probability",
+            "class_probabilities",
+            "view_consensus",
+            "detection_ratio",
+            "score",
+        }
+        if any(
+            not isinstance(row, Mapping)
+            or not required_object_fields.issubset(row)
+            for row in objects
+        ):
+            return False
+        required_edge_fields = {
+            "left_mask_ids",
+            "right_mask_ids",
+            "observer_count",
+            "supporter_count",
+            "consensus",
+            "observer_level",
+        }
+        if any(
+            not isinstance(row, Mapping)
+            or not required_edge_fields.issubset(row)
+            for row in accepted_edges
+        ):
+            return False
+
+        contract = payload.get("prediction_contract")
+        required_contract = {
+            "schema",
+            "scene_id",
+            "condition",
+            "run_identity",
+            "gaussian_count",
+            "candidate_count",
+            "exported_instance_count",
+            "skipped_unclassified_object_ids",
+            "contract",
+            "oracle_class_used",
+        }
+        if not isinstance(contract, Mapping) or not required_contract.issubset(
+            contract
+        ):
+            return False
+        if contract.get("scene_id") != str(expected_scene_id):
+            return False
+        if contract.get("condition") != str(expected_condition):
+            return False
+        if contract.get("gaussian_count") != int(expected_gaussian_count):
+            return False
+        if contract.get("candidate_count") != len(objects):
+            return False
+        if contract.get("exported_instance_count") != int(
+            expected_exported_instance_count
+        ):
+            return False
+        contract_identity = validate_embedded_identity(
+            contract.get("run_identity"), expected_schema=RUN_IDENTITY_SCHEMA
+        )
+        if contract_identity != expected_identity:
+            return False
+        audit = contract.get("contract")
+        if not isinstance(audit, Mapping):
+            return False
+        if audit.get("schema") != "saga-strict-prediction-contract-v1":
+            return False
+        if audit.get("point_count") != int(expected_gaussian_count):
+            return False
+        if audit.get("instance_count") != int(expected_exported_instance_count):
+            return False
+        if payload.get("prior_in_ap_score") is not False:
+            return False
+        if payload.get("oracle_class_used") is not False:
+            return False
+        if contract.get("oracle_class_used") is not False:
+            return False
+        return True
+    except (KeyError, TypeError, ValueError):
+        return False
+
 
 def _current_git_commit() -> str:
     repository = Path(__file__).resolve().parents[2]
@@ -638,12 +804,22 @@ def run_consensus_condition(
     ):
         try:
             existing = load_json(diagnostics_path)
-            diagnostic_identity = validate_embedded_identity(
-                existing.get("run_identity"), expected_schema=RUN_IDENTITY_SCHEMA
-            )
-            if diagnostic_identity == run_identity:
+            output_payload = load_json(output_json)
+            output_instances = output_payload.get("instances")
+            if not isinstance(output_instances, Mapping):
+                raise TypeError("prediction instances must be a mapping")
+            if _condition_diagnostics_is_complete(
+                existing,
+                expected_scene_id=scene_id,
+                expected_condition=condition,
+                expected_bank_schema=bank.schema,
+                expected_config=config,
+                expected_run_identity=run_identity,
+                expected_gaussian_count=bank.point_count,
+                expected_exported_instance_count=len(output_instances),
+            ):
                 return {**existing, "runner_status": "skipped-complete"}
-        except (OSError, TypeError, ValueError, KeyError):
+        except (OSError, TypeError, ValueError, KeyError, AttributeError):
             pass
 
     observations = _observations(bank)
@@ -694,7 +870,7 @@ def run_consensus_condition(
         run_identity=run_identity,
     )
     diagnostics = {
-        "schema": "saga-clean-alpha-mask-condition-diagnostics-v1",
+        "schema": CONDITION_DIAGNOSTICS_SCHEMA,
         "scene_id": scene_id,
         "condition": condition,
         "run_identity": run_identity,

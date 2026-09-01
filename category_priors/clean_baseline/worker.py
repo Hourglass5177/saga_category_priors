@@ -440,7 +440,11 @@ def _load_grounded(camera: Any) -> tuple[np.ndarray | None, np.ndarray | None]:
     return resized, label_array.astype(np.int16, copy=False)
 
 
-def _load_cameras(inputs: CleanSceneInputs) -> Iterator[Any]:
+def _load_cameras(
+    inputs: CleanSceneInputs,
+    *,
+    frame_ids: frozenset[int] | None = None,
+) -> Iterator[Any]:
     """Yield exactly one registered camera at a time.
 
     The historical helper materialised every RGB image and every Grounded-SAM
@@ -488,6 +492,8 @@ def _load_cameras(inputs: CleanSceneInputs) -> Iterator[Any]:
     for stable_id, ((key, extrinsic), frame) in enumerate(
         zip(ordered_extrinsics, expected, strict=True)
     ):
+        if frame_ids is not None and stable_id not in frame_ids:
+            continue
         image_path = inputs.images / frame.relative_image_path
         if not image_path.is_file():
             raise FileNotFoundError(f"missing exact COLMAP image: {image_path}")
@@ -528,10 +534,17 @@ def render_frame_evidence(
     *,
     render_mask_fn: Callable[..., Mapping[str, Any]] | None = None,
     class_count: int = 32,
+    mask_observation_mode: str = "hierarchy",
 ) -> RenderedFrameEvidence:
     """Render one frame and immediately reduce it to sparse mask evidence."""
 
     import torch
+
+    observation_mode = str(mask_observation_mode)
+    if observation_mode not in {"hierarchy", "flat-highest-quality"}:
+        raise ValueError(
+            "mask_observation_mode must be hierarchy or flat-highest-quality"
+        )
 
     if render_mask_fn is None:
         from gaussian_renderer import render_mask as render_mask_fn
@@ -627,9 +640,27 @@ def render_frame_evidence(
         raise RuntimeError("alpha-mass visibility gradient was not produced")
     if len(support_rows) != mask_count or len(semantic_rows) != mask_count:
         raise RuntimeError("mask streaming lost or duplicated an observation row")
-    ambiguous = mark_same_frame_ambiguity(
-        [row[0] for row in support_rows], point_count
-    )
+    if observation_mode == "flat-highest-quality" and support_rows:
+        # P-flat masks are ordered from highest to lowest frozen SAM quality.
+        # A Gaussian footprint may nevertheless cross multiple disjoint pixel
+        # masks.  Resolve that residual overlap by the largest measured
+        # inside/visible ratio; an exact tie keeps the earlier (better-quality)
+        # mask row.  This is streaming/sparse and never materialises MxN mass.
+        from .mask_contract import make_sparse_support_exclusive
+
+        support_rows = list(
+            make_sparse_support_exclusive(
+                [row[0] for row in support_rows],
+                [row[1] for row in support_rows],
+                [row[2] for row in support_rows],
+                point_count=point_count,
+            )
+        )
+        ambiguous = tuple(np.empty(0, dtype=np.int32) for _ in support_rows)
+    else:
+        ambiguous = mark_same_frame_ambiguity(
+            [row[0] for row in support_rows], point_count
+        )
     supports = tuple(
         RenderedMaskSupport(
             mask_index=index,
@@ -657,8 +688,19 @@ def render_scene_frames(
     inputs: CleanSceneInputs,
     *,
     classes: Sequence[str] = DEFAULT_CLASSES,
+    mask_observation_mode: str = "hierarchy",
+    frame_ids: Sequence[int] | None = None,
+    frame_callback: Callable[[np.ndarray, RenderedFrameEvidence], None] | None = None,
 ) -> tuple[np.ndarray, tuple[RenderedFrameEvidence, ...]]:
-    """Load one immutable 30k scene and render every frame sequentially."""
+    """Load one immutable 30k scene and render selected frames sequentially.
+
+    ``frame_ids`` preserves the stable COLMAP row IDs; it never repacks a
+    resumed subset.  ``frame_callback`` runs immediately after each sparse
+    frame has been reduced, before the next image is loaded.  Callers can
+    therefore persist a durable frame checkpoint without ever writing a
+    pixel-by-Gaussian contributor cache.  Omitting both arguments retains the
+    original all-frame API and return value.
+    """
 
     import torch
     from scene import GaussianModel
@@ -670,8 +712,28 @@ def render_scene_frames(
         debug=False, compute_cov3D_python=False, convert_SHs_python=False
     )
     background = torch.zeros(3, dtype=torch.float32, device="cuda")
+    frame_count = len(colmap_frame_specs(inputs.sparse))
+    if frame_ids is None:
+        selected: tuple[int, ...] | None = None
+        selected_set: frozenset[int] | None = None
+    else:
+        raw_ids = tuple(frame_ids)
+        if any(
+            isinstance(value, (bool, np.bool_))
+            or not isinstance(value, (int, np.integer))
+            for value in raw_ids
+        ):
+            raise TypeError("frame_ids must contain only integer frame IDs")
+        selected = tuple(int(value) for value in raw_ids)
+        if len(selected) != len(set(selected)):
+            raise ValueError("frame_ids must be unique")
+        if any(value < 0 or value >= frame_count for value in selected):
+            raise ValueError("frame_ids contain an out-of-range COLMAP row ID")
+        selected = tuple(sorted(selected))
+        selected_set = frozenset(selected)
     records: list[RenderedFrameEvidence] = []
-    for stable_frame_id, camera in enumerate(_load_cameras(inputs)):
+    for camera in _load_cameras(inputs, frame_ids=selected_set):
+        stable_frame_id = int(camera.uid)
         masks = load_packed_sam_frame(
             inputs.sam_masks,
             str(camera.image_name),
@@ -685,16 +747,24 @@ def render_scene_frames(
             background,
             masks,
             class_count=len(classes),
+            mask_observation_mode=mask_observation_mode,
         )
-        records.append(
-            RenderedFrameEvidence(
-                frame_id=stable_frame_id,
-                image_name=record.image_name,
-                visible_ids=record.visible_ids,
-                visible_mass=record.visible_mass,
-                masks=record.masks,
-                grounded_abstained=record.grounded_abstained,
-                valid_pixel_count=record.valid_pixel_count,
-            )
+        stable_record = RenderedFrameEvidence(
+            frame_id=stable_frame_id,
+            image_name=record.image_name,
+            visible_ids=record.visible_ids,
+            visible_mass=record.visible_mass,
+            masks=record.masks,
+            grounded_abstained=record.grounded_abstained,
+            valid_pixel_count=record.valid_pixel_count,
+        )
+        if frame_callback is not None:
+            frame_callback(xyz, stable_record)
+        records.append(stable_record)
+    expected_ids = tuple(range(frame_count)) if selected is None else selected
+    actual_ids = tuple(record.frame_id for record in records)
+    if actual_ids != expected_ids:
+        raise RuntimeError(
+            "scene worker did not render exactly the requested stable frame IDs"
         )
     return xyz, tuple(records)

@@ -1,15 +1,16 @@
-# SAGA 类别先验与小物体保护实验计划（当前权威：类别约束碎片组装）
+# SAGA 类别先验与小物体保护实验计划（当前权威：清洁基线两步闭环）
 
-> **权威状态：第32节已确认错误语义路由是前置损失，但正确类别仍不能让raw HDBSCAN形成
-> 完整对象。当前执行第33节：冻结一次raw碎片和局部邻接图，让global/class统计直接决定
-> 碎片是否合并、何时停止和最终保留。**
+> **权威状态：第34节的完整掩码几何覆盖上限健康，但自动共识输出不健康。复核又发现旧
+> 候选几何评价混入密度相关的伪假阳性，且分层 SAM 掩码的大量重叠支持被作为歧义弃权。
+> 当前执行第35节：先用冻结 DEV8 纠正评价并逐级定位损失，再用同一次 SAM 输出派生
+> 分层 H′ 与平面化 P 两个条件，检验掩码观察合同是否是主结构故障。类别先验本轮不测试。**
 > 旧B2、class-first、prior-v2、teacher-preservation和selective-restore文档与代码只作为
 > 失败审计记录，不得覆盖本文件的研究问题、条件定义、阶段门槛或结论边界。
 
-- 版本：CFR-2.0
-- 冻结日期：2026-08-30
+- 版本：CMC-1.0
+- 冻结日期：2026-09-01
 - V3 起点代码检查点：`f1367fa58c8f50df75f80b86f67bab469af06531`
-- 当前状态：**第32节根因诊断已完成；一般类别先验尚未被否定，正在首次检验类别知识参与实例组装**
+- 当前状态：**清洁基线评价纠正与 H′/P 同源掩码合同正控正在实施；类别先验尚未进入本轮**
 - 适用范围：现有 24 个 tune 场景、原 48 个内部评估场景及现有训练资产
 - 独立实验单位：physical scene
 - 技术重复：seed `42`、`3407`、`20260804`
@@ -2580,3 +2581,113 @@ train-only米制三轴q95尺寸上界。支持量、平滑度、HDBSCAN、全场
 - [x] DEV2几何上限与机械门槛通过后进入DEV8；DEV8八场几何上限为100个IoU≥0.50对象，tiny/small Recall@0.25为75/79；
 - [x] DEV8自动共识健康门槛失败：C0的554个候选和U的134个候选均为0个几何IoU≥0.25匹配，严格mAP与AP50均为0；主要断点锁定为自动跨视角关联/对象重建，而不是完整掩码输入覆盖；
 - [ ] 条件性身份边正控须在固定验证难边仅含一种标签时记录AUROC不可定义和`inconclusive`终态；修复后从DEV8完整C0/U产物恢复，不重跑已完成阶段。
+
+## 35. 当前权威：清洁基线评价纠正与平面化掩码正控
+
+### 35.1 为什么必须先纠正评价
+
+第34节正式 ScanNet GT 点域的 AP25 很低、AP50 为零，这一事实保留；但旧候选几何诊断还把
+“没有成为任何 GT 点唯一最近邻”的大量 Gaussian 统一追加成假阳性。Gaussian 数量越密，
+这个惩罚越重，它不等于 ScanNet 在 GT 点域计算的实例 IoU。因此旧报告中“所有候选几何
+IoU 都为零”和极高 unsupported 污染率不能直接用于结构归因。
+
+本节先将三种空间彻底分开：正式 IoU/AP 只在 GT 点域计算；Gaussian→GT 只报告预测点精度
+和无映射比例；GT→Gaussian 只报告对象覆盖率。不得再加 synthetic FP sentinel，也不得把
+后二者拼成伪 IoU 或 F1。候选在 IoU 0.25/0.50 分别进行确定性一对一最大匹配，重复预测只能
+有一个真阳性，其余计假阳性。主 AP 协议为官方 0.50 至 0.90 九档与单列 AP25；0.50 至 0.95
+十档仅作历史对照。tiny/small 分母使用全部原始 GT 点数不少于100的正式有效实例，不能先按
+映射成功数筛选。
+
+历史 `perfect_trim` 更名为 `support_coverage_ceiling`。它允许 GT 完美删除假阳性并跨 GT
+复用证据，只能说明逐物体覆盖上限，不再充当自动实例可行性门槛。
+
+### 35.2 第一步：冻结 DEV8 的阶段漏斗
+
+只读复用第34节 DEV8 evidence bank、C0/U 输出和 diagnostics，按以下固定阶段重建：
+
+```text
+完整掩码支持
+→ 去除同帧歧义后的关联支持
+→ 删除欠分割掩码
+→ accepted edges 形成的合并组件
+→ 检测比例过滤
+→ 物理 DBSCAN 拆分与包含去重
+→ 唯一 Gaussian 所有权
+→ 最终 export
+```
+
+生产转换抽成纯函数供审计和正式运行共同调用。每一级保存对象数、Gaussian 点数、一对一
+IoU≥0.25/0.50匹配、GT召回及相对上一级损失。重建出的最后分区在实例重编号后必须与冻结
+`output.json`逐点一致，类别和实例数完全相同。任何冻结 bank 或历史输出在运行前后内容身份
+必须不变。
+
+第一步只有技术门槛，没有科学早停：GT-as-prediction在官方九档和AP25均为1；新正式域
+AP25/AP50逐值复现现有正式输出；历史十档复评一致；每场GT→Gaussian 5cm映射率不少于0.90；
+阶段重建最终changed points为0、类别和实例数一致。任一失败只修评价实现并阻止第二步，不能
+输出科学归因。科学得分高低本身不阻止第二步。
+
+### 35.3 第二步：同源 H′ 与 P 的两场正控
+
+固定`scene0645_00`和`scene0025_01`。使用同一图像、同一现有 SAM checkpoint、相同配置和
+同一次生成结果，每帧保存压缩原始栈以及`predicted_iou/stability_score/area`。从它同时派生：
+
+- `H-hierarchy`：保留全部原始分层重叠掩码；
+- `P-flat`：把相同像素并集确定性转换为对象级唯一观察。
+
+历史 H 只作漂移审计，主比较只能是同源 H′ 对 P。P 对每个被覆盖像素按 predicted-IoU、
+stability score、原始 mask ID 的顺序选唯一归属；只删除平面化后为空的 mask，不增加400像素
+过滤或任何新阈值。P 与 H′ 的像素并集必须逐点相同，P 内像素重叠率必须为0。
+
+由于一个 Gaussian 的 alpha footprint 仍可能跨越两个不重叠像素掩码，P 在提升后还要执行
+一次帧内唯一归属：对满足原 inside/visible 门槛的多个 mask，按 inside/visible 比例最高者，
+再按上述 mask 优先级选一个。由此每个 frame×Gaussian 最多属于一个 P mask。H′/P 除
+`mask_observation_mode`外必须共享30k Gaussian、相机、`alpha×T_prev`、inside/visible阈值、
+多视角共识、欠分割、DBSCAN、包含去重、Grounded-SAM后置分类和纠正后的评价。
+
+本阶段只运行无先验C0；不得运行U/D、身份头、下载或训练。P的机械门槛为像素重叠率0、像素
+并集完全一致、frame×Gaussian唯一、重复运行逐字节确定，以及无orphan、负metadata和重复
+所有权。
+
+### 35.4 两场科学门槛和固定解释
+
+P通过须同时满足：相对H′新增至少2个一对一几何IoU≥0.50对象；两场累计至少6个；正式可评
+候选precision@0.25不少于10%；全部official-valid tiny/small Recall@0.25不少于0.20；候选数
+不超过H′的1.5倍；至少一场改善，另一场几何Recall@0.25下降不超过0.05。歧义率下降只作机制
+检查，不是效果门槛。
+
+归因固定为：完整支持到活跃支持大幅下降且P改善，说明分层掩码合同错配是主因；P像素唯一后
+Gaussian冲突仍高，说明alpha footprint或遮挡提升是主因；歧义下降但几何不升，说明当前SAM
+掩码完整性或污染仍不足；几何改善但same-class/AP50不升，说明晚语义分类是主因；组件健康而
+最终export坍塌，说明检测过滤、DBSCAN或唯一所有权是主因。P全部通过后才可扩DEV8无先验
+基线；P失败就停止调共识阈值，下一授权只能比较真正对象级掩码来源或SAI3D式几何超点，不能
+外推为所有对象级掩码无效。
+
+### 35.5 入口、产物和执行检查点
+
+新增入口：`audit-clean-baseline`、`prepare-flat-mask-control`、
+`run-clean-baseline-two-step`。产物固定为：
+
+```text
+clean_metric_reaudit_dev8.parquet
+clean_metric_reaudit_dev8.json
+clean_stage_funnel_dev8.parquet
+clean_stage_funnel_dev8.json
+sam_metadata_regeneration_dev2.json
+flat_mask_input_audit_dev2.json
+mask_contract_ablation_dev2.parquet
+mask_contract_ablation_dev2.json
+clean_two_step_analysis.json
+```
+
+输出使用commit绑定的新`artifacts/clean-mask-contract-*`和`runs/clean-mask-contract-*`，旧产物
+只读。第一步零GPU；第二步单GPU单进程、按帧恢复。不得下载、训练、重训3DGS、生成独立SHA
+文件、lock、schedule hash或逐像素贡献缓存；磁盘至少80GB，内存只读90GiB cgroup。完成或
+停止后删除当前任务的每小时检查自动化，不自动关闭用户的AutoDL云电脑。
+
+- [x] 用户批准两步一次性实施，科学得分不在两步之间触发询问；
+- [x] 主代理完整回读权威文档并冻结本节边界；
+- [x] 实现三空间评价、一对一匹配、双AP协议和阶段重建；
+- [x] 实现同源SAM元数据、H′/P派生和Gaussian唯一观察合同；
+- [x] 本地专项305项、仓库首方1066项通过（另2项按既有条件跳过）；
+- [ ] commit/push并部署新工作区；
+- [ ] 通过第一步技术门槛后自动完成两场H′/P并形成固定归因。

@@ -31,6 +31,33 @@ EVIDENCE_ARRAY_FILE = "evidence.npz"
 EVIDENCE_METADATA_FILE = "masks.json"
 EVIDENCE_DIAGNOSTICS_FILE = "diagnostics.json"
 
+# Durable resume data lives beside, never inside, the three-file evidence
+# bank.  The final files above remain the only completion contract consumed by
+# downstream code.  Checkpoints contain only already-reduced sparse evidence;
+# per-pixel contributors are neither serialised nor reconstructable from them.
+_CHECKPOINT_DIRECTORY_SUFFIX = ".frame-evidence"
+_SCENE_CHECKPOINT_SCHEMA = "saga-clean-scene-evidence-checkpoint-v1"
+_FRAME_CHECKPOINT_SCHEMA = "saga-clean-frame-evidence-checkpoint-v1"
+_CHECKPOINT_HEADER_KEY = "header_json"
+_SCENE_CHECKPOINT_KEYS = {"xyz", _CHECKPOINT_HEADER_KEY}
+_FRAME_CHECKPOINT_PAYLOAD_KEYS = {
+    "mask_index",
+    "support_indptr",
+    "support_gaussian_ids",
+    "support_inside_mass",
+    "support_inside_ratio",
+    "support_ambiguous",
+    "visible_indptr",
+    "visible_gaussian_ids",
+    "visible_mass",
+    "ambiguous_gaussian_ids",
+    "semantic_posteriors",
+    "semantic_abstained",
+}
+_FRAME_CHECKPOINT_KEYS = _FRAME_CHECKPOINT_PAYLOAD_KEYS | {
+    _CHECKPOINT_HEADER_KEY
+}
+
 _FULL_COMMIT = re.compile(r"[0-9a-f]{40}")
 _HASH_CHUNK_BYTES = 8 * 1024 * 1024
 
@@ -855,6 +882,358 @@ def _write_npz_atomic(path: Path, arrays: Mapping[str, np.ndarray]) -> None:
         raise
 
 
+def _canonical_json_bytes(value: Mapping[str, Any]) -> bytes:
+    return json.dumps(
+        dict(value),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _source_identity_digest(source: Mapping[str, Any]) -> str:
+    return hashlib.sha256(_canonical_json_bytes(source)).hexdigest()
+
+
+def _checkpoint_payload_digest(arrays: Mapping[str, np.ndarray]) -> str:
+    """Hash exact reduced arrays inside one checkpoint.
+
+    The digest is embedded in the NPZ header rather than written as a SHA
+    sidecar.  It catches a syntactically valid but silently modified NPZ, while
+    normal ZIP/NPY corruption is already rejected by ``numpy.load``.
+    """
+
+    digest = hashlib.sha256()
+    for name in sorted(arrays):
+        array = np.ascontiguousarray(np.asarray(arrays[name]))
+        encoded_name = name.encode("utf-8")
+        encoded_dtype = array.dtype.str.encode("ascii")
+        digest.update(len(encoded_name).to_bytes(8, "big"))
+        digest.update(encoded_name)
+        digest.update(len(encoded_dtype).to_bytes(8, "big"))
+        digest.update(encoded_dtype)
+        digest.update(array.ndim.to_bytes(8, "big"))
+        for dimension in array.shape:
+            digest.update(int(dimension).to_bytes(8, "big", signed=False))
+        digest.update(array.tobytes(order="C"))
+    return digest.hexdigest()
+
+
+def _encode_checkpoint_header(value: Mapping[str, Any]) -> np.ndarray:
+    return np.frombuffer(_canonical_json_bytes(value), dtype=np.uint8).copy()
+
+
+def _decode_checkpoint_header(value: np.ndarray) -> dict[str, Any]:
+    array = np.asarray(value)
+    if array.dtype != np.uint8 or array.ndim != 1 or len(array) == 0:
+        raise ValueError("checkpoint header must be a non-empty uint8 vector")
+    decoded = json.loads(array.tobytes().decode("utf-8"))
+    if not isinstance(decoded, dict):
+        raise ValueError("checkpoint header must decode to a JSON object")
+    return decoded
+
+
+def _checkpoint_root(output_dir: Path) -> Path:
+    return output_dir.with_name(output_dir.name + _CHECKPOINT_DIRECTORY_SUFFIX)
+
+
+def _read_checkpoint_arrays(
+    path: Path, *, expected_keys: set[str]
+) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
+    with np.load(path, allow_pickle=False) as loaded:
+        if set(loaded.files) != expected_keys:
+            raise ValueError("checkpoint has missing or unexpected arrays")
+        header = _decode_checkpoint_header(loaded[_CHECKPOINT_HEADER_KEY])
+        arrays = {
+            name: np.asarray(loaded[name]).copy()
+            for name in loaded.files
+            if name != _CHECKPOINT_HEADER_KEY
+        }
+    expected_digest = str(header.get("payload_sha256", ""))
+    if not expected_digest or _checkpoint_payload_digest(arrays) != expected_digest:
+        raise ValueError("checkpoint payload digest does not match its header")
+    return header, arrays
+
+
+def _validate_raw_xyz(value: Any) -> np.ndarray:
+    xyz = np.asarray(value, dtype=np.float32)
+    if xyz.ndim != 2 or xyz.shape[1] != 3 or len(xyz) <= 0:
+        raise ValueError("scene worker returned an invalid Gaussian XYZ array")
+    if np.any(~np.isfinite(xyz)):
+        raise ValueError("scene worker returned non-finite Gaussian XYZ")
+    return xyz
+
+
+def _save_scene_checkpoint(
+    path: Path,
+    *,
+    scene_id: str,
+    source_sha256: str,
+    xyz: np.ndarray,
+) -> None:
+    payload = {"xyz": _validate_raw_xyz(xyz)}
+    header = {
+        "schema": _SCENE_CHECKPOINT_SCHEMA,
+        "scene_id": str(scene_id),
+        "source_sha256": str(source_sha256),
+        "point_count": int(len(payload["xyz"])),
+        "payload_sha256": _checkpoint_payload_digest(payload),
+    }
+    _write_npz_atomic(
+        path, {**payload, _CHECKPOINT_HEADER_KEY: _encode_checkpoint_header(header)}
+    )
+
+
+def _load_scene_checkpoint(
+    path: Path,
+    *,
+    scene_id: str,
+    source_sha256: str,
+) -> np.ndarray:
+    header, arrays = _read_checkpoint_arrays(
+        path, expected_keys=_SCENE_CHECKPOINT_KEYS
+    )
+    if set(header) != {
+        "schema",
+        "scene_id",
+        "source_sha256",
+        "point_count",
+        "payload_sha256",
+    } or type(header.get("point_count")) is not int:
+        raise ValueError("scene checkpoint header contract is invalid")
+    expected_header = {
+        "schema": _SCENE_CHECKPOINT_SCHEMA,
+        "scene_id": str(scene_id),
+        "source_sha256": str(source_sha256),
+        "point_count": int(np.asarray(arrays["xyz"]).shape[0]),
+        "payload_sha256": _checkpoint_payload_digest(arrays),
+    }
+    if header != expected_header:
+        raise ValueError("scene checkpoint identity does not match this request")
+    return _validate_raw_xyz(arrays["xyz"])
+
+
+def _frame_checkpoint_payload(frame: FrameEvidence) -> dict[str, np.ndarray]:
+    return {
+        "mask_index": np.asarray(
+            [mask.mask_index for mask in frame.masks], dtype=np.int32
+        ),
+        "support_indptr": frame.support.indptr,
+        "support_gaussian_ids": frame.support.gaussian_ids,
+        "support_inside_mass": frame.support.inside_mass,
+        "support_inside_ratio": frame.support.inside_ratio,
+        "support_ambiguous": frame.support.ambiguous,
+        "visible_indptr": frame.visibility.indptr,
+        "visible_gaussian_ids": frame.visibility.gaussian_ids,
+        "visible_mass": frame.visibility.visible_mass,
+        "ambiguous_gaussian_ids": frame.ambiguous_gaussians,
+        "semantic_posteriors": frame.semantic_posteriors,
+        "semantic_abstained": frame.semantic_abstained,
+    }
+
+
+def _save_frame_checkpoint(
+    path: Path,
+    *,
+    scene_id: str,
+    source_sha256: str,
+    point_count: int,
+    class_count: int,
+    frame: FrameEvidence,
+) -> None:
+    payload = _frame_checkpoint_payload(frame)
+    header = {
+        "schema": _FRAME_CHECKPOINT_SCHEMA,
+        "scene_id": str(scene_id),
+        "source_sha256": str(source_sha256),
+        "frame_id": int(frame.metadata.frame_id),
+        "image_name": str(frame.metadata.image_name),
+        "point_count": int(point_count),
+        "class_count": int(class_count),
+        "mask_count": len(frame.masks),
+        "valid_pixel_count": int(frame.metadata.valid_pixel_count),
+        "geometry_abstained": bool(frame.metadata.geometry_abstained),
+        "semantic_abstained": bool(frame.metadata.semantic_abstained),
+        "payload_sha256": _checkpoint_payload_digest(payload),
+    }
+    _write_npz_atomic(
+        path, {**payload, _CHECKPOINT_HEADER_KEY: _encode_checkpoint_header(header)}
+    )
+
+
+def _load_frame_checkpoint(
+    path: Path,
+    *,
+    scene_id: str,
+    source_sha256: str,
+    frame_id: int,
+    image_name: str,
+    point_count: int,
+    class_count: int,
+) -> FrameEvidence:
+    header, arrays = _read_checkpoint_arrays(
+        path, expected_keys=_FRAME_CHECKPOINT_KEYS
+    )
+    if (
+        set(header)
+        != {
+            "schema",
+            "scene_id",
+            "source_sha256",
+            "frame_id",
+            "image_name",
+            "point_count",
+            "class_count",
+            "mask_count",
+            "valid_pixel_count",
+            "geometry_abstained",
+            "semantic_abstained",
+            "payload_sha256",
+        }
+        or any(
+            type(header.get(name)) is not int
+            for name in (
+                "frame_id",
+                "point_count",
+                "class_count",
+                "mask_count",
+                "valid_pixel_count",
+            )
+        )
+        or type(header.get("geometry_abstained")) is not bool
+        or type(header.get("semantic_abstained")) is not bool
+    ):
+        raise ValueError("frame checkpoint header contract is invalid")
+    mask_indices = _integer_array(
+        arrays["mask_index"], np.int32, name="checkpoint.mask_index"
+    )
+    mask_count = len(mask_indices)
+    expected_identity = {
+        "schema": _FRAME_CHECKPOINT_SCHEMA,
+        "scene_id": str(scene_id),
+        "source_sha256": str(source_sha256),
+        "frame_id": int(frame_id),
+        "image_name": str(image_name),
+        "point_count": int(point_count),
+        "class_count": int(class_count),
+        "mask_count": mask_count,
+        "valid_pixel_count": int(header.get("valid_pixel_count", -1)),
+        "geometry_abstained": bool(header.get("geometry_abstained")),
+        "semantic_abstained": bool(header.get("semantic_abstained")),
+        "payload_sha256": _checkpoint_payload_digest(arrays),
+    }
+    if header != expected_identity:
+        raise ValueError("frame checkpoint identity does not match this request")
+    masks = tuple(
+        MaskMetadata(
+            global_mask_id=index,
+            frame_id=int(frame_id),
+            image_name=str(image_name),
+            mask_index=int(mask_indices[index]),
+        )
+        for index in range(mask_count)
+    )
+    frame = FrameEvidence(
+        metadata=FrameMetadata(
+            frame_id=int(frame_id),
+            image_name=str(image_name),
+            valid_pixel_count=int(header["valid_pixel_count"]),
+            geometry_abstained=bool(header["geometry_abstained"]),
+            semantic_abstained=bool(header["semantic_abstained"]),
+        ),
+        masks=masks,
+        support=MaskSupportCSR(
+            arrays["support_indptr"],
+            arrays["support_gaussian_ids"],
+            arrays["support_inside_mass"],
+            arrays["support_inside_ratio"],
+            arrays["support_ambiguous"],
+            mask_count,
+            int(point_count),
+        ),
+        visibility=PackedVisibility(
+            arrays["visible_indptr"],
+            arrays["visible_gaussian_ids"],
+            arrays["visible_mass"],
+            1,
+            int(point_count),
+        ),
+        ambiguous_gaussians=arrays["ambiguous_gaussian_ids"],
+        semantic_posteriors=arrays["semantic_posteriors"],
+        semantic_abstained=arrays["semantic_abstained"],
+    )
+    if frame.metadata.semantic_abstained != bool(header["semantic_abstained"]):
+        raise ValueError("frame checkpoint semantic abstention is inconsistent")
+    if frame.semantic_posteriors.shape[1] != int(class_count):
+        raise ValueError("frame checkpoint has the wrong class dimension")
+    return frame
+
+
+def _rendered_record_to_frame(
+    record: Any,
+    *,
+    point_count: int,
+    class_count: int,
+    image_name: str | None = None,
+) -> FrameEvidence:
+    supports = tuple(record.masks)
+    if supports:
+        posterior = np.stack(
+            [
+                np.asarray(mask.class_probabilities, dtype=np.float32)
+                for mask in supports
+            ]
+        )
+        semantic_abstention = (
+            np.ones(len(supports), dtype=bool)
+            if bool(record.grounded_abstained)
+            else posterior.sum(axis=1, dtype=np.float64) <= 1e-7
+        )
+    else:
+        posterior = np.empty((0, int(class_count)), dtype=np.float32)
+        semantic_abstention = np.empty(0, dtype=bool)
+    return build_sparse_frame_evidence(
+        frame_id=int(record.frame_id),
+        image_name=str(record.image_name if image_name is None else image_name),
+        point_count=int(point_count),
+        visible_ids=np.asarray(record.visible_ids),
+        visible_mass=np.asarray(record.visible_mass),
+        mask_gaussian_ids=[np.asarray(mask.gaussian_ids) for mask in supports],
+        mask_inside_mass=[np.asarray(mask.inside_mass) for mask in supports],
+        mask_inside_ratio=[np.asarray(mask.inside_ratio) for mask in supports],
+        ambiguous_ids=[np.asarray(mask.ambiguous_ids) for mask in supports],
+        semantic_posteriors=posterior,
+        semantic_abstained=semantic_abstention,
+        global_mask_id_start=0,
+        mask_indices=[int(mask.mask_index) for mask in supports],
+        valid_pixel_count=int(record.valid_pixel_count),
+        geometry_abstained=not supports,
+        class_count=int(class_count),
+    )
+
+
+def _rebase_frame_masks(frame: FrameEvidence, start: int) -> FrameEvidence:
+    masks = tuple(
+        MaskMetadata(
+            global_mask_id=int(start) + index,
+            frame_id=mask.frame_id,
+            image_name=mask.image_name,
+            mask_index=mask.mask_index,
+        )
+        for index, mask in enumerate(frame.masks)
+    )
+    return FrameEvidence(
+        metadata=frame.metadata,
+        masks=masks,
+        support=frame.support,
+        visibility=frame.visibility,
+        ambiguous_gaussians=frame.ambiguous_gaussians,
+        semantic_posteriors=frame.semantic_posteriors,
+        semantic_abstained=frame.semantic_abstained,
+    )
+
+
 def save_evidence_bank(
     bank: AlphaMaskEvidenceBank,
     directory: str | Path,
@@ -1092,6 +1471,15 @@ def _resolve_evidence_request(
             "evidence request producer_commit must be an exact 40-character "
             "lowercase Git commit"
         )
+    mask_observation_mode = str(
+        request.get("mask_observation_mode", "hierarchy")
+    )
+    if mask_observation_mode not in {"hierarchy", "flat-highest-quality"}:
+        raise ValueError(
+            "request.mask_observation_mode must be hierarchy or "
+            "flat-highest-quality"
+        )
+    scene["mask_observation_mode"] = mask_observation_mode
     source: dict[str, Any] = {
         "worker": "category_priors.clean_baseline.worker:render_scene_frames",
         "evidence_schema": EVIDENCE_SCHEMA,
@@ -1108,6 +1496,7 @@ def _resolve_evidence_request(
         "scene_scale_m_per_unit": scale_m_per_unit,
         "producer_inputs": _producer_input_identity(inputs),
         "producer_commit": producer_text,
+        "mask_observation_mode": mask_observation_mode,
     }
     # The producer revision and the actual producer input contents jointly
     # define the resume boundary.  This identity lives inside masks.json; no
@@ -1147,52 +1536,118 @@ def build_alpha_mask_evidence(
         expected_source=source,
     ):
         return _diagnostics(load_evidence_bank(output))
-    xyz, records = render_scene_frames(inputs, classes=classes)
-    xyz_array = np.asarray(xyz)
-    if xyz_array.ndim != 2 or xyz_array.shape[1] != 3 or len(xyz_array) <= 0:
-        raise ValueError("scene worker returned an invalid Gaussian XYZ array")
-    if np.any(~np.isfinite(xyz_array)):
-        raise ValueError("scene worker returned non-finite Gaussian XYZ")
+    from .sam_inputs import colmap_frame_specs
+
+    frame_specs = colmap_frame_specs(inputs.sparse)
+    source_sha256 = _source_identity_digest(source)
+    checkpoint_root = _checkpoint_root(output)
+    scene_checkpoint = checkpoint_root / "scene.npz"
+    frames_root = checkpoint_root / "frames"
+    xyz_array: np.ndarray | None
+    try:
+        xyz_array = _load_scene_checkpoint(
+            scene_checkpoint,
+            scene_id=str(scene_id),
+            source_sha256=source_sha256,
+        )
+    except Exception:
+        # A missing/corrupt scene checkpoint invalidates frame checkpoints as
+        # a set because their point IDs cannot be interpreted safely.  They
+        # remain on disk for forensics and are atomically replaced as frames
+        # are rendered again.
+        xyz_array = None
+
+    local_frames: dict[int, FrameEvidence] = {}
+    if xyz_array is not None:
+        for frame_id, spec in enumerate(frame_specs):
+            try:
+                local_frames[frame_id] = _load_frame_checkpoint(
+                    frames_root / f"{frame_id:08d}.npz",
+                    scene_id=str(scene_id),
+                    source_sha256=source_sha256,
+                    frame_id=frame_id,
+                    image_name=spec.image_name,
+                    point_count=len(xyz_array),
+                    class_count=len(classes),
+                )
+            except Exception:
+                # Frame validity is independent once the exact scene/source
+                # identity is established.  Only this row is rendered again.
+                continue
+
+    pending = tuple(
+        frame_id for frame_id in range(len(frame_specs)) if frame_id not in local_frames
+    )
+    rendered_ids: set[int] = set()
+
+    def persist_rendered_frame(raw_xyz: np.ndarray, record: Any) -> None:
+        nonlocal xyz_array
+        current_xyz = _validate_raw_xyz(raw_xyz)
+        if xyz_array is None:
+            xyz_array = current_xyz.copy()
+            _save_scene_checkpoint(
+                scene_checkpoint,
+                scene_id=str(scene_id),
+                source_sha256=source_sha256,
+                xyz=xyz_array,
+            )
+        elif not np.array_equal(current_xyz, xyz_array):
+            raise RuntimeError(
+                "renderer Gaussian XYZ differs from the strict scene checkpoint"
+            )
+        frame_id = int(record.frame_id)
+        if frame_id not in pending or frame_id in rendered_ids:
+            raise RuntimeError("renderer returned an unexpected or duplicate frame")
+        expected_name = frame_specs[frame_id].image_name
+        actual_name = str(Path(str(record.image_name).replace("\\", "/")).with_suffix(""))
+        actual_name = actual_name.replace("\\", "/")
+        if actual_name != expected_name:
+            raise RuntimeError("rendered frame image name differs from COLMAP order")
+        frame = _rendered_record_to_frame(
+            record,
+            point_count=len(xyz_array),
+            class_count=len(classes),
+            image_name=expected_name,
+        )
+        _save_frame_checkpoint(
+            frames_root / f"{frame_id:08d}.npz",
+            scene_id=str(scene_id),
+            source_sha256=source_sha256,
+            point_count=len(xyz_array),
+            class_count=len(classes),
+            frame=frame,
+        )
+        local_frames[frame_id] = frame
+        rendered_ids.add(frame_id)
+
+    if pending:
+        rendered_xyz, records = render_scene_frames(
+            inputs,
+            classes=classes,
+            mask_observation_mode=str(scene["mask_observation_mode"]),
+            frame_ids=pending,
+            frame_callback=persist_rendered_frame,
+        )
+        # Compatibility with simple test/dry-run workers that return sparse
+        # records but do not invoke the callback.  The production worker calls
+        # it before advancing to the next frame, which is what makes an
+        # interrupted run durable.
+        for record in records:
+            if int(record.frame_id) not in rendered_ids:
+                persist_rendered_frame(rendered_xyz, record)
+        if rendered_ids != set(pending):
+            raise RuntimeError("renderer did not produce every requested frame")
+    if xyz_array is None:
+        raise RuntimeError("scene has no valid Gaussian checkpoint")
+    if set(local_frames) != set(range(len(frame_specs))):
+        raise RuntimeError("frame checkpoint set is incomplete after rendering")
+
     scale_m_per_unit = float(source["scene_scale_m_per_unit"])
     xyz_m = np.asarray(xyz_array * scale_m_per_unit, dtype=np.float32)
     frames: list[FrameEvidence] = []
     next_global_mask_id = 0
-    for record in records:
-        supports = tuple(record.masks)
-        if supports:
-            posterior = np.stack(
-                [np.asarray(mask.class_probabilities, dtype=np.float32) for mask in supports]
-            )
-            semantic_abstention = (
-                np.ones(len(supports), dtype=bool)
-                if bool(record.grounded_abstained)
-                else posterior.sum(axis=1, dtype=np.float64) <= 1e-7
-            )
-        else:
-            posterior = np.empty((0, len(classes)), dtype=np.float32)
-            semantic_abstention = np.empty(0, dtype=bool)
-        frame = build_sparse_frame_evidence(
-            frame_id=int(record.frame_id),
-            image_name=str(record.image_name),
-            point_count=len(xyz_array),
-            visible_ids=np.asarray(record.visible_ids),
-            visible_mass=np.asarray(record.visible_mass),
-            mask_gaussian_ids=[np.asarray(mask.gaussian_ids) for mask in supports],
-            mask_inside_mass=[np.asarray(mask.inside_mass) for mask in supports],
-            mask_inside_ratio=[np.asarray(mask.inside_ratio) for mask in supports],
-            ambiguous_ids=[np.asarray(mask.ambiguous_ids) for mask in supports],
-            semantic_posteriors=posterior,
-            semantic_abstained=semantic_abstention,
-            global_mask_id_start=next_global_mask_id,
-            mask_indices=[int(mask.mask_index) for mask in supports],
-            valid_pixel_count=int(record.valid_pixel_count),
-            # A valid packed file with zero SAM masks means that this frame
-            # supplied no geometric object observation.  Preserve rendered
-            # visibility for audit, but do not let the empty observation act
-            # as negative cross-view evidence.
-            geometry_abstained=not supports,
-            class_count=len(classes),
-        )
+    for frame_id in range(len(frame_specs)):
+        frame = _rebase_frame_masks(local_frames[frame_id], next_global_mask_id)
         frames.append(frame)
         next_global_mask_id += len(frame.masks)
     bank = AlphaMaskEvidenceBank.from_frames(
