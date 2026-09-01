@@ -59,6 +59,16 @@ def test_metadata_round_trip_has_exact_schema_and_readonly_arrays(tmp_path: Path
     assert not loaded.predicted_iou.flags.writeable
 
 
+def test_raw_sam_iou_head_score_is_finite_but_not_probability_clipped() -> None:
+    rows = _rows()
+    rows[0]["predicted_iou"] = 1.05
+    frame = metadata_frame_from_sam_rows(rows, height=2, width=3)
+    assert frame.predicted_iou[0] == pytest.approx(1.05)
+    flat = flatten_mask_stack(frame)
+    # The overlapping pixel follows the preserved higher IoU-head score.
+    assert flat.pixel_owner_source_id[0, 1] == 0
+
+
 @pytest.mark.parametrize(
     "mutation,match",
     [

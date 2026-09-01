@@ -116,8 +116,10 @@ class SamMaskMetadataFrame:
             raise ValueError("SAM metadata lengths must equal count")
         if np.any(~np.isfinite(predicted)) or np.any(~np.isfinite(stability)):
             raise ValueError("SAM quality metadata must be finite")
-        if np.any((predicted < 0) | (predicted > 1)):
-            raise ValueError("predicted_iou must be in [0, 1]")
+        # SAM's IoU head is a linear MLP score (no sigmoid in the published
+        # implementation), so real finite outputs can be slightly above 1.
+        # Preserve the raw score because H'/P use it only for deterministic
+        # quality ordering; clipping would silently change that ordering.
         if np.any((stability < 0) | (stability > 1)):
             raise ValueError("stability_score must be in [0, 1]")
         if np.any(area <= 0):
