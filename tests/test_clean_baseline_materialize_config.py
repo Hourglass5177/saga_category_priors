@@ -321,7 +321,7 @@ def test_legacy_hierarchy_mode_compatibility_is_explicit_and_single_field_only(
     from types import SimpleNamespace
 
     scene_id = DEV8[0]
-    producer = "a" * 40
+    producer = next(iter(module.LEGACY_HIERARCHY_PRODUCER_COMMITS))
     bank_dir = tmp_path / "bank"
     bank_dir.mkdir()
     files = {}
@@ -369,10 +369,35 @@ def test_legacy_hierarchy_mode_compatibility_is_explicit_and_single_field_only(
     with pytest.raises(ValueError, match="incomplete"):
         module._load_evidence_imports(imports)
     loaded = module._load_evidence_imports(
-        imports, allow_legacy_hierarchy_mode_missing=True
+        imports,
+        legacy_hierarchy_producer_commits=module.LEGACY_HIERARCHY_PRODUCER_COMMITS,
     )
-    assert loaded[scene_id]["legacy_hierarchy_mode_proof"] is True
+    assert loaded[scene_id]["legacy_hierarchy_mode_proof"] == {
+        "producer_commit": producer,
+        "assumed_mode": "hierarchy",
+        "missing_fields": ["mask_observation_mode"],
+    }
 
+    flat_expected = {**expected, "mask_observation_mode": "flat-highest-quality"}
+    monkeypatch.setattr(module, "evidence_request_source", lambda **_: flat_expected)
+    monkeypatch.setattr(
+        module,
+        "load_evidence_bank",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            source={
+                key: value
+                for key, value in flat_expected.items()
+                if key != "mask_observation_mode"
+            }
+        ),
+    )
+    with pytest.raises(ValueError, match="incomplete"):
+        module._load_evidence_imports(
+            imports,
+            legacy_hierarchy_producer_commits=module.LEGACY_HIERARCHY_PRODUCER_COMMITS,
+        )
+
+    monkeypatch.setattr(module, "evidence_request_source", lambda **_: expected)
     monkeypatch.setattr(
         module,
         "load_evidence_bank",
@@ -382,7 +407,14 @@ def test_legacy_hierarchy_mode_compatibility_is_explicit_and_single_field_only(
     )
     with pytest.raises(ValueError, match="incomplete"):
         module._load_evidence_imports(
-            imports, allow_legacy_hierarchy_mode_missing=True
+            imports,
+            legacy_hierarchy_producer_commits=module.LEGACY_HIERARCHY_PRODUCER_COMMITS,
+        )
+
+    with pytest.raises(ValueError, match="incomplete"):
+        module._load_evidence_imports(
+            imports,
+            legacy_hierarchy_producer_commits=frozenset({"b" * 40}),
         )
 
 

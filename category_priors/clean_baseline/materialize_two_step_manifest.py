@@ -16,6 +16,7 @@ from .evaluation import (
 )
 from .materialize_config import (
     EVIDENCE_IMPORT_MANIFEST_SCHEMA,
+    LEGACY_HIERARCHY_PRODUCER_COMMITS,
     _load_evidence_imports,
 )
 from .two_step_audit import (
@@ -95,7 +96,7 @@ def materialize_two_step_manifest(
     # checked before any frozen bank can enter the two-step manifest.
     import_scenes = _load_evidence_imports(
         import_manifest_path,
-        allow_legacy_hierarchy_mode_missing=True,
+        legacy_hierarchy_producer_commits=LEGACY_HIERARCHY_PRODUCER_COMMITS,
     )
     historical_path = Path(historical_evaluation).resolve()
     historical = _object(historical_path)
@@ -223,8 +224,8 @@ def materialize_two_step_manifest(
                     "source_request": str(source_request_path),
                     "bank_dir": str(Path(imported["bank_dir"]).resolve()),
                     "files": dict(imported["files"]),
-                    "legacy_hierarchy_mode_proof": bool(
-                        imported.get("legacy_hierarchy_mode_proof", False)
+                    "legacy_hierarchy_mode_proof": imported.get(
+                        "legacy_hierarchy_mode_proof"
                     ),
                 },
                 "conditions": conditions,

@@ -49,6 +49,7 @@ from .metric_reaudit import (
     evaluate_gt_as_prediction_dual_protocols,
     formal_gt_point_mask,
 )
+from .materialize_config import LEGACY_HIERARCHY_PRODUCER_COMMITS
 from .stage_funnel import FunnelObject, audit_frozen_clean_scene
 
 
@@ -771,10 +772,25 @@ def audit_clean_baseline_manifest(
         )
         registered_source = dict(expected_source)
         registration = scene.get("evidence_import_identity")
-        if (
-            isinstance(registration, Mapping)
-            and registration.get("legacy_hierarchy_mode_proof") is True
-        ):
+        proof = (
+            registration.get("legacy_hierarchy_mode_proof")
+            if isinstance(registration, Mapping)
+            else None
+        )
+        if proof is not None:
+            if not isinstance(proof, Mapping):
+                raise ValueError("legacy hierarchy proof must be an object")
+            expected_proof = {
+                "producer_commit": str(registration.get("producer_commit", "")),
+                "assumed_mode": "hierarchy",
+                "missing_fields": ["mask_observation_mode"],
+            }
+            if (
+                dict(proof) != expected_proof
+                or expected_proof["producer_commit"]
+                not in LEGACY_HIERARCHY_PRODUCER_COMMITS
+            ):
+                raise ValueError("legacy hierarchy proof is not allowlisted")
             if registered_source.pop("mask_observation_mode", None) != "hierarchy":
                 raise ValueError(
                     "legacy hierarchy proof is incompatible with the source request"

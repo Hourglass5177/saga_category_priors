@@ -59,6 +59,16 @@ from .worker import DEFAULT_CLASSES, resolve_clean_scene_inputs
 REGISTRATION_SCHEMA = "saga-clean-baseline-registration-v1"
 REQUEST_SCHEMA = "saga-clean-alpha-mask-evidence-request-v1"
 EVIDENCE_IMPORT_MANIFEST_SCHEMA = "saga-clean-evidence-import-manifest-v1"
+LEGACY_HIERARCHY_PRODUCER_COMMITS = frozenset(
+    {
+        # Both producer snapshots predate the serialized observation-mode
+        # field.  Their worker implementations were inspected byte-for-byte:
+        # each preserves overlapping support and calls
+        # ``mark_same_frame_ambiguity``, i.e. today's hierarchy semantics.
+        "96be76840b31b08047bd09fd5875eefe44834ec7",
+        "b22a9884bac7d35555eace058311b51f24c9e15c",
+    }
+)
 IDENTITY_4X4 = (
     (1.0, 0.0, 0.0, 0.0),
     (0.0, 1.0, 0.0, 0.0),
@@ -75,7 +85,7 @@ def _resolve_from(base: Path, value: str | Path) -> Path:
 def _load_evidence_imports(
     path: Path | None,
     *,
-    allow_legacy_hierarchy_mode_missing: bool = False,
+    legacy_hierarchy_producer_commits: frozenset[str] = frozenset(),
 ) -> dict[str, dict[str, Any]]:
     """Load and byte-validate explicitly imported evidence producer outputs."""
 
@@ -142,18 +152,25 @@ def _load_evidence_imports(
             expected_scene_id=scene_id,
             expected_source=expected_source,
         )
-        legacy_mode_proof = False
-        if not complete and allow_legacy_hierarchy_mode_missing:
+        legacy_mode_proof: dict[str, Any] | None = None
+        if not complete and producer in legacy_hierarchy_producer_commits:
             bank = load_evidence_bank(bank_dir, expected_scene_id=scene_id)
             legacy_expected = dict(expected_source)
             requested_mode = legacy_expected.pop("mask_observation_mode", None)
             actual_source = dict(bank.source)
-            legacy_mode_proof = bool(
+            proven = bool(
                 requested_mode == "hierarchy"
                 and "mask_observation_mode" not in actual_source
                 and actual_source == legacy_expected
+                and str(actual_source.get("producer_commit", "")) == producer
             )
-            complete = legacy_mode_proof
+            if proven:
+                legacy_mode_proof = {
+                    "producer_commit": producer,
+                    "assumed_mode": "hierarchy",
+                    "missing_fields": ["mask_observation_mode"],
+                }
+            complete = proven
         if not complete:
             raise ValueError(f"{scene_id}: imported evidence bank is incomplete")
         result[scene_id] = {

@@ -280,6 +280,37 @@ def test_manifest_must_supply_old_metrics_instead_of_guessing(
         )
 
 
+def test_audit_rejects_forged_legacy_hierarchy_proof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_path, _ = _fixture(tmp_path, monkeypatch)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    unknown_producer = "b" * 40
+    payload["scenes"][0]["evidence_import_identity"] = {
+        "producer_commit": unknown_producer,
+        "legacy_hierarchy_mode_proof": {
+            "producer_commit": unknown_producer,
+            "assumed_mode": "hierarchy",
+            "missing_fields": ["mask_observation_mode"],
+        },
+    }
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(
+        "category_priors.clean_baseline.two_step_audit.evidence_request_source",
+        lambda **_: {
+            "test": "frozen-source",
+            "mask_observation_mode": "hierarchy",
+        },
+    )
+
+    with pytest.raises(ValueError, match="not allowlisted"):
+        audit_clean_baseline_manifest(
+            manifest_path,
+            output_dir=tmp_path / "audit",
+            expected_scene_count=1,
+        )
+
+
 def test_audit_rejects_output_inside_frozen_artifact_tree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
