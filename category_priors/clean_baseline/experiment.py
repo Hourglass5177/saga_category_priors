@@ -1645,7 +1645,11 @@ def run_clean_baseline_experiment(
                 "the DEV8 complete-mask geometry ceiling is low; 2D masks / alpha lifting are the limiting input and category prior was not tested"
                 if not geometry_healthy
                 else (
-                    "clean geometry upper bound was healthy but automatic cross-view consensus failed; the isolated identity-edge capacity control completed and did not enter the formal U/D method"
+                    (
+                        "clean geometry upper bound was healthy but automatic cross-view consensus failed; the fixed held-out hard-edge set contained only one label class, so the isolated identity-edge capacity control was inconclusive (capacity was neither proven nor disproven) and category prior was not tested"
+                        if identity_result.get("control_status") == "inconclusive"
+                        else "clean geometry upper bound was healthy but automatic cross-view consensus failed; the isolated identity-edge capacity control completed and did not enter the formal U/D method; category prior was not tested"
+                    )
                     if identity_result is not None
                     else (
                         "clean geometry upper bound was healthy but automatic cross-view consensus failed; the one permitted identity-edge control was not run because its registered existing assets were unavailable: "

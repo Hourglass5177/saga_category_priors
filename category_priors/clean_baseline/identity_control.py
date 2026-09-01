@@ -39,7 +39,7 @@ IDENTITY_CONTROL_REGISTRATION_SCHEMA = (
     "saga-clean-baseline-identity-edge-control-registration-v1"
 )
 IDENTITY_CONTROL_RESULT_SCHEMA = (
-    "saga-clean-baseline-identity-edge-control-result-v1"
+    "saga-clean-baseline-identity-edge-control-result-v2"
 )
 IDENTITY_TRAIN_SCENES = ("scene0645_00", "scene0025_01")
 IDENTITY_VALIDATION_SCENE = "scene0046_00"
@@ -762,10 +762,43 @@ def identity_control_result_is_complete(
         model = payload.get("model")
         validation = payload.get("validation")
         gate = payload.get("gate")
+        if not isinstance(validation, Mapping) or not isinstance(gate, Mapping):
+            return False
         gate_names = (
+            "validation_class_support_sufficient",
             "edge_auroc_at_least_0_75",
             "edge_auroc_delta_at_least_0_05",
             "new_iou050_objects_at_least_2",
+        )
+        labelled_count = int(validation.get("labelled_hard_edge_count", -1))
+        negative_count = int(
+            validation.get("labelled_hard_negative_edge_count", -1)
+        )
+        positive_count = int(validation.get("labelled_positive_edge_count", -1))
+        auroc_status = validation.get("auroc_status")
+        support_sufficient = bool(negative_count > 0 and positive_count > 0)
+        class_count = int(negative_count > 0) + int(positive_count > 0)
+        auroc_values = (
+            validation.get("raw_affinity_auroc"),
+            validation.get("learned_edge_auroc"),
+            validation.get("edge_auroc_delta"),
+        )
+        auroc_contract_valid = (
+            auroc_status == "available"
+            and support_sufficient
+            and all(
+                isinstance(value, (int, float)) and np.isfinite(float(value))
+                for value in auroc_values
+            )
+        ) or (
+            auroc_status == "insufficient-held-out-class-support"
+            and not support_sufficient
+            and all(value is None for value in auroc_values)
+        )
+        expected_control_status = (
+            "inconclusive"
+            if not support_sufficient
+            else ("passed" if bool(gate.get("passed")) else "failed")
         )
         return (
             payload.get("schema") == IDENTITY_CONTROL_RESULT_SCHEMA
@@ -773,6 +806,7 @@ def identity_control_result_is_complete(
             and payload.get("formal_method") is False
             and payload.get("category_prior_tested") is False
             and payload.get("gt_used_for_training_and_evaluation_only") is True
+            and payload.get("control_status") == expected_control_status
             and isinstance(training, Mapping)
             and int(training.get("edge_count", 0)) > 0
             and isinstance(model, Mapping)
@@ -780,8 +814,17 @@ def identity_control_result_is_complete(
             and isinstance(validation, Mapping)
             and validation.get("scene_id")
             == expected_identity.get("validation_scene_id")
+            and labelled_count >= 0
+            and negative_count >= 0
+            and positive_count >= 0
+            and negative_count + positive_count == labelled_count
+            and int(validation.get("labelled_edge_class_count", -1)) == class_count
+            and validation.get("auroc_defined") is support_sufficient
+            and auroc_contract_valid
             and isinstance(gate, Mapping)
             and all(isinstance(gate.get(name), bool) for name in gate_names)
+            and gate.get("validation_class_support_sufficient")
+            is support_sufficient
             and isinstance(gate.get("passed"), bool)
             and gate.get("passed")
             == all(bool(gate[name]) for name in gate_names)
@@ -871,9 +914,28 @@ def run_identity_edge_control(
     validation = prepared[control.validation_scene_id]
     labelled = validation["labelled_index"]
     validation_labels = validation["labels"]
-    raw_auc = binary_auroc(validation_labels, validation["affinity_cosine"][labelled])
     probabilities = model.predict_proba(validation["features"])
-    model_auc = binary_auroc(validation_labels, probabilities[labelled])
+    validation_positive_count = int(np.count_nonzero(validation_labels == 1))
+    validation_negative_count = int(np.count_nonzero(validation_labels == 0))
+    validation_has_both_classes = bool(
+        validation_positive_count and validation_negative_count
+    )
+    if validation_has_both_classes:
+        raw_auc: float | None = binary_auroc(
+            validation_labels, validation["affinity_cosine"][labelled]
+        )
+        model_auc: float | None = binary_auroc(
+            validation_labels, probabilities[labelled]
+        )
+        edge_auc_delta: float | None = model_auc - raw_auc
+    else:
+        # A held-out scene with only positives or only hard negatives cannot
+        # define AUROC.  This is an insufficient-evidence outcome for the
+        # preregistered capacity control, not a runtime error and never a
+        # reason to manufacture the missing class or reuse training edges.
+        raw_auc = None
+        model_auc = None
+        edge_auc_delta = None
     components = edge_components(
         validation["bank"].point_count,
         validation["edge_index"],
@@ -910,17 +972,28 @@ def run_identity_edge_control(
     baseline_matches = _matched_gt_050_count(baseline_evaluation)
     added_matches = learned_matches - baseline_matches
     gate = {
-        "edge_auroc_at_least_0_75": model_auc >= 0.75,
-        "edge_auroc_delta_at_least_0_05": model_auc - raw_auc >= 0.05,
+        "validation_class_support_sufficient": validation_has_both_classes,
+        "edge_auroc_at_least_0_75": bool(
+            model_auc is not None and model_auc >= 0.75
+        ),
+        "edge_auroc_delta_at_least_0_05": bool(
+            edge_auc_delta is not None and edge_auc_delta >= 0.05
+        ),
         "new_iou050_objects_at_least_2": added_matches >= 2,
     }
     gate["passed"] = all(gate.values())
+    control_status = (
+        "inconclusive"
+        if not validation_has_both_classes
+        else ("passed" if gate["passed"] else "failed")
+    )
     result = {
         "schema": IDENTITY_CONTROL_RESULT_SCHEMA,
         "identity": identity,
         "formal_method": False,
         "category_prior_tested": False,
         "gt_used_for_training_and_evaluation_only": True,
+        "control_status": control_status,
         "training": {
             "scene_rows": train_rows,
             "edge_count": len(training_target),
@@ -939,9 +1012,21 @@ def run_identity_edge_control(
             "scene_id": control.validation_scene_id,
             "local_edge_count": len(validation["edge_index"]),
             "labelled_hard_edge_count": len(labelled),
+            "labelled_hard_negative_edge_count": validation_negative_count,
+            "labelled_positive_edge_count": validation_positive_count,
+            "labelled_edge_class_count": (
+                int(validation_negative_count > 0)
+                + int(validation_positive_count > 0)
+            ),
+            "auroc_defined": validation_has_both_classes,
+            "auroc_status": (
+                "available"
+                if validation_has_both_classes
+                else "insufficient-held-out-class-support"
+            ),
             "raw_affinity_auroc": raw_auc,
             "learned_edge_auroc": model_auc,
-            "edge_auroc_delta": model_auc - raw_auc,
+            "edge_auroc_delta": edge_auc_delta,
             "learned_component_count": len(components),
             "uniform_matched_gt_iou050_count": baseline_matches,
             "learned_matched_gt_iou050_count": learned_matches,
@@ -952,9 +1037,13 @@ def run_identity_edge_control(
         },
         "gate": gate,
         "conclusion": (
-            "a dedicated local identity edge has positive capacity; expanding it into a formal baseline requires a separate authorization"
-            if gate["passed"]
-            else "the fixed local Gaussian attributes and co-view evidence did not establish sufficient held-out identity capacity"
+            "the held-out scene contains only one labelled edge class, so identity AUROC and its improvement are not identifiable"
+            if not validation_has_both_classes
+            else (
+                "a dedicated local identity edge has positive capacity; expanding it into a formal baseline requires a separate authorization"
+                if gate["passed"]
+                else "the fixed local Gaussian attributes and co-view evidence did not establish sufficient held-out identity capacity"
+            )
         ),
     }
     target.parent.mkdir(parents=True, exist_ok=True)

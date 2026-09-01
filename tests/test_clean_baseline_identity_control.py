@@ -25,6 +25,7 @@ from category_priors.clean_baseline.identity_control import (
     edge_components,
     edge_feature_matrix,
     fit_balanced_l2_logistic,
+    identity_control_result_is_complete,
     run_identity_edge_control,
 )
 from category_priors.clean_baseline.worker import DEFAULT_CLASSES
@@ -247,6 +248,8 @@ def test_three_scene_identity_control_is_offline_and_uses_held_out_gate(
     assert result["validation"]["raw_affinity_auroc"] == 0.5
     assert result["validation"]["learned_edge_auroc"] == 1.0
     assert result["validation"]["new_matched_gt_iou050_count"] == 2
+    assert result["control_status"] == "passed"
+    assert result["gate"]["validation_class_support_sufficient"] is True
     assert result["gate"]["passed"] is True
     expected_identity = build_identity_control_run_identity(control, inputs)
     assert load_json(output)["identity"] == expected_identity
@@ -261,6 +264,58 @@ def test_three_scene_identity_control_is_offline_and_uses_held_out_gate(
     assert run_identity_edge_control(
         control=control, scenes=inputs, output_path=output
     ) == result
+
+    # A held-out scene may contain only one labelled edge class after the
+    # fixed local/hard-negative selection.  AUROC is then undefined: the
+    # control must record insufficient evidence and fail its gate cleanly,
+    # rather than crash or borrow a missing class from the training scenes.
+    def single_class_prepared(scene_id: str):
+        item = prepared(scene_id)
+        if scene_id == validation_scene:
+            item["labels"] = np.ones_like(item["labels"])
+        return item
+
+    monkeypatch.setattr(
+        "category_priors.clean_baseline.identity_control._prepare_scene",
+        lambda _control, scene: single_class_prepared(scene.scene_id),
+    )
+    single_class_result = run_identity_edge_control(
+        control=control,
+        scenes=inputs,
+        output_path=tmp_path / "identity-control-single-class.json",
+    )
+    assert single_class_result["validation"]["auroc_status"] == (
+        "insufficient-held-out-class-support"
+    )
+    assert single_class_result["validation"]["labelled_hard_negative_edge_count"] == 0
+    assert single_class_result["validation"]["labelled_positive_edge_count"] == 7
+    assert single_class_result["validation"]["labelled_edge_class_count"] == 1
+    assert single_class_result["validation"]["auroc_defined"] is False
+    assert single_class_result["validation"]["raw_affinity_auroc"] is None
+    assert single_class_result["validation"]["learned_edge_auroc"] is None
+    assert single_class_result["validation"]["edge_auroc_delta"] is None
+    assert single_class_result["control_status"] == "inconclusive"
+    assert single_class_result["gate"]["validation_class_support_sufficient"] is False
+    assert single_class_result["gate"]["edge_auroc_at_least_0_75"] is False
+    assert single_class_result["gate"]["edge_auroc_delta_at_least_0_05"] is False
+    assert single_class_result["gate"]["passed"] is False
+
+    single_class_identity = build_identity_control_run_identity(control, inputs)
+    assert identity_control_result_is_complete(
+        tmp_path / "identity-control-single-class.json",
+        expected_identity=single_class_identity,
+    )
+    monkeypatch.setattr(
+        "category_priors.clean_baseline.identity_control._prepare_scene",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("an inconclusive completed control must be reused")
+        ),
+    )
+    assert run_identity_edge_control(
+        control=control,
+        scenes=inputs,
+        output_path=tmp_path / "identity-control-single-class.json",
+    ) == single_class_result
 
     # A path-stable mutation changes the cache boundary and cannot silently
     # reuse a control result fitted/evaluated on different predictions.

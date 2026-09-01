@@ -883,6 +883,7 @@ def test_healthy_geometry_and_failed_dev8_uniform_runs_only_offline_identity_con
         run_identity_control=lambda **kwargs: {
             "formal_method": False,
             "category_prior_tested": False,
+            "control_status": "passed",
             "gate": {"passed": True},
             "output_path": str(kwargs["output_path"]),
         },
@@ -904,6 +905,57 @@ def test_healthy_geometry_and_failed_dev8_uniform_runs_only_offline_identity_con
     identity_history = result["history"][-1]["identity_control"]
     assert identity_history["formal_method"] is False
     assert identity_history["gate"]["passed"] is True
+
+
+def test_inconclusive_identity_control_stops_without_claiming_capacity_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple] = []
+    config = _config(tmp_path)
+    identity_assets = {
+        scene_id: IdentityAssetPaths(
+            tmp_path / f"{scene_id}-feature.ply",
+            tmp_path / f"{scene_id}-gaussian.ply",
+        )
+        for scene_id in (*DEV2, "scene0046_00")
+    }
+    config = replace(
+        config,
+        identity_control=IdentityControlConfig(assets=identity_assets),
+        identity_control_registration={
+            "schema": IDENTITY_CONTROL_REGISTRATION_SCHEMA,
+            "status": "available",
+            "train_scene_ids": list(DEV2),
+            "validation_scene_id": "scene0046_00",
+            "issues": [],
+        },
+    )
+    hooks = replace(
+        _hooks(calls),
+        run_identity_control=lambda **_kwargs: {
+            "formal_method": False,
+            "category_prior_tested": False,
+            "control_status": "inconclusive",
+            "gate": {"passed": False},
+        },
+    )
+    monkeypatch.setattr(
+        "category_priors.clean_baseline.experiment._validate_registered_inputs",
+        lambda _: {"gt_as_prediction_parity": True},
+    )
+    monkeypatch.setattr(
+        "category_priors.clean_baseline.experiment._dev8_health_gate",
+        lambda *_: {"passed": False},
+    )
+    result = run_clean_baseline_experiment(config, hooks)
+    assert result["status"] == "stopped"
+    assert result["checkpoint"] == "dev8-uniform-gate-failed"
+    assert result["identity_control_run"] is True
+    assert result["candidate_prior_tested"] is False
+    assert "inconclusive" in result["stop_reason"]
+    assert "neither proven nor disproven" in result["stop_reason"]
+    assert "category prior was not tested" in result["stop_reason"]
 
 
 def test_healthy_geometry_reports_unavailable_identity_assets_without_running_control(
