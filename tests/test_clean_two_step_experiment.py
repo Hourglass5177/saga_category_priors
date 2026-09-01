@@ -13,6 +13,15 @@ DEV2 = experiment.REGISTERED_DEV2_SCENE_IDS
 DEV8 = experiment.REGISTERED_DEV8_SCENE_IDS
 
 
+def test_cloud_launcher_preserves_registered_virtualenv_executable() -> None:
+    launcher = (
+        Path(experiment.__file__).with_name("continue_clean_two_step.sh")
+    ).read_text(encoding="utf-8")
+    assert 'python_bin="${SAGA_TWO_STEP_PYTHON}"' in launcher
+    assert 'readlink -f -- "${SAGA_TWO_STEP_PYTHON}"' not in launcher
+    assert 'if [[ "${python_bin}" != /* ]]' in launcher
+
+
 @pytest.fixture(autouse=True)
 def _registered_runtime_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
     """Orchestration tests use synthetic assets, not a committed cloud checkout."""

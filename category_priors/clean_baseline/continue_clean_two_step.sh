@@ -17,7 +17,16 @@ repo_root="$(cd -- "${script_dir}/../.." && pwd -P)"
 manifest_path="$(readlink -f -- "${SAGA_TWO_STEP_MANIFEST}")"
 artifacts_root="$(readlink -m -- "${SAGA_TWO_STEP_ARTIFACTS}")"
 runs_root="$(readlink -m -- "${SAGA_TWO_STEP_RUNS}")"
-python_bin="$(readlink -f -- "${SAGA_TWO_STEP_PYTHON}")"
+python_bin="${SAGA_TWO_STEP_PYTHON}"
+
+# A virtual environment's ``python`` is commonly a symlink to the base
+# interpreter.  Resolving that symlink changes Python's executable prefix and
+# silently bypasses the registered environment's site-packages.  Keep the
+# user-registered executable path intact and only require it to be absolute.
+if [[ "${python_bin}" != /* ]]; then
+  echo "SAGA_TWO_STEP_PYTHON must be an absolute path" >&2
+  exit 2
+fi
 
 if [[ ! -f "${manifest_path}" || ! -x "${python_bin}" ]]; then
   echo "registered manifest or Python executable is unavailable" >&2
