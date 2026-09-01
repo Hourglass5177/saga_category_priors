@@ -93,7 +93,10 @@ def materialize_two_step_manifest(
     # Reuse the producer's strict import validator: schema, producer commit,
     # request identity and the exact three evidence-file digests are all
     # checked before any frozen bank can enter the two-step manifest.
-    import_scenes = _load_evidence_imports(import_manifest_path)
+    import_scenes = _load_evidence_imports(
+        import_manifest_path,
+        allow_legacy_hierarchy_mode_missing=True,
+    )
     historical_path = Path(historical_evaluation).resolve()
     historical = _object(historical_path)
     if historical.get("schema") != CLEAN_EVALUATION_SCHEMA:
@@ -220,6 +223,9 @@ def materialize_two_step_manifest(
                     "source_request": str(source_request_path),
                     "bank_dir": str(Path(imported["bank_dir"]).resolve()),
                     "files": dict(imported["files"]),
+                    "legacy_hierarchy_mode_proof": bool(
+                        imported.get("legacy_hierarchy_mode_proof", False)
+                    ),
                 },
                 "conditions": conditions,
             }

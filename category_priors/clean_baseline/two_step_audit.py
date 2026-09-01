@@ -769,12 +769,22 @@ def audit_clean_baseline_manifest(
         expected_source = evidence_request_source(
             scene_id=scene_id, request=source_request
         )
+        registered_source = dict(expected_source)
+        registration = scene.get("evidence_import_identity")
+        if (
+            isinstance(registration, Mapping)
+            and registration.get("legacy_hierarchy_mode_proof") is True
+        ):
+            if registered_source.pop("mask_observation_mode", None) != "hierarchy":
+                raise ValueError(
+                    "legacy hierarchy proof is incompatible with the source request"
+                )
         bank_dir = _resolve(base, scene.get("bank_dir"), name="scene.bank_dir")
         bank = load_evidence_bank(
             bank_dir,
             expected_scene_id=scene_id,
             expected_point_count=len(gaussian_xyz),
-            expected_source=expected_source,
+            expected_source=registered_source,
         )
         evidence_registration_rows.append(
             _audit_registered_evidence(

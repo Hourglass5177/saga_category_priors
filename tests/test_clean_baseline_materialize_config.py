@@ -315,6 +315,77 @@ def test_materializer_registers_old_evidence_producer_without_changing_other_sce
     assert parsed.bank_dir(DEV8[1]) == Path(new_paths["run_root"]) / "bank" / DEV8[1]
 
 
+def test_legacy_hierarchy_mode_compatibility_is_explicit_and_single_field_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    scene_id = DEV8[0]
+    producer = "a" * 40
+    bank_dir = tmp_path / "bank"
+    bank_dir.mkdir()
+    files = {}
+    for name in ("evidence.npz", "masks.json", "diagnostics.json"):
+        path = bank_dir / name
+        path.write_bytes(name.encode("ascii"))
+        files[name] = sha256_file(path)
+    request = tmp_path / "request.json"
+    write_json(
+        request,
+        {
+            "schema": module.REQUEST_SCHEMA,
+            "producer_commit": producer,
+        },
+    )
+    imports = tmp_path / "imports.json"
+    write_json(
+        imports,
+        {
+            "schema": module.EVIDENCE_IMPORT_MANIFEST_SCHEMA,
+            "scenes": {
+                scene_id: {
+                    "bank_dir": str(bank_dir),
+                    "source_request": str(request),
+                    "producer_commit": producer,
+                    "files": files,
+                }
+            },
+        },
+    )
+    expected = {
+        "producer_commit": producer,
+        "sam_masks": "/frozen/hierarchy",
+        "mask_observation_mode": "hierarchy",
+    }
+    monkeypatch.setattr(module, "evidence_request_source", lambda **_: expected)
+    monkeypatch.setattr(module, "evidence_bank_is_complete", lambda *_, **__: False)
+    monkeypatch.setattr(
+        module,
+        "load_evidence_bank",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            source={key: value for key, value in expected.items() if key != "mask_observation_mode"}
+        ),
+    )
+    with pytest.raises(ValueError, match="incomplete"):
+        module._load_evidence_imports(imports)
+    loaded = module._load_evidence_imports(
+        imports, allow_legacy_hierarchy_mode_missing=True
+    )
+    assert loaded[scene_id]["legacy_hierarchy_mode_proof"] is True
+
+    monkeypatch.setattr(
+        module,
+        "load_evidence_bank",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            source={"producer_commit": producer, "sam_masks": "/different"}
+        ),
+    )
+    with pytest.raises(ValueError, match="incomplete"):
+        module._load_evidence_imports(
+            imports, allow_legacy_hierarchy_mode_missing=True
+        )
+
+
 def test_registers_existing_three_scene_identity_control_assets(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

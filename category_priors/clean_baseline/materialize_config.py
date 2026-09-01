@@ -40,6 +40,7 @@ from .evidence import (
     EVIDENCE_METADATA_FILE,
     evidence_bank_is_complete,
     evidence_request_source,
+    load_evidence_bank,
 )
 from .identity_control import (
     IDENTITY_CONTROL_REGISTRATION_SCHEMA,
@@ -71,7 +72,11 @@ def _resolve_from(base: Path, value: str | Path) -> Path:
     return path.resolve() if path.is_absolute() else (base / path).resolve()
 
 
-def _load_evidence_imports(path: Path | None) -> dict[str, dict[str, Any]]:
+def _load_evidence_imports(
+    path: Path | None,
+    *,
+    allow_legacy_hierarchy_mode_missing: bool = False,
+) -> dict[str, dict[str, Any]]:
     """Load and byte-validate explicitly imported evidence producer outputs."""
 
     if path is None:
@@ -132,11 +137,24 @@ def _load_evidence_imports(path: Path | None) -> dict[str, dict[str, Any]]:
         if request.get("producer_commit") != producer:
             raise ValueError(f"{scene_id}: import/request producer commits differ")
         expected_source = evidence_request_source(scene_id=scene_id, request=request)
-        if not evidence_bank_is_complete(
+        complete = evidence_bank_is_complete(
             bank_dir,
             expected_scene_id=scene_id,
             expected_source=expected_source,
-        ):
+        )
+        legacy_mode_proof = False
+        if not complete and allow_legacy_hierarchy_mode_missing:
+            bank = load_evidence_bank(bank_dir, expected_scene_id=scene_id)
+            legacy_expected = dict(expected_source)
+            requested_mode = legacy_expected.pop("mask_observation_mode", None)
+            actual_source = dict(bank.source)
+            legacy_mode_proof = bool(
+                requested_mode == "hierarchy"
+                and "mask_observation_mode" not in actual_source
+                and actual_source == legacy_expected
+            )
+            complete = legacy_mode_proof
+        if not complete:
             raise ValueError(f"{scene_id}: imported evidence bank is incomplete")
         result[scene_id] = {
             "bank_dir": bank_dir,
@@ -144,6 +162,7 @@ def _load_evidence_imports(path: Path | None) -> dict[str, dict[str, Any]]:
             "producer_commit": producer,
             "files": files,
             "request": dict(request),
+            "legacy_hierarchy_mode_proof": legacy_mode_proof,
         }
     return result
 

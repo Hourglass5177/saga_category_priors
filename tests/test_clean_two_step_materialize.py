@@ -128,7 +128,9 @@ def _fixture(
         import_root / "manifest.json",
         {"schema": "saga-clean-evidence-import-manifest-v1", "scenes": {}},
     )
-    monkeypatch.setattr(module, "_load_evidence_imports", lambda _: imported)
+    monkeypatch.setattr(
+        module, "_load_evidence_imports", lambda *_args, **_kwargs: imported
+    )
     evaluation_identity: dict[str, object] = {
         "schema": "saga-clean-alpha-mask-evaluation-identity-v1",
         "manifest": "5" * 64,
