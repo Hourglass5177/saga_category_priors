@@ -10,6 +10,8 @@ import pytest
 from category_priors.clean_baseline.consensus import ConsensusConfig
 from category_priors.clean_baseline.evidence import build_sparse_frame_evidence
 from category_priors.clean_baseline.late_filter_audit import (
+    _export_with_reasons,
+    _production_class_for_masks,
     replay_late_filter_factorial,
 )
 from category_priors.clean_baseline.late_filter_experiment import (
@@ -17,8 +19,10 @@ from category_priors.clean_baseline.late_filter_experiment import (
     _nonempty_geometric_candidates,
 )
 from category_priors.clean_baseline.metric_reaudit import build_bidirectional_nearest
-from category_priors.clean_baseline.evaluation import GroundTruthObject
+from category_priors.clean_baseline.evaluation import CleanCandidate, GroundTruthObject
 from category_priors.clean_baseline.models import AlphaMaskEvidenceBank
+from category_priors.clean_baseline.pipeline import _object_class_distribution
+from category_priors.clean_baseline.stage_funnel import FunnelObject, _class_for_masks
 
 
 CLASSES = (
@@ -257,6 +261,90 @@ def test_historical_arm_reconstructs_frozen_output_exactly() -> None:
     assert equivalence.equivalent is True
     assert equivalence.changed_points == 0
     assert equivalence.class_exact is True
+
+
+def test_formal_export_reuses_production_semantic_reducer_and_score_bits() -> None:
+    """Hierarchical same-view masks expose both former replay divergences."""
+
+    def frame(
+        frame_id: int,
+        global_mask_ids: Sequence[int],
+        posteriors: Sequence[tuple[float, float]],
+    ) -> object:
+        values = np.zeros((len(posteriors), len(CLASSES)), dtype=np.float32)
+        values[:, :2] = np.asarray(posteriors, dtype=np.float32)
+        ids = np.arange(4, dtype=np.int32)
+        return build_sparse_frame_evidence(
+            frame_id=frame_id,
+            image_name=f"posterior-{frame_id}",
+            point_count=4,
+            visible_ids=ids,
+            visible_mass=np.ones(4, dtype=np.float32),
+            mask_gaussian_ids=[ids for _ in posteriors],
+            mask_inside_mass=[np.ones(4, dtype=np.float32) for _ in posteriors],
+            mask_inside_ratio=[np.ones(4, dtype=np.float32) for _ in posteriors],
+            semantic_posteriors=values,
+            semantic_abstained=np.zeros(len(posteriors), dtype=np.bool_),
+            global_mask_ids=global_mask_ids,
+            valid_pixel_count=4,
+            class_count=len(CLASSES),
+        )
+
+    bank = AlphaMaskEvidenceBank.from_frames(
+        scene_id="scene-production-score",
+        point_count=4,
+        xyz_m=np.zeros((4, 3), dtype=np.float32),
+        class_names=CLASSES,
+        frames=(
+            # Both rows satisfy the persisted-posterior contract, but their
+            # float32 sums differ slightly.  Production averages them before
+            # its per-view normalization; the former replay normalized each
+            # mask first and therefore produced different score bits.
+            frame(0, (0, 1), ((0.900004, 0.1), (0.2, 0.799996))),
+            frame(1, (2,), ((0.6, 0.4),)),
+        ),
+        source={"fixture": "production-score-equivalence"},
+    )
+    gaussian_ids = np.arange(4, dtype=np.int64)
+    mean_consensus = 0.37
+    mean_detection = 0.61
+    ownership = FunnelObject(
+        stable_id="object:0",
+        gaussian_ids=gaussian_ids,
+        mask_ids=(0, 1, 2),
+        frame_ids=(0, 1),
+        metadata={
+            "mean_view_consensus": mean_consensus,
+            "mean_detection_ratio": mean_detection,
+            "geometric_quality": float(np.sqrt(mean_consensus * mean_detection)),
+        },
+    )
+
+    rows, reasons = _export_with_reasons(
+        (ownership,), bank=bank, allowed_classes=("chair",)
+    )
+    posterior = _object_class_distribution(ownership.mask_ids, bank)
+    winner = int(np.flatnonzero(posterior == posterior.max())[0])
+    winner_probability = float(posterior[winner])
+    expected = CleanCandidate(
+        object_id=ownership.stable_id,
+        gaussian_ids=gaussian_ids,
+        class_id=bank.class_names[winner],
+        winner_probability=winner_probability,
+        view_consensus=mean_consensus,
+        detection_ratio=mean_detection,
+    )
+    _, former_replay_probability = _class_for_masks(ownership.mask_ids, bank)
+
+    assert former_replay_probability != winner_probability
+    assert _production_class_for_masks(ownership.mask_ids, bank) == (
+        "chair",
+        winner_probability,
+    )
+    assert len(rows) == 1
+    assert rows[0].metadata["winner_probability"].hex() == winner_probability.hex()
+    assert rows[0].metadata["score"].hex() == expected.score.hex()
+    assert not any(reasons.values())
 
 
 def test_four_arms_share_the_same_frozen_components_and_factor_order() -> None:

@@ -42,12 +42,12 @@ from .consensus import (
     split_disconnected_support,
 )
 from .evidence import load_evidence_bank
+from .evaluation import CleanCandidate
 from .models import AlphaMaskEvidenceBank
-from .pipeline import _resolve_unique_ownership
+from .pipeline import _object_class_distribution, _resolve_unique_ownership
 from .stage_funnel import (
     FunnelObject,
     PartitionEquivalence,
-    _class_for_masks,
     _component_full_ids,
     _component_mask_ids,
     _detection_profile,
@@ -320,7 +320,9 @@ def _candidate_with_posterior(
     bank: AlphaMaskEvidenceBank,
     allowed_classes: Sequence[str],
 ) -> FunnelObject:
-    class_name, winner_probability = _class_for_masks(item.mask_ids, bank)
+    class_name, winner_probability = _production_class_for_masks(
+        item.mask_ids, bank
+    )
     allowed = {str(value) for value in allowed_classes}
     return FunnelObject(
         stable_id=f"physical:{index}",
@@ -337,6 +339,18 @@ def _candidate_with_posterior(
             "class_allowed": class_name in allowed if class_name is not None else False,
         },
     )
+
+
+def _production_class_for_masks(
+    mask_ids: Sequence[int], bank: AlphaMaskEvidenceBank
+) -> tuple[str | None, float]:
+    """Use the production pipeline's per-view semantic reducer exactly."""
+
+    posterior = _object_class_distribution(mask_ids, bank)
+    if posterior.sum() <= 0:
+        return None, 0.0
+    winner = int(np.flatnonzero(posterior == posterior.max())[0])
+    return bank.class_names[winner], float(posterior[winner])
 
 
 def _physical_replay(
@@ -535,7 +549,9 @@ def _export_with_reasons(
     allowed = {str(value) for value in allowed_classes}
     rows: list[FunnelObject] = []
     for item in ownership:
-        class_name, winner_probability = _class_for_masks(item.mask_ids, bank)
+        class_name, winner_probability = _production_class_for_masks(
+            item.mask_ids, bank
+        )
         if class_name is None:
             reasons["semantic_abstain"] += 1
         elif class_name not in allowed:
@@ -543,9 +559,15 @@ def _export_with_reasons(
         else:
             mean_consensus = float(item.metadata["mean_view_consensus"])
             mean_detection = float(item.metadata["mean_detection_ratio"])
-            geometric_quality = float(
-                np.sqrt(max(0.0, mean_consensus) * max(0.0, mean_detection))
+            production_candidate = CleanCandidate(
+                object_id=item.stable_id,
+                gaussian_ids=item.gaussian_ids,
+                class_id=class_name,
+                winner_probability=winner_probability,
+                view_consensus=mean_consensus,
+                detection_ratio=mean_detection,
             )
+            geometric_quality = float(item.metadata["geometric_quality"])
             rows.append(
                 FunnelObject(
                     stable_id=f"export:{len(rows)}",
@@ -558,7 +580,9 @@ def _export_with_reasons(
                         "mean_view_consensus": mean_consensus,
                         "mean_detection_ratio": mean_detection,
                         "geometric_quality": geometric_quality,
-                        "score": float(winner_probability * geometric_quality),
+                        # This is the exact production score implementation,
+                        # not a numerically-close replay of its formula.
+                        "score": production_candidate.score,
                     },
                 )
             )
