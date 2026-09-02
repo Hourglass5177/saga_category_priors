@@ -102,7 +102,11 @@ def _run_clean_baseline_cli(args: argparse.Namespace) -> None:
         )
         if args.taxonomy:
             argv.extend(["--taxonomy", args.taxonomy])
-    elif command in {"audit-clean-baseline", "prepare-flat-mask-control"}:
+    elif command in {
+        "audit-clean-baseline",
+        "prepare-flat-mask-control",
+        "audit-clean-late-filters",
+    }:
         argv.extend(
             [
                 "--manifest",
@@ -962,6 +966,17 @@ def build_parser() -> argparse.ArgumentParser:
     clean_two_step.set_defaults(
         func=_run_clean_baseline_cli,
         clean_baseline_command="run-clean-baseline-two-step",
+    )
+
+    clean_late_filters = commands.add_parser(
+        "audit-clean-late-filters",
+        help="replay the frozen DEV2 detection/late-pruning factorial",
+    )
+    clean_late_filters.add_argument("--manifest", required=True)
+    clean_late_filters.add_argument("--output-root", required=True)
+    clean_late_filters.set_defaults(
+        func=_run_clean_baseline_cli,
+        clean_baseline_command="audit-clean-late-filters",
     )
 
     lifting_v8 = commands.add_parser(

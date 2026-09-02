@@ -250,6 +250,17 @@ def _run_clean_baseline_two_step(args: argparse.Namespace) -> dict[str, Any]:
     )
 
 
+def _audit_clean_late_filters(args: argparse.Namespace) -> dict[str, Any]:
+    """Replay the registered DEV2 late-filter factorial from frozen banks."""
+
+    from .late_filter_experiment import audit_clean_late_filters
+
+    return audit_clean_late_filters(
+        manifest_path=Path(args.manifest).resolve(),
+        output_dir=Path(args.output_root).resolve(),
+    )
+
+
 def _add_condition_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--scene-id", required=True)
     parser.add_argument("--bank-dir", required=True)
@@ -328,6 +339,14 @@ def build_parser() -> argparse.ArgumentParser:
     two_step.add_argument("--run-root", required=True)
     two_step.add_argument("--producer-commit", required=True)
     two_step.set_defaults(handler=_run_clean_baseline_two_step)
+
+    late_filters = subparsers.add_parser(
+        "audit-clean-late-filters",
+        help="replay the frozen DEV2 detection/late-pruning factorial",
+    )
+    late_filters.add_argument("--manifest", required=True)
+    late_filters.add_argument("--output-root", required=True)
+    late_filters.set_defaults(handler=_audit_clean_late_filters)
     return parser
 
 

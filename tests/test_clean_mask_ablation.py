@@ -10,6 +10,7 @@ import pandas as pd
 import pytest
 
 from category_priors.clean_baseline import mask_ablation
+from category_priors.clean_baseline import late_filter_experiment
 from category_priors.clean_baseline.consensus import ConsensusConfig
 from category_priors.clean_baseline.evidence import (
     EVIDENCE_ARRAY_FILE,
@@ -889,3 +890,186 @@ def test_tiny_small_uses_complete_gt_extent_not_successful_or_dominant_subset() 
     )
 
     assert selected == set()
+
+
+def test_late_filter_factorial_uses_frozen_dev2_and_never_exports_b0_ap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scenes = [_scene(tmp_path, SCENE_A), _scene(tmp_path, SCENE_B)]
+    manifest = _manifest(tmp_path, scenes)
+    monkeypatch.setattr(
+        late_filter_experiment, "load_ply_xyz", lambda _: _xyz().copy()
+    )
+
+    result = late_filter_experiment.audit_clean_late_filters(
+        manifest, tmp_path / "late-filter-analysis"
+    )
+
+    assert result["technical_gates"]["passed"] is True
+    assert result["decision"] == "stop-accepted-components-or-earlier-insufficient"
+    assert result["exporter_authorized"] is False
+    assert result["category_prior_tested"] is False
+    table = pd.read_parquet(
+        tmp_path
+        / "late-filter-analysis"
+        / "clean_late_filter_factorial_dev2.parquet"
+    )
+    assert len(table) == 16
+    assert set(table["arm_code"]) == {"A1B1", "A0B1", "A1B0", "A0B0"}
+    assert table.loc[table["arm_code"].str.endswith("B0"), "official_ap_reported"].eq(
+        False
+    ).all()
+    assert table.loc[table["arm_code"] == "A1B1", "official_ap_reported"].eq(
+        True
+    ).all()
+    assert (
+        tmp_path
+        / "late-filter-analysis"
+        / "clean_late_filter_analysis_dev2.json"
+    ).is_file()
+    repeated = late_filter_experiment.audit_clean_late_filters(
+        manifest, tmp_path / "late-filter-analysis"
+    )
+    assert repeated["runner_status"] == "skipped-complete"
+
+
+def test_late_filter_gate_uses_all_candidates_for_capacity_and_scene_recall() -> None:
+    rows: list[dict[str, object]] = []
+    for scene_id in (SCENE_A, SCENE_B):
+        rows.append(
+            {
+                "scene_id": scene_id,
+                "official_candidate_count": 10,
+                "official_geometry_025_tp": 1,
+                "official_geometry_025_fp": 9,
+                "official_geometry_050_tp": 1,
+                "official_geometry_025_tiny_small_recall": 0.5,
+                "official_tiny_small_gt_count": 2,
+                "all_geometry_025_recall": 0.75,
+                "all_geometry_050_tp": 3,
+                "accepted_all_candidate_count": 4,
+                "accepted_all_geometry_025_tp": 3,
+                "accepted_all_geometry_050_tp": 3,
+                "accepted_official_geometry_025_tiny_small_recall": 0.5,
+                "technical_contract_pass": True,
+            }
+        )
+
+    aggregate = late_filter_experiment._aggregate_arm_rows(rows)
+
+    assert aggregate["geometry_025_precision"] == pytest.approx(0.1)
+    assert aggregate["geometry_050_tp"] == 6
+    assert aggregate["accepted_geometry_050_tp"] == 6
+    assert aggregate["scene_geometry_025_recall"] == {
+        SCENE_A: 0.75,
+        SCENE_B: 0.75,
+    }
+
+
+def test_late_filter_replay_score_drift_fails_technical_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scenes = [_scene(tmp_path, SCENE_A), _scene(tmp_path, SCENE_B)]
+    hierarchy_output = Path(
+        scenes[0]["mask_control_conditions"]["H-hierarchy"]["output"]
+    )
+    payload = json.loads(hierarchy_output.read_text(encoding="utf-8"))
+    payload["instances"]["0"]["score"] = 0.5
+    _write_json(hierarchy_output, payload)
+    monkeypatch.setattr(
+        late_filter_experiment, "load_ply_xyz", lambda _: _xyz().copy()
+    )
+
+    destination = tmp_path / "late-filter-score-drift"
+    result = late_filter_experiment.audit_clean_late_filters(
+        _manifest(tmp_path, scenes), destination
+    )
+    factorial = json.loads(
+        (destination / "clean_late_filter_factorial_dev2.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    checks = factorial["scenes"][SCENE_A]["H-hierarchy"]["arms"]["A1B1"][
+        "technical_contract"
+    ]["checks"]
+
+    assert checks["a1b1_frozen_partition_exact"] is True
+    assert checks["a1b1_frozen_score_exact"] is False
+    assert result["technical_gates"]["passed"] is False
+
+
+def test_late_filter_reports_full_p_repeat_not_preparation_repeat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scenes = [_scene(tmp_path, SCENE_A), _scene(tmp_path, SCENE_B)]
+    repeat_audit = Path(scenes[0]["flat_full_repeat_audit"])
+    payload = json.loads(repeat_audit.read_text(encoding="utf-8"))
+    payload["passed"] = False
+    _write_json(repeat_audit, payload)
+    monkeypatch.setattr(
+        late_filter_experiment, "load_ply_xyz", lambda _: _xyz().copy()
+    )
+
+    destination = tmp_path / "late-filter-p-repeat"
+    late_filter_experiment.audit_clean_late_filters(
+        _manifest(tmp_path, scenes), destination
+    )
+    table = pd.read_parquet(destination / "clean_late_filter_factorial_dev2.parquet")
+    hierarchy = table[
+        (table["scene_id"] == SCENE_A)
+        & (table["mask_mode"] == "H-hierarchy")
+    ]
+    flat = table[
+        (table["scene_id"] == SCENE_A) & (table["mask_mode"] == "P-flat")
+    ]
+
+    assert hierarchy["historical_lifting_repeat_pass"].eq(True).all()
+    assert flat["historical_lifting_repeat_pass"].eq(False).all()
+
+
+def test_late_filter_does_not_reuse_mismatched_parquet_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scenes = [_scene(tmp_path, SCENE_A), _scene(tmp_path, SCENE_B)]
+    manifest = _manifest(tmp_path, scenes)
+    destination = tmp_path / "late-filter-content-reuse"
+    monkeypatch.setattr(
+        late_filter_experiment, "load_ply_xyz", lambda _: _xyz().copy()
+    )
+    late_filter_experiment.audit_clean_late_filters(manifest, destination)
+    table_path = destination / "clean_late_filter_factorial_dev2.parquet"
+    table = pd.read_parquet(table_path)
+    table.loc[0, "arm_name"] = "tampered"
+    table.to_parquet(table_path, index=False)
+
+    repeated = late_filter_experiment.audit_clean_late_filters(
+        manifest, destination
+    )
+    repaired = pd.read_parquet(table_path)
+
+    assert repeated.get("runner_status") != "skipped-complete"
+    assert "tampered" not in set(repaired["arm_name"])
+
+
+def test_late_filter_implementation_identity_covers_replay_and_metric_dependencies() -> None:
+    paths = {
+        str(row["path"])
+        for row in late_filter_experiment._implementation_manifest()
+    }
+
+    assert {
+        "clean_baseline/late_filter_experiment.py",
+        "clean_baseline/late_filter_audit.py",
+        "clean_baseline/stage_funnel.py",
+        "clean_baseline/metric_reaudit.py",
+        "clean_baseline/consensus.py",
+        "clean_baseline/pipeline.py",
+        "clean_baseline/models.py",
+        "clean_baseline/evidence.py",
+        "clean_baseline/evaluation.py",
+        "clean_baseline/two_step_audit.py",
+        "evaluator.py",
+        "prediction_contract.py",
+        "io.py",
+        "scannet.py",
+    }.issubset(paths)

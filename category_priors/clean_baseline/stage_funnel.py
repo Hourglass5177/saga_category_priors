@@ -338,17 +338,26 @@ def _component_full_ids(
     return np.unique(np.concatenate(arrays)).astype(np.int64, copy=False)
 
 
-def _detection_filter(
+def _detection_profile(
     component: Sequence[int],
     *,
     bank: AlphaMaskEvidenceBank,
     by_mask: Mapping[int, MaskObservation],
     config: ConsensusConfig,
 ) -> tuple[np.ndarray, np.ndarray, str | None]:
+    """Return the frozen component full union and its per-point ratios.
+
+    The ratio is computed for *every* point in the component full union.  This
+    is intentionally separated from the historical hard threshold so a
+    diagnostic replay can remove that threshold without changing the evidence
+    it measures.  ``min_views`` and ``empty_full`` remain preconditions in both
+    paths and are reported independently.
+    """
+
+    full_ids = _component_full_ids(component, by_mask)
     frame_ids = tuple(sorted({by_mask[mask_id].frame_id for mask_id in component}))
     if len(frame_ids) < config.min_views:
-        return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float64), "min_views"
-    full_ids = _component_full_ids(component, by_mask)
+        return full_ids, np.zeros(full_ids.size, dtype=np.float64), "min_views"
     if full_ids.size == 0:
         return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float64), "empty_full"
     visible_counts = np.zeros(full_ids.size, dtype=np.int64)
@@ -390,6 +399,26 @@ def _detection_filter(
         out=np.zeros(full_ids.size, dtype=np.float64),
         where=visible_counts > 0,
     )
+    return full_ids, ratios, None
+
+
+def _detection_filter(
+    component: Sequence[int],
+    *,
+    bank: AlphaMaskEvidenceBank,
+    by_mask: Mapping[int, MaskObservation],
+    config: ConsensusConfig,
+) -> tuple[np.ndarray, np.ndarray, str | None]:
+    """Apply the historical hard detection-ratio threshold."""
+
+    full_ids, ratios, dropped_reason = _detection_profile(
+        component,
+        bank=bank,
+        by_mask=by_mask,
+        config=config,
+    )
+    if dropped_reason is not None:
+        return full_ids, ratios, dropped_reason
     keep = ratios >= config.point_filter_threshold
     if not np.any(keep):
         return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float64), "detection_ratio"

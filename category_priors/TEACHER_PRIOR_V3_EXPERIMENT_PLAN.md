@@ -2745,3 +2745,173 @@ precision由0.2584升到0.3647，污染率由0.7416降到0.6353，说明平面�
 或使用SAI3D式几何超点作为对象观察；还应单独预注册GPU归约的确定性合同，并审计检测比例过滤
 和最终导出的高损失。任何后续路线都必须先建立健康的无先验实例主干，之后才能在同一身份边上
 比较global尺寸约束与class尺寸约束。
+
+## 36. 当前权威：冻结组件的晚期剪枝因果审计与条件性清洁导出
+
+### 36.0 研究问题、实验单位与边界
+
+第35节已经证明平面化掩码能提高候选准确率、降低污染，但没有恢复完整对象；同时阶段漏斗显示
+`accepted-edge components`之后仍发生极大损失。这个观察还不能直接写成“检测比例阈值删除了
+97%对象”：现有生产路径在同一阶段先检查成员视角数和空支持，再执行逐Gaussian检测比例阈值；
+后端又依次包含物理拆分、包含去重、唯一所有权、残余点数、二次物理拆分、成员视角和合法类别
+导出。必须先把这些机制拆开，才能决定是否值得重写导出器。
+
+本节只回答两个问题：
+
+1. 已冻结的跨视角组件本身是否已经包含足够的正确对象，只是被后期硬过滤或整实例剪枝删除；
+2. 如果答案为是，一条不依赖类别先验的最小清洁导出路径能否把这些对象合法、确定地输出。
+
+`physical scene`是唯一独立实验单位。DEV2只作配对机制和容量门槛，不作显著性声明；DEV8按
+scene等权，不能把候选、对象、H′/P或漏斗阶段当独立样本。类别先验、GT类别和IoU不得进入
+重放或导出API；GT只由独立评价器读取。本节不下载、不训练、不重跑SAM、alpha提升或多视角
+共识，也不修改第35节的旧bank、diagnostics和output。
+
+`H-hierarchy`是正式DEV2门槛输入，因为其两场完整重复已经通过。`P-flat`保留为冻结敏感性
+观察；`scene0025_01`的P曾出现一条离散支持成员的重复差异，因此P不能单独驱动正式通过。若
+只有P达到科学门槛，必须先另行登记并完成确定性lifting，不能直接实施导出器或扩DEV8。
+
+### 36.1 零GPU晚期2×2重放
+
+只读使用冻结evidence bank中的完整掩码支持、去歧义支持、逐帧可见性、歧义点、Gaussian坐标
+和语义后验，以及diagnostics中的配置、欠分割mask ID和accepted edges。由这些内容确定性重建
+相同的accepted components；不得通过把`point_filter_threshold`改成0或重新运行共识来伪造
+“关闭过滤”。
+
+因素A只改变逐Gaussian检测比例的用途：
+
+- `A1-detection-hard`：保留`detected_views / eligible_visible_views >= 0.50`的点；视角不足和
+  空full component仍按历史规则删除。
+- `A0-detection-score-only`：计算完全相同的逐点比例，但不据此删除点或component；
+  `visible_views=0`时比例记0，完整成员full union保留。比例只进入诊断和分数。
+
+因素B只改变物理拆分之后是否执行晚期整实例剪枝块：
+
+- `B1-strict-late-export`：使用历史物理拆分/包含去重、唯一所有权、残余小于4点、二次物理
+  拆分、成员视角及SAGA20合法类别导出规则。
+- `B0-diagnostic-retain`：终止于`physical_split_and_deduplicated`，附加同一个后置类别posterior
+  但不以类别删除。候选可以重叠或语义弃权，所以只能报告一对一候选几何、分类和污染指标，
+  不能写正式`output.json`，不能报告官方AP。
+
+四臂固定为：
+
+```text
+A1B1-current
+A0B1-no-detection-hard-filter
+A1B0-pre-late-pruning
+A0B0-both-relaxed
+```
+
+关闭检测硬阈值后，所有点仍按原公式计算检测比例；对象平均检测比例和几何质量必须在保留的
+完整点集上重算。它们继而改变包含去重和所有权排序，是移除过滤的自然下游效应，不能沿用
+旧分数。B因素是一个包含若干删除规则的`late-pruning block`；2×2只能把原因定位到这个块，
+不能在没有逐级漏斗证据时单独归因于unique ownership或semantic allowlist。
+
+每个component还必须逐项报告：成员视角不足、空full、检测比例全空、DBSCAN无有效part、
+拆分后视角不足、包含去重、所有权后残余不足、二次DBSCAN、所有权后视角不足、无类别和
+非SAGA20类别。不得再把这些原因合并成一个“检测过滤”数字。
+
+### 36.2 技术门槛、能力门槛与归因
+
+只有以下技术合同全部通过，科学结果才可解释：
+
+- `A1B1`经实例ID最大重叠匹配后，逐点、类别和实例数精确复现冻结output；
+- `A1B0`逐对象精确复现现有`physical_split_and_deduplicated`阶段；
+- 四臂的bank身份、active mask、accepted edge、component ID和冻结配置完全相同；
+- A开关只改变检测阶段后的membership，B开关只改变物理阶段之后是否运行晚期剪枝块；
+- A0 membership严格等于component full union，A0/A1的阈值前逐点检测比例逐值相同；
+- B0严格等于对应A条件的物理拆分/去重候选，只附后置posterior而不改几何；
+- 重放签名不接受GT或prior；输入内容身份运行前后不变；重复运行产物逐字节确定；
+- A1B1的纠正后正式指标与第35节逐值一致，输出无orphan、负metadata和重复所有权。
+
+先报告accepted components自身的容量；若它在H′两场累计达不到6个一对一几何IoU≥0.50
+对象，则任何晚期放宽都不可能达到本节门槛，但四臂仍完整运行以闭合归因。
+
+H′中任一放宽臂进入条件性导出器必须同时满足：
+
+- DEV2累计一对一几何IoU≥0.50对象至少6个；
+- official-evaluable candidate precision@0.25至少10%；
+- 全部official-valid tiny/small Recall@0.25至少0.20；
+- 相对A1B1新增至少2个IoU≥0.50匹配；
+- 至少一场改善，另一场几何Recall@0.25下降不超过0.05。
+
+固定解释为：A0B1通过，逐点检测硬阈值是主因；A1B0通过，晚期剪枝块是主因；只有A0B0
+通过，两者存在必要交互；A0B0仍失败，正确对象在accepted components之前已不足，停止实施
+导出器，转向真正对象级二维mask或SAI3D式几何超点。若P通过而H′不通过，只能记录mask
+contract交互并先修确定性lifting，不能推进。本阶段完全不评价类别先验。
+
+### 36.3 条件性最小清洁导出器
+
+只有36.2的H′能力门槛通过才实现和运行。导出器不得改变accepted edges、共识阈值、后置
+分类器或原始component，也不得训练或读取prior：
+
+1. 检测比例保留为逐点证据和最终分数，不再作为硬删除阈值；对象从成员mask的完整full union
+   重建，不退化成稀疏core。
+2. 用0.10m物理半径图拆分真正断连部分；所有连通分量包括孤立点都保留为诊断候选，不再把
+   DBSCAN noise静默删除。正式候选仍须由至少两个不同成员视角支持。
+3. 不执行包含式整对象删除。多个对象争用同一Gaussian时逐点比较该对象的检测比例，再比较
+   对象平均多视角共识；精确并列保留为背景。冲突只能裁点，不能因少量冲突删除整个对象。
+4. 所有权后不再二次DBSCAN或按4点门槛整实例删除；只有零残余不能输出。
+5. 对象冻结后使用原后置32类posterior分类。无有效类别或赢家不属于SAGA20的对象进入
+   `semantic-abstain`诊断，不伪造类别，也不能进入正式AP。
+6. 正式分数继续使用`winner_probability * sqrt(view_consensus * mean_detection_ratio)`；检测比例
+   只改变置信度，不决定点是否存在。输出实例ID连续，class/score/point_count齐全。
+
+DEV2导出器必须达到36.2的三个绝对候选门槛，候选数不超过所选2×2能力臂；至少一场改善，
+另一场Recall@0.25下降不超过0.05；Gaussian precision相对A1B1下降不超过1个百分点；输出
+合同和重复确定性全部通过。失败立即停止。
+
+通过后才扩到冻结DEV8。健康门槛沿用第34节并补齐结构诊断：
+
+- geometric IoU≥0.50候选至少16个且覆盖至少4场；same-class IoU≥0.50至少12个且覆盖4场；
+- candidate precision@0.25至少10%，tiny/small Recall@0.25至少0.20；
+- 相对B1-fixed，mAP下降不超过0.001、AP50下降不超过0.002、实例数不超过1.25倍；
+- Gaussian micro precision提高至少5个百分点或unsupported实例比例下降至少10个百分点，
+  GT recall下降不超过5个百分点；score-IoU Spearman至少0.20；
+- orphan、负metadata、重复所有权均为0，稳定lineage和重复确定性通过。
+
+DEV8失败时按accepted component、检测证据、物理拆分、所有权、分类和export六级漏斗归因，
+仍不得测试类别先验。只有DEV8无先验主干全部健康，才允许另行登记同一mask图、同一身份边和
+同一导出器上的global/class尺寸约束；本节不实现也不运行该比较。
+
+### 36.4 入口、产物、测试与当前检查点
+
+独立新增：
+
+```text
+audit-clean-late-filters
+run-clean-exporter
+evaluate-clean-exporter
+run-clean-exporter-closure
+```
+
+重放和导出入口拒绝GT/prior；只有评价入口可读取GT。固定产物：
+
+```text
+clean_late_filter_factorial_dev2.parquet
+clean_late_filter_factorial_dev2.json
+clean_late_filter_analysis_dev2.json
+clean_exporter_dev2.parquet
+clean_exporter_dev2.json
+clean_exporter_dev8.parquet
+clean_exporter_health_dev8.json
+clean_exporter_analysis.json
+viewer/
+```
+
+测试至少覆盖：A1B1冻结等价；四臂component identity同源；A0完整full union和0可见比例；B0
+严格等于物理候选且禁止正式AP；重复候选一对一后只有一个TP；逐点冲突不整删；0.10m拆分
+点数守恒并保留孤立点；semantic abstain不伪造类别；GT/prior隔离；scene等权；H′/P不伪装
+独立重复；门槛失败不产生导出器/DEV8产物；官方AP和三空间评价不漂移；旧bank/output内容身份
+不变；断点恢复只补损坏场景。
+
+不新增独立SHA文件、lock、schedule hash或贡献缓存。先完成本地实现和测试，再commit/push并
+开启云电脑。云端超过20分钟时创建并回读确认绑定当前任务的每小时heartbeat；达到停止条件或
+全部完成后删除自动化，产物安全且不再需要云端时按用户授权关闭“三维重建”实例。
+
+- [x] 用户批准先做零GPU晚期2×2，再条件性实现清洁导出器；
+- [x] 完整回读权威计划、实验纪律和现有漏斗/生产实现；
+- [x] 冻结实验单位、四臂定义、技术合同、能力门槛和条件性DEV8边界；
+- [x] 实现纯重放、评价、CLI和回归测试；
+- [ ] H′能力门槛通过后才实现导出器和closure；
+- [ ] 本地测试、commit/push后才启动云端；
+- [ ] H′能力门槛通过才运行清洁导出器，DEV8健康通过后才另行检验类别先验。
