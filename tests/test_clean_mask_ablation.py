@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +16,7 @@ from category_priors.clean_baseline.evidence import (
     EVIDENCE_DIAGNOSTICS_FILE,
     EVIDENCE_METADATA_FILE,
     build_sparse_frame_evidence,
+    path_content_identity,
     save_evidence_bank,
 )
 from category_priors.clean_baseline.evaluation import RUN_IDENTITY_SCHEMA
@@ -91,11 +92,7 @@ def _bank(
                 "manifest_sha256": ("a" if mode == "hierarchy" else "b") * 64,
             },
             "rgb": "same",
-            "gaussian_ply": {
-                "path": str(gaussian_path.resolve()),
-                "size": gaussian_path.stat().st_size,
-                "sha256": sha256_file(gaussian_path),
-            },
+            "gaussian_ply": path_content_identity(gaussian_path),
         },
         "shared": "same",
     }
@@ -473,6 +470,129 @@ def test_registered_two_scene_gate_passes_and_writes_flat_rows(
             assert arm_result["stage_funnel_lineage_complete"] is True
             assert arm_result["stage_funnel_final_equivalence_exact"] is True
             assert arm_result["stage_funnel_contract_pass"] is True
+
+
+@pytest.mark.parametrize(
+    "outer_schema",
+    [
+        "saga-clean-evidence-input-content-v1",
+        "saga-clean-evidence-input-content-v2",
+    ],
+)
+def test_gaussian_binding_uses_the_producer_content_identity_schema(
+    tmp_path: Path, outer_schema: str
+) -> None:
+    gaussian_path = tmp_path / "gaussian.ply"
+    gaussian_path.write_bytes(b"canonical-gaussian-content")
+    bank = _bank(
+        SCENE_A, mode="hierarchy", xyz=_xyz(), gaussian_path=gaussian_path
+    )
+    source = dict(bank.source)
+    producer_inputs = dict(source["producer_inputs"])
+    producer_inputs["schema"] = outer_schema
+    source["producer_inputs"] = producer_inputs
+    bank = replace(bank, source=source)
+
+    contract = mask_ablation._gaussian_binding_contract(
+        bank=bank,
+        gaussian_path=gaussian_path,
+        gaussian_raw=_xyz(),
+    )
+
+    assert contract["passed"] is True
+    assert contract["checks"]["embedded_ply_content_identity_matches"] is True
+    assert contract["registered_content_identity"] == path_content_identity(
+        gaussian_path
+    )
+    assert contract["content_identity_mismatch_fields"] == []
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("manifest_sha256", "0" * 64),
+        ("total_bytes", 999),
+        ("relative_paths", ["different.ply"]),
+    ],
+)
+def test_gaussian_binding_rejects_any_registered_content_identity_drift(
+    tmp_path: Path, field: str, replacement: object
+) -> None:
+    gaussian_path = tmp_path / "gaussian.ply"
+    gaussian_path.write_bytes(b"canonical-gaussian-content")
+    bank = _bank(
+        SCENE_A, mode="hierarchy", xyz=_xyz(), gaussian_path=gaussian_path
+    )
+    source = dict(bank.source)
+    producer_inputs = dict(source["producer_inputs"])
+    registered = dict(producer_inputs["gaussian_ply"])
+    registered[field] = replacement
+    producer_inputs["gaussian_ply"] = registered
+    source["producer_inputs"] = producer_inputs
+    bank = replace(bank, source=source)
+
+    contract = mask_ablation._gaussian_binding_contract(
+        bank=bank,
+        gaussian_path=gaussian_path,
+        gaussian_raw=_xyz(),
+    )
+
+    assert contract["passed"] is False
+    assert contract["checks"]["embedded_ply_content_identity_matches"] is False
+    assert field in contract["content_identity_mismatch_fields"]
+
+
+def test_gaussian_binding_rejects_legacy_size_sha_fixture(
+    tmp_path: Path,
+) -> None:
+    gaussian_path = tmp_path / "gaussian.ply"
+    gaussian_path.write_bytes(b"canonical-gaussian-content")
+    bank = _bank(
+        SCENE_A, mode="hierarchy", xyz=_xyz(), gaussian_path=gaussian_path
+    )
+    source = dict(bank.source)
+    producer_inputs = dict(source["producer_inputs"])
+    producer_inputs["gaussian_ply"] = {
+        "path": str(gaussian_path.resolve()),
+        "size": gaussian_path.stat().st_size,
+        "sha256": sha256_file(gaussian_path),
+    }
+    source["producer_inputs"] = producer_inputs
+    bank = replace(bank, source=source)
+
+    contract = mask_ablation._gaussian_binding_contract(
+        bank=bank,
+        gaussian_path=gaussian_path,
+        gaussian_raw=_xyz(),
+    )
+
+    assert contract["passed"] is False
+    assert contract["checks"]["embedded_ply_content_identity_matches"] is False
+    assert "size" in contract["content_identity_mismatch_fields"]
+    assert "manifest_sha256" in contract["content_identity_mismatch_fields"]
+
+
+def test_gaussian_binding_rejects_same_path_after_file_bytes_change(
+    tmp_path: Path,
+) -> None:
+    gaussian_path = tmp_path / "gaussian.ply"
+    gaussian_path.write_bytes(b"original-gaussian-content")
+    bank = _bank(
+        SCENE_A, mode="hierarchy", xyz=_xyz(), gaussian_path=gaussian_path
+    )
+    gaussian_path.write_bytes(b"different-gaussian-content")
+
+    contract = mask_ablation._gaussian_binding_contract(
+        bank=bank,
+        gaussian_path=gaussian_path,
+        gaussian_raw=_xyz(),
+    )
+
+    assert contract["passed"] is False
+    assert contract["checks"]["source_rgb_ply_matches_manifest"] is True
+    assert contract["checks"]["bank_xyz_matches_raw_ply_times_scale"] is True
+    assert contract["checks"]["embedded_ply_content_identity_matches"] is False
+    assert "manifest_sha256" in contract["content_identity_mismatch_fields"]
 
 
 @pytest.mark.parametrize("schema", [None, "unknown-condition-diagnostics-v999"])

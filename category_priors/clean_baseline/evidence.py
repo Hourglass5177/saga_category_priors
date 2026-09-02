@@ -186,6 +186,17 @@ def _path_content_identity(path: Path) -> dict[str, Any]:
     }
 
 
+def path_content_identity(path: Path) -> dict[str, Any]:
+    """Return the canonical persisted identity for one evidence input path.
+
+    Consumers that validate an evidence bank must call the same implementation
+    used by the producer.  Keeping this small public wrapper prevents an
+    evaluator from silently inventing a second, incompatible identity schema.
+    """
+
+    return _path_content_identity(Path(path))
+
+
 def _colmap_camera_content_identity(sparse: Path) -> dict[str, Any]:
     """Bind the exact camera files selected by the worker's COLMAP loader."""
 

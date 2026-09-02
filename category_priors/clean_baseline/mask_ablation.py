@@ -31,6 +31,7 @@ from .evidence import (
     EVIDENCE_DIAGNOSTICS_FILE,
     EVIDENCE_METADATA_FILE,
     load_evidence_bank,
+    path_content_identity,
 )
 from .evaluation import (
     RUN_IDENTITY_SCHEMA,
@@ -360,12 +361,26 @@ def _gaussian_binding_contract(
         if np.isfinite(scale) and scale > 0
         else np.empty((0, 3), dtype=np.float32)
     )
+    try:
+        canonical_identity: dict[str, Any] | None = path_content_identity(
+            gaussian_path
+        )
+    except (FileNotFoundError, OSError, RuntimeError, ValueError):
+        canonical_identity = None
+    registered_identity = dict(registered) if isinstance(registered, Mapping) else None
     content_ok = bool(
-        isinstance(registered, Mapping)
-        and _same_resolved_path(registered.get("path"), gaussian_path)
-        and int(registered.get("size", -1)) == gaussian_path.stat().st_size
-        and str(registered.get("sha256", "")) == sha256_file(gaussian_path)
+        canonical_identity is not None
+        and registered_identity == canonical_identity
     )
+    identity_fields = sorted(
+        set(registered_identity or {}) | set(canonical_identity or {})
+    )
+    identity_mismatches = [
+        field
+        for field in identity_fields
+        if (registered_identity or {}).get(field)
+        != (canonical_identity or {}).get(field)
+    ]
     checks = {
         "source_rgb_ply_matches_manifest": _same_resolved_path(
             source_path, gaussian_path
@@ -381,6 +396,9 @@ def _gaussian_binding_contract(
         "passed": all(checks.values()),
         "checks": checks,
         "scene_scale_m_per_unit": scale,
+        "registered_content_identity": registered_identity,
+        "canonical_content_identity": canonical_identity,
+        "content_identity_mismatch_fields": identity_mismatches,
     }
 
 
