@@ -12,6 +12,12 @@ from category_priors.clean_baseline.evidence import build_sparse_frame_evidence
 from category_priors.clean_baseline.late_filter_audit import (
     replay_late_filter_factorial,
 )
+from category_priors.clean_baseline.late_filter_experiment import (
+    _candidate_metrics,
+    _nonempty_geometric_candidates,
+)
+from category_priors.clean_baseline.metric_reaudit import build_bidirectional_nearest
+from category_priors.clean_baseline.evaluation import GroundTruthObject
 from category_priors.clean_baseline.models import AlphaMaskEvidenceBank
 
 
@@ -318,6 +324,43 @@ def test_drop_reasons_keep_min_views_empty_and_detection_separate() -> None:
     assert reasons["empty_full"] == 1
     assert reasons["detection_ratio"] == 1
     assert sum(reasons.values()) >= 3
+
+
+def test_empty_accepted_full_union_is_diagnostic_not_geometric_candidate() -> None:
+    """Exercise the real replay/evaluator boundary that failed on cloud DEV2."""
+
+    result = _run()
+    candidates, inventory = _nonempty_geometric_candidates(
+        result.accepted_components
+    )
+
+    assert inventory == {
+        "total_component_count": 4,
+        "empty_full_component_count": 1,
+        "geometric_candidate_count": 3,
+    }
+    assert any(len(item.gaussian_ids) == 0 for item in result.accepted_components)
+    assert all(len(item.gaussian_ids) > 0 for item in candidates)
+    assert result.arms["A1B1"].drop_reasons["empty_full"] == 1
+
+    bank = _bank()
+    nearest = build_bidirectional_nearest(bank.xyz_m, bank.xyz_m)
+    metrics = _candidate_metrics(
+        candidates,
+        gt_objects=(
+            GroundTruthObject(
+                object_id=0,
+                class_id="chair",
+                point_ids=np.arange(bank.point_count, dtype=np.int64),
+                official_valid=True,
+                is_tiny_small=True,
+            ),
+        ),
+        nearest=nearest,
+        min_region_size=1,
+    )
+
+    assert metrics["subsets"]["all"]["candidate_count"] == 3
 
 
 def test_replay_api_has_no_ground_truth_or_category_prior_channel() -> None:

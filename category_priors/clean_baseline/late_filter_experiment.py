@@ -720,6 +720,33 @@ def _candidate_metrics(
     )
 
 
+def _nonempty_geometric_candidates(
+    objects: Sequence[FunnelObject],
+) -> tuple[tuple[FunnelObject, ...], dict[str, int]]:
+    """Separate structural empty components from evaluable geometry.
+
+    An accepted-edge component may legitimately have an empty full-support
+    union.  It remains part of the replay lineage and its ``empty_full`` drop
+    reason remains visible, but an empty set is not an object hypothesis and
+    must never be constructed as :class:`CleanCandidate`.
+    """
+
+    rows = tuple(objects)
+    candidates = tuple(item for item in rows if len(item.gaussian_ids) > 0)
+    inventory = {
+        "total_component_count": len(rows),
+        "empty_full_component_count": len(rows) - len(candidates),
+        "geometric_candidate_count": len(candidates),
+    }
+    if (
+        inventory["total_component_count"]
+        != inventory["empty_full_component_count"]
+        + inventory["geometric_candidate_count"]
+    ):
+        raise AssertionError("accepted-component inventory is not conserved")
+    return candidates, inventory
+
+
 def _formal_predictions_from_frozen(
     payload: Mapping[str, Any],
     *,
@@ -838,6 +865,12 @@ def _aggregate_arm_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         )
         for row in rows
     )
+    accepted_component_count = sum(
+        int(row["accepted_component_count_total"]) for row in rows
+    )
+    accepted_empty_full_count = sum(
+        int(row["accepted_empty_component_count"]) for row in rows
+    )
     accepted_candidate_count = sum(int(row["accepted_all_candidate_count"]) for row in rows)
     accepted_tp25 = sum(
         int(row["accepted_all_geometry_025_tp"]) for row in rows
@@ -854,6 +887,9 @@ def _aggregate_arm_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     )
     return {
         "scene_count": len(rows),
+        "accepted_component_count_total": accepted_component_count,
+        "accepted_empty_component_count": accepted_empty_full_count,
+        "accepted_component_geometric_candidate_count": accepted_candidate_count,
         "accepted_candidate_count": accepted_candidate_count,
         "accepted_geometry_025_tp": accepted_tp25,
         "accepted_geometry_025_precision": (
@@ -1066,7 +1102,12 @@ def audit_clean_late_filters(
             arms = getattr(replay, "arms", None)
             if not isinstance(arms, Mapping) or set(map(str, arms)) != set(ARM_CODES):
                 raise ValueError("late-filter replay must return exactly four arms")
-            accepted_objects = tuple(getattr(replay, "accepted_components", ()))
+            accepted_components = tuple(
+                getattr(replay, "accepted_components", ())
+            )
+            accepted_objects, accepted_inventory = _nonempty_geometric_candidates(
+                accepted_components
+            )
             accepted_metrics = _candidate_metrics(
                 accepted_objects,
                 gt_objects=gt_objects,
@@ -1176,6 +1217,17 @@ def audit_clean_late_filters(
                             and not bool(getattr(arm, "formal_output_allowed", False))
                         )
                     ),
+                    "empty_accepted_components_are_diagnostic_only": bool(
+                        int(
+                            accepted_metrics["subsets"]["all"][
+                                "candidate_count"
+                            ]
+                        )
+                        == accepted_inventory["geometric_candidate_count"]
+                        and accepted_inventory["total_component_count"]
+                        == accepted_inventory["empty_full_component_count"]
+                        + accepted_inventory["geometric_candidate_count"]
+                    ),
                     **detection_identity_checks,
                 }
                 technical_contract = {
@@ -1226,6 +1278,15 @@ def audit_clean_late_filters(
                 row["official_tiny_small_gt_count"] = int(
                     selected_metrics["official_tiny_small_gt_count"]
                 )
+                row["accepted_component_count_total"] = int(
+                    accepted_inventory["total_component_count"]
+                )
+                row["accepted_empty_component_count"] = int(
+                    accepted_inventory["empty_full_component_count"]
+                )
+                row["accepted_component_geometric_candidate_count"] = int(
+                    accepted_inventory["geometric_candidate_count"]
+                )
                 table_rows.append(row)
                 scene_mode_rows[arm_code] = {
                     "row": row,
@@ -1236,6 +1297,7 @@ def audit_clean_late_filters(
 
             nested[scene_id][mask_mode] = {
                 "accepted_component_metrics": accepted_metrics,
+                "accepted_component_inventory": accepted_inventory,
                 "shared_identity": _json_safe(
                     dict(getattr(replay, "shared_identity", {}))
                 ),

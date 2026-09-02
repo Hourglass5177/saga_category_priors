@@ -49,7 +49,12 @@ def _xyz() -> np.ndarray:
 
 
 def _bank(
-    scene_id: str, *, mode: str, xyz: np.ndarray, gaussian_path: Path
+    scene_id: str,
+    *,
+    mode: str,
+    xyz: np.ndarray,
+    gaussian_path: Path,
+    add_empty_component: bool = False,
 ) -> AlphaMaskEvidenceBank:
     frames = []
     all_ids = np.arange(len(xyz), dtype=np.int32)
@@ -58,7 +63,11 @@ def _bank(
             np.arange(index * 100, (index + 1) * 100, dtype=np.int32)
             for index in range(3)
         ]
-        posterior = np.zeros((3, len(CLASSES)), dtype=np.float32)
+        global_mask_ids = [frame_id * 3 + index for index in range(3)]
+        if add_empty_component:
+            mask_rows.append(np.empty(0, dtype=np.int32))
+            global_mask_ids.append(6 + frame_id)
+        posterior = np.zeros((len(mask_rows), len(CLASSES)), dtype=np.float32)
         posterior[:, 0] = 1.0
         frames.append(
             build_sparse_frame_evidence(
@@ -68,11 +77,15 @@ def _bank(
                 visible_ids=all_ids,
                 visible_mass=np.ones(len(xyz), dtype=np.float32),
                 mask_gaussian_ids=mask_rows,
-                mask_inside_mass=[np.ones(100, dtype=np.float32) for _ in mask_rows],
-                mask_inside_ratio=[np.ones(100, dtype=np.float32) for _ in mask_rows],
+                mask_inside_mass=[
+                    np.ones(len(row), dtype=np.float32) for row in mask_rows
+                ],
+                mask_inside_ratio=[
+                    np.ones(len(row), dtype=np.float32) for row in mask_rows
+                ],
                 semantic_posteriors=posterior,
-                global_mask_id_start=frame_id * 3,
-                mask_indices=[0, 1, 2],
+                global_mask_ids=global_mask_ids,
+                mask_indices=list(range(len(mask_rows))),
                 valid_pixel_count=1000,
                 class_count=len(CLASSES),
             )
@@ -178,6 +191,7 @@ def _diagnostics(
     *,
     run_identity: dict[str, object],
     bank_schema: str,
+    add_empty_component: bool = False,
 ) -> dict[str, object]:
     kept = tuple(sorted(set(map(int, kept_objects))))
     rejected = [
@@ -197,6 +211,17 @@ def _diagnostics(
         }
         for object_index in kept
     ]
+    if add_empty_component:
+        accepted_edges.append(
+            {
+                "left_mask_ids": [6],
+                "right_mask_ids": [7],
+                "observer_count": 2,
+                "supporter_count": 2,
+                "consensus": 1.0,
+                "observer_level": 2,
+            }
+        )
     return {
         "schema": "saga-clean-alpha-mask-condition-diagnostics-v1",
         "scene_id": scene_id,
@@ -205,7 +230,8 @@ def _diagnostics(
         "bank_schema": bank_schema,
         "config": asdict(ConsensusConfig()),
         "consensus": {
-            "component_count_before_output_filters": len(kept),
+            "component_count_before_output_filters": len(kept)
+            + int(add_empty_component),
         },
         "accepted_edges": accepted_edges,
         "rejected_undersegmented_mask_ids": rejected,
@@ -231,6 +257,7 @@ def _scene(
     include_input_audit: bool = True,
     repeat_identity: bool | None = True,
     include_full_repeat: bool = True,
+    add_empty_component: bool = False,
 ) -> dict[str, object]:
     xyz = _xyz()
     gt_path = tmp_path / scene_id / "gt.npz"
@@ -252,7 +279,11 @@ def _scene(
         root = tmp_path / scene_id / arm
         bank_dir = root / "bank"
         bank = _bank(
-            scene_id, mode=mode, xyz=xyz, gaussian_path=gaussian_path
+            scene_id,
+            mode=mode,
+            xyz=xyz,
+            gaussian_path=gaussian_path,
+            add_empty_component=add_empty_component,
         )
         banks[arm] = bank
         save_evidence_bank(bank, bank_dir)
@@ -271,6 +302,7 @@ def _scene(
                 objects,
                 run_identity=run_identity,
                 bank_schema=bank.schema,
+                add_empty_component=add_empty_component,
             ),
         )
         conditions[arm] = {
@@ -933,6 +965,53 @@ def test_late_filter_factorial_uses_frozen_dev2_and_never_exports_b0_ap(
     assert repeated["runner_status"] == "skipped-complete"
 
 
+def test_late_filter_factorial_keeps_empty_components_only_in_diagnostics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for the real cloud failure at accepted-component evaluation."""
+
+    scenes = [
+        _scene(tmp_path, SCENE_A, add_empty_component=True),
+        _scene(tmp_path, SCENE_B, add_empty_component=True),
+    ]
+    manifest = _manifest(tmp_path, scenes)
+    monkeypatch.setattr(
+        late_filter_experiment, "load_ply_xyz", lambda _: _xyz().copy()
+    )
+
+    destination = tmp_path / "late-filter-empty-components"
+    result = late_filter_experiment.audit_clean_late_filters(
+        manifest, destination
+    )
+    table = pd.read_parquet(
+        destination / "clean_late_filter_factorial_dev2.parquet"
+    )
+
+    assert result["technical_gates"]["passed"] is True
+    assert table["accepted_empty_component_count"].eq(1).all()
+    hierarchy_rows = table[table["mask_mode"] == "H-hierarchy"]
+    flat_rows = table[table["mask_mode"] == "P-flat"]
+    assert hierarchy_rows["accepted_component_count_total"].eq(3).all()
+    assert hierarchy_rows["accepted_component_geometric_candidate_count"].eq(2).all()
+    assert flat_rows["accepted_component_count_total"].eq(4).all()
+    assert flat_rows["accepted_component_geometric_candidate_count"].eq(3).all()
+    factorial = json.loads(
+        (destination / "clean_late_filter_factorial_dev2.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    for scene_id in (SCENE_A, SCENE_B):
+        for mode in ("H-hierarchy", "P-flat"):
+            node = factorial["scenes"][scene_id][mode]
+            geometric_count = 2 if mode == "H-hierarchy" else 3
+            assert node["accepted_component_inventory"] == {
+                "total_component_count": geometric_count + 1,
+                "empty_full_component_count": 1,
+                "geometric_candidate_count": geometric_count,
+            }
+            assert node["arms"]["A1B1"]["drop_reasons"]["empty_full"] == 1
+
+
 def test_late_filter_gate_uses_all_candidates_for_capacity_and_scene_recall() -> None:
     rows: list[dict[str, object]] = []
     for scene_id in (SCENE_A, SCENE_B):
@@ -948,6 +1027,8 @@ def test_late_filter_gate_uses_all_candidates_for_capacity_and_scene_recall() ->
                 "all_geometry_025_recall": 0.75,
                 "all_geometry_050_tp": 3,
                 "accepted_all_candidate_count": 4,
+                "accepted_component_count_total": 5,
+                "accepted_empty_component_count": 1,
                 "accepted_all_geometry_025_tp": 3,
                 "accepted_all_geometry_050_tp": 3,
                 "accepted_official_geometry_025_tiny_small_recall": 0.5,
@@ -960,6 +1041,9 @@ def test_late_filter_gate_uses_all_candidates_for_capacity_and_scene_recall() ->
     assert aggregate["geometry_025_precision"] == pytest.approx(0.1)
     assert aggregate["geometry_050_tp"] == 6
     assert aggregate["accepted_geometry_050_tp"] == 6
+    assert aggregate["accepted_component_count_total"] == 10
+    assert aggregate["accepted_empty_component_count"] == 2
+    assert aggregate["accepted_component_geometric_candidate_count"] == 8
     assert aggregate["scene_geometry_025_recall"] == {
         SCENE_A: 0.75,
         SCENE_B: 0.75,
