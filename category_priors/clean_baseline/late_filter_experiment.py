@@ -453,23 +453,41 @@ def _maximum_overlap_score_equivalence(
     reconstructed: Sequence[FunnelObject],
     frozen: Sequence[FunnelObject],
 ) -> dict[str, Any]:
-    """Compare formal scores after deterministic maximum-overlap matching."""
+    """Compare formal scores after deterministic maximum-overlap matching.
+
+    Formal AP is always computed from the frozen output score.  The replayed
+    score is a reconstruction check, and the historical producer can differ
+    by one binary64 rounding unit when otherwise equivalent reductions are
+    evaluated on a different NumPy/libm build.  Preserve bit equality as a
+    diagnostic, but use a strict one-ULP contract rather than a broad decimal
+    tolerance.
+    """
 
     left_rows = tuple(reconstructed)
     right_rows = tuple(frozen)
     if len(left_rows) != len(right_rows):
         return {
             "passed": False,
+            "bit_exact": False,
             "matched_instance_count": 0,
             "max_abs_error": None,
+            "max_ulp_distance": None,
+            "nonexact_score_count": None,
+            "maximum_allowed_ulp_distance": 1,
             "missing_or_nonfinite_score": True,
+            "out_of_range_score": False,
         }
     if not left_rows:
         return {
             "passed": True,
+            "bit_exact": True,
             "matched_instance_count": 0,
             "max_abs_error": 0.0,
+            "max_ulp_distance": 0,
+            "nonexact_score_count": 0,
+            "maximum_allowed_ulp_distance": 1,
             "missing_or_nonfinite_score": False,
+            "out_of_range_score": False,
         }
     overlap = np.zeros((len(left_rows), len(right_rows)), dtype=np.int64)
     for left_index, left in enumerate(left_rows):
@@ -484,31 +502,56 @@ def _maximum_overlap_score_equivalence(
     from scipy.optimize import linear_sum_assignment
 
     left_indices, right_indices = linear_sum_assignment(-overlap)
-    exact = len(left_indices) == len(left_rows)
+    within_one_ulp = len(left_indices) == len(left_rows)
+    bit_exact = within_one_ulp
     missing = False
+    out_of_range = False
     deltas: list[float] = []
+    ulp_distances: list[int] = []
+    nonexact_count = 0
     for left_index, right_index in zip(left_indices, right_indices):
         left = left_rows[int(left_index)]
         right = right_rows[int(right_index)]
         if "score" not in left.metadata or "score" not in right.metadata:
             missing = True
-            exact = False
+            within_one_ulp = False
+            bit_exact = False
             continue
         left_score = float(left.metadata["score"])
         right_score = float(right.metadata["score"])
         if not math.isfinite(left_score) or not math.isfinite(right_score):
             missing = True
-            exact = False
+            within_one_ulp = False
+            bit_exact = False
+            continue
+        if not (0.0 <= left_score <= 1.0 and 0.0 <= right_score <= 1.0):
+            out_of_range = True
+            within_one_ulp = False
+            bit_exact = False
             continue
         delta = abs(left_score - right_score)
         deltas.append(delta)
-        if delta != 0.0:
-            exact = False
+        if left_score == right_score:
+            ulp_distance = 0
+        else:
+            left_bits = int(np.float64(left_score).view(np.uint64))
+            right_bits = int(np.float64(right_score).view(np.uint64))
+            ulp_distance = abs(left_bits - right_bits)
+            nonexact_count += 1
+            bit_exact = False
+        ulp_distances.append(ulp_distance)
+        if ulp_distance > 1:
+            within_one_ulp = False
     return {
-        "passed": bool(exact and not missing),
+        "passed": bool(within_one_ulp and not missing and not out_of_range),
+        "bit_exact": bool(bit_exact and not missing and not out_of_range),
         "matched_instance_count": len(left_indices),
         "max_abs_error": max(deltas, default=0.0),
+        "max_ulp_distance": max(ulp_distances, default=0),
+        "nonexact_score_count": int(nonexact_count),
+        "maximum_allowed_ulp_distance": 1,
         "missing_or_nonfinite_score": missing,
+        "out_of_range_score": out_of_range,
     }
 
 
@@ -1205,7 +1248,7 @@ def audit_clean_late_filters(
                     "repeat_replay_byte_semantics_exact": replay_digest
                     == repeat_digest,
                     "a1b1_frozen_partition_exact": a1b1_partition_exact,
-                    "a1b1_frozen_score_exact": bool(
+                    "a1b1_frozen_score_within_1ulp": bool(
                         score_equivalence["passed"]
                     ),
                     "a1b0_historical_physical_stage_exact": historical_physical_exact,
@@ -1240,9 +1283,10 @@ def audit_clean_late_filters(
                 }
 
                 official_protocols = None
-                # A1B1 is the only arm whose frozen, exact ranking score is
-                # registered.  A0B1 remains candidate-level unless the replay
-                # contract is later extended with a complete formal score.
+                # A1B1 is the only arm with a registered frozen ranking score.
+                # Formal AP always reads that frozen value; replay parity is a
+                # separate one-ULP technical check.  A0B1 remains candidate-
+                # level unless its complete formal score is registered later.
                 if arm_code == "A1B1":
                     scene_predictions = _formal_predictions_from_frozen(
                         output,

@@ -22,6 +22,7 @@ from category_priors.clean_baseline.evidence import (
 )
 from category_priors.clean_baseline.evaluation import RUN_IDENTITY_SCHEMA
 from category_priors.clean_baseline.models import AlphaMaskEvidenceBank
+from category_priors.clean_baseline.stage_funnel import FunnelObject
 from category_priors.io import hash_json, sha256_file
 
 
@@ -1078,8 +1079,70 @@ def test_late_filter_replay_score_drift_fails_technical_contract(
     ]["checks"]
 
     assert checks["a1b1_frozen_partition_exact"] is True
-    assert checks["a1b1_frozen_score_exact"] is False
+    assert checks["a1b1_frozen_score_within_1ulp"] is False
     assert result["technical_gates"]["passed"] is False
+
+
+def test_late_filter_score_contract_is_strictly_one_binary64_ulp() -> None:
+    def candidate(score: float) -> FunnelObject:
+        return FunnelObject(
+            stable_id="export:0",
+            gaussian_ids=np.asarray([1, 2, 3], dtype=np.int64),
+            mask_ids=(10, 11),
+            frame_ids=(0, 1),
+            class_name="chair",
+            metadata={"score": score},
+        )
+
+    exact = 0.5
+    one_ulp = float(np.nextafter(np.float64(exact), np.float64(np.inf)))
+    two_ulps = float(np.nextafter(np.float64(one_ulp), np.float64(np.inf)))
+
+    exact_result = late_filter_experiment._maximum_overlap_score_equivalence(
+        (candidate(exact),), (candidate(exact),)
+    )
+    one_ulp_result = late_filter_experiment._maximum_overlap_score_equivalence(
+        (candidate(one_ulp),), (candidate(exact),)
+    )
+    two_ulp_result = late_filter_experiment._maximum_overlap_score_equivalence(
+        (candidate(two_ulps),), (candidate(exact),)
+    )
+
+    assert exact_result["passed"] is True
+    assert exact_result["bit_exact"] is True
+    assert exact_result["max_ulp_distance"] == 0
+    assert one_ulp_result["passed"] is True
+    assert one_ulp_result["bit_exact"] is False
+    assert one_ulp_result["max_ulp_distance"] == 1
+    assert one_ulp_result["nonexact_score_count"] == 1
+    assert two_ulp_result["passed"] is False
+    assert two_ulp_result["max_ulp_distance"] == 2
+
+
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), -0.1, 1.1])
+def test_late_filter_score_contract_rejects_invalid_scores(invalid: float) -> None:
+    valid = FunnelObject(
+        stable_id="export:0",
+        gaussian_ids=np.asarray([1], dtype=np.int64),
+        mask_ids=(0,),
+        frame_ids=(0,),
+        class_name="chair",
+        metadata={"score": 0.5},
+    )
+    invalid_row = FunnelObject(
+        stable_id="export:0",
+        gaussian_ids=np.asarray([1], dtype=np.int64),
+        mask_ids=(0,),
+        frame_ids=(0,),
+        class_name="chair",
+        metadata={"score": invalid},
+    )
+
+    result = late_filter_experiment._maximum_overlap_score_equivalence(
+        (invalid_row,), (valid,)
+    )
+
+    assert result["passed"] is False
 
 
 def test_late_filter_reports_full_p_repeat_not_preparation_repeat(
