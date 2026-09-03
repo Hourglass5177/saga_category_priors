@@ -24,6 +24,51 @@ from plyfile import PlyData, PlyElement
 from utils.sh_utils import SH2RGB
 from scene.gaussian_model import BasicPointCloud
 
+
+SUPPORTED_IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png"})
+
+
+def _resolve_colmap_image_path(images_folder, colmap_image_name):
+    """Resolve a COLMAP image name without silently choosing an ambiguous file."""
+
+    if not images_folder:
+        return None
+
+    folder = Path(images_folder)
+    exact = folder / colmap_image_name
+    if exact.is_file():
+        return str(exact)
+
+    if not folder.is_dir():
+        return None
+
+    expected_stem = Path(colmap_image_name).stem
+    image_files = [
+        path
+        for path in folder.iterdir()
+        if path.is_file() and path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
+    ]
+
+    exact_stem = [path for path in image_files if path.stem == expected_stem]
+    if len(exact_stem) == 1:
+        return str(exact_stem[0])
+    if len(exact_stem) > 1:
+        names = ", ".join(sorted(path.name for path in exact_stem))
+        raise ValueError(
+            f"Ambiguous image stem for COLMAP image {colmap_image_name!r}: {names}"
+        )
+
+    fuzzy = [path for path in image_files if expected_stem in path.stem]
+    if len(fuzzy) == 1:
+        return str(fuzzy[0])
+    if len(fuzzy) > 1:
+        names = ", ".join(sorted(path.name for path in fuzzy))
+        raise ValueError(
+            f"Ambiguous fuzzy image match for COLMAP image {colmap_image_name!r}: "
+            f"{names}"
+        )
+    return None
+
 class CameraInfo(NamedTuple):
     uid: int
     R: np.array
@@ -115,30 +160,13 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder, features_fo
 
         image_name_noext = os.path.splitext(extr.name)[0]
         
-        # image = Image.open(os.path.join(images_folder, extr.name)) \
-        #     if images_folder and os.path.exists(os.path.join(images_folder, extr.name)) \
-        #         else None
-        # 支持文件名不匹配的情况（模糊匹配）
-        image_path_exact = os.path.join(images_folder, extr.name)
-        if images_folder and os.path.exists(image_path_exact):
-            image = Image.open(image_path_exact)
-        elif images_folder:
-            # 尝试模糊匹配：查找包含 image_name_noext 的文件
-            import glob
-            pattern = os.path.join(images_folder, f"*{image_name_noext}*")
-            matched_files = sorted(glob.glob(pattern))
-            if matched_files:
-                image = Image.open(matched_files[0])
-                if len(matched_files) > 1:
-                    print(f"\n   图像名模糊匹配到 {len(matched_files)} 个文件，使用: {os.path.basename(matched_files[0])}")
-                # print(f"\n    文件名不匹配，使用模糊匹配:")
-                # print(f"     COLMAP: {extr.name}")
-                # print(f"     实际文件: {os.path.basename(matched_files[0])}")
-            else:
-                image = None
-                print(f"\n   未找到图像文件: {extr.name}")
+        resolved_image_path = _resolve_colmap_image_path(images_folder, extr.name)
+        if resolved_image_path is not None:
+            image = Image.open(resolved_image_path)
         else:
             image = None
+            if images_folder:
+                print(f"\n   未找到图像文件: {extr.name}")
 
         features = torch.load(os.path.join(features_folder, image_name_noext + ".pt")) \
             if features_folder and os.path.exists(os.path.join(features_folder, image_name_noext + ".pt")) \
@@ -156,8 +184,11 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder, features_fo
             if labels_folder and os.path.exists(os.path.join(labels_folder, image_name_noext + ".pt")) \
                 else None
 
+        fallback_image_path = (
+            os.path.join(images_folder, extr.name) if images_folder else ""
+        )
         cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image, features=features, masks=masks, mask_scales=mask_scales, labels=labels, label_features=label_features,
-                            image_path=os.path.join(images_folder, extr.name), image_name=image_name_noext, width=width, height=height, cx=intr.params[2] if len(intr.params) > 3 and allow_principle_point_shift else None, cy=intr.params[3] if len(intr.params) >3 and allow_principle_point_shift else None)
+                            image_path=resolved_image_path or fallback_image_path, image_name=image_name_noext, width=width, height=height, cx=intr.params[2] if len(intr.params) > 3 and allow_principle_point_shift else None, cy=intr.params[3] if len(intr.params) >3 and allow_principle_point_shift else None)
         cam_infos.append(cam_info)
     sys.stdout.write('\n')
     return cam_infos

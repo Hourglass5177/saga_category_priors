@@ -9,10 +9,8 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
-import json
 import os
 import torch
-import random
 from random import randint
 from gaussian_renderer import render_contrastive_feature, render_semantic_feature
 import sys
@@ -27,85 +25,6 @@ import numpy as np
 
 
 import torch
-
-
-_SEMANTIC_SOURCE_ARGUMENTS = (
-    "semantic_masks_path",
-    "semantic_labels_path",
-    "semantic_mask_scales_path",
-    "semantic_label_features_path",
-)
-
-
-def _prepare_external_semantic_supervision(args):
-    """Load V9 semantic metadata without changing the legacy single-source path."""
-
-    values = {name: str(getattr(args, name, "") or "") for name in _SEMANTIC_SOURCE_ARGUMENTS}
-    if not any(values.values()):
-        return None
-    missing = sorted(name for name, value in values.items() if not value)
-    if missing:
-        raise ValueError(
-            "external semantic supervision requires all four paths; missing "
-            + ", ".join(missing)
-        )
-    for name in ("semantic_masks_path", "semantic_labels_path", "semantic_mask_scales_path"):
-        if not os.path.isdir(values[name]):
-            raise FileNotFoundError(f"{name} directory not found: {values[name]}")
-    if not os.path.isfile(values["semantic_label_features_path"]):
-        raise FileNotFoundError(
-            "semantic_label_features_path not found: "
-            + values["semantic_label_features_path"]
-        )
-    label_features = torch.load(
-        values["semantic_label_features_path"], map_location="cpu"
-    )
-    if not isinstance(label_features, torch.Tensor) or label_features.ndim != 2:
-        raise ValueError("semantic label features must be a rank-2 tensor")
-    return {
-        **values,
-        "label_features": label_features.cuda(),
-        "cache": {},
-    }
-
-
-def _load_external_semantic_frame(source, image_name):
-    if image_name in source["cache"]:
-        return source["cache"][image_name]
-    paths = {
-        "masks": os.path.join(source["semantic_masks_path"], image_name + ".pt"),
-        "labels": os.path.join(source["semantic_labels_path"], image_name + ".pt"),
-        "scales": os.path.join(source["semantic_mask_scales_path"], image_name + ".pt"),
-    }
-    present = {label: os.path.isfile(path) for label, path in paths.items()}
-    if not any(present.values()):
-        # A missing Grounded-SAM triplet is an explicit abstention.  It must
-        # not be interpreted as a background-only semantic frame.
-        source["cache"][image_name] = None
-        return None
-    if not all(present.values()):
-        missing = sorted(label for label, exists in present.items() if not exists)
-        raise FileNotFoundError(
-            f"partial external semantic supervision for {image_name}; missing "
-            + ", ".join(missing)
-        )
-    masks = torch.load(paths["masks"], map_location="cpu")
-    labels = torch.load(paths["labels"], map_location="cpu")
-    scales = torch.load(paths["scales"], map_location="cpu")
-    if not isinstance(masks, torch.Tensor) or masks.ndim != 3:
-        raise ValueError(f"semantic masks must be MxHxW: {paths['masks']}")
-    if not isinstance(labels, torch.Tensor) or labels.ndim != 1:
-        raise ValueError(f"semantic labels must be a vector: {paths['labels']}")
-    if not isinstance(scales, torch.Tensor) or scales.ndim != 1:
-        raise ValueError(f"semantic mask scales must be a vector: {paths['scales']}")
-    if len(masks) != len(labels) or len(masks) != len(scales):
-        raise ValueError(
-            f"semantic masks/labels/scales do not align for {image_name}: "
-            f"{len(masks)}/{len(labels)}/{len(scales)}"
-        )
-    cached = (masks.bool(), labels.long(), scales.float())
-    source["cache"][image_name] = cached
-    return cached
 from torch import nn
 import pytorch3d.ops
 
@@ -122,70 +41,6 @@ from sklearn.preprocessing import QuantileTransformer
 from utils.resource_exit import resource_error_handler
 
 import torch
-
-
-def _write_json_atomic(path, payload):
-    path = os.path.abspath(path)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    temporary = path + ".part"
-    with open(temporary, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2)
-        handle.write("\n")
-    os.replace(temporary, path)
-
-
-def _native_snapshot_directory(snapshot_root, iteration):
-    return os.path.join(
-        os.path.abspath(snapshot_root), f"iteration_native_{int(iteration)}"
-    )
-
-
-@torch.no_grad()
-def _save_native_training_snapshot(
-    feature_gaussians,
-    scale_gate,
-    *,
-    snapshot_root,
-    iteration,
-    seed,
-    smooth_k,
-):
-    """Serialize an intermediate state without changing optimizer or RNG state."""
-
-    directory = _native_snapshot_directory(snapshot_root, iteration)
-    os.makedirs(directory, exist_ok=True)
-    raw_feature_path = os.path.join(
-        directory, "contrastive_feature_point_cloud.raw.ply"
-    )
-    feature_part = os.path.join(
-        directory, "contrastive_feature_point_cloud.raw.part.ply"
-    )
-    gate_path = os.path.join(directory, "scale_gate.pt")
-    gate_part = os.path.join(directory, "scale_gate.part.pt")
-    feature_gaussians.save_ply(
-        feature_part,
-        smooth_weights=None,
-        smooth_type=None,
-        smooth_K=int(smooth_k),
-    )
-    os.replace(feature_part, raw_feature_path)
-    torch.save(scale_gate.state_dict(), gate_part)
-    os.replace(gate_part, gate_path)
-    _write_json_atomic(
-        os.path.join(directory, "snapshot.json"),
-        {
-            "kind": "pmr3_scale_training_snapshot",
-            "status": "raw_complete",
-            "iteration": int(iteration),
-            "seed": int(seed),
-            "smooth_k": int(smooth_k),
-            "point_count": int(feature_gaussians.get_xyz.shape[0]),
-            "raw_feature_ply": raw_feature_path,
-            "scale_gate": gate_path,
-            "optimizer_preserved": feature_gaussians.optimizer is not None,
-        },
-    )
-    return raw_feature_path, gate_path
 
 def uniform_sample(xyz, n_samples):
     device = xyz.device
@@ -275,7 +130,6 @@ def training(args, dataset, opt, pipe, iteration, saving_iterations, checkpoint_
 
     sample_rate = 1.0
     scene = Scene(dataset, gaussians, feature_gaussians, load_iteration=iteration, shuffle=False, target='contrastive_feature', mode='train', sample_rate=sample_rate)
-    external_semantic_source = _prepare_external_semantic_supervision(args)
 
     feature_gaussians.change_to_segmentation_mode(opt, "contrastive_feature", fixed_feature=False)
     feature_gaussians._xyz.requires_grad_(False)
@@ -306,20 +160,8 @@ def training(args, dataset, opt, pipe, iteration, saving_iterations, checkpoint_
     
     first_iter = 0
     viewpoint_stack = None
-    train_camera_count = len(scene.getTrainCameras())
-    native_snapshot_iteration = min(train_camera_count * 10, 10000)
     if not opt.iterations:
-        opt.iterations = native_snapshot_iteration
-    if args.feature_snapshot_root and opt.iterations <= native_snapshot_iteration:
-        raise ValueError(
-            "feature snapshot control requires a final budget beyond the native "
-            f"adaptive budget: {opt.iterations} <= {native_snapshot_iteration}"
-        )
-    if args.feature_snapshot_root:
-        print(
-            "PMR-3 native snapshot:", native_snapshot_iteration,
-            "train cameras:", train_camera_count,
-        )
+        opt.iterations = min(len(scene.getTrainCameras())*10, 10000)
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
 
@@ -538,67 +380,43 @@ def training(args, dataset, opt, pipe, iteration, saving_iterations, checkpoint_
                 + (per_pixel_weight[:, sampled_mask_negative] * (1 - gt_corrs[:, sampled_mask_negative]) * torch.relu(corr[:, sampled_mask_negative])).mean().nan_to_num() \
                 + opt.rfn * rendered_feature_norm_reg + opt.distance_weight * distance_loss
         
-        if external_semantic_source is None:
-            semantic_masks = viewpoint_cam.original_masks.cuda()[sort_indices]
-            semantic_labels = (
-                viewpoint_cam.labels.cuda()[sort_indices]
-                if viewpoint_cam.labels is not None else None
-            )
-            semantic_label_features = (
-                viewpoint_cam.label_features.cuda()
-                if viewpoint_cam.label_features is not None else None
-            )
-        else:
-            semantic_frame = _load_external_semantic_frame(
-                external_semantic_source, viewpoint_cam.image_name
-            )
-            if semantic_frame is None:
-                semantic_masks = None
-                semantic_labels = None
-                semantic_label_features = None
-            else:
-                semantic_masks_cpu, semantic_labels_cpu, semantic_scales_cpu = semantic_frame
-                semantic_order = torch.argsort(semantic_scales_cpu, descending=True)
-                semantic_masks = semantic_masks_cpu[semantic_order].cuda()
-                semantic_labels = semantic_labels_cpu[semantic_order].cuda()
-                semantic_label_features = external_semantic_source["label_features"]
+        semantic_pkg = render_semantic_feature(viewpoint_cam, feature_gaussians, pipe, background, norm_point_features=True)
+        semantic_map = semantic_pkg["render"]  # [C, H, W]
 
-        semantic_active = (
-            semantic_masks is not None
-            and len(semantic_masks) > 0
-            and semantic_labels is not None
-            and semantic_label_features is not None
-        )
-        if semantic_active:
-            semantic_pkg = render_semantic_feature(
-                viewpoint_cam, feature_gaussians, pipe, background,
-                norm_point_features=True,
-            )
-            semantic_map = semantic_pkg["render"]  # [C, H, W]
-            semantic_map = torch.nn.functional.interpolate(
-                semantic_map.unsqueeze(0),
-                semantic_masks.shape[-2:],
-                mode='bilinear'
-            ).squeeze(0)
-            C, H, W = semantic_map.shape
-            semantic_map_gt = torch.zeros(C, H, W, device="cuda")
-            if semantic_label_features.shape[1] != C:
-                raise ValueError(
-                    "semantic label feature dimension does not match the semantic head: "
-                    f"{semantic_label_features.shape[1]} != {C}"
-                )
-            # Masks are ordered from largest physical scale to smallest so the
-            # smaller object owns overlapping pixels, matching legacy behavior.
-            for mask_idx in range(len(semantic_masks)):
-                mask = semantic_masks[mask_idx]
-                label_idx = semantic_labels[mask_idx]
-                if label_idx >= 0 and label_idx < len(semantic_label_features):
-                    semantic_map_gt[:, mask] = semantic_label_features[label_idx].unsqueeze(1)
+        # Interpolate semantic_map to match original_masks resolution (same as rendered_features)
+        semantic_map = torch.nn.functional.interpolate(
+            semantic_map.unsqueeze(0),
+            viewpoint_cam.original_masks.shape[-2:],
+            mode='bilinear'
+        ).squeeze(0)
 
+        # Build semantic_map_gt from labels and label_features
+        # sam_masks: [N_masks, H, W] (already sorted by scale)
+        # labels: class indices for each mask
+        # label_features: [num_classes, C] feature vectors per class
+        C, H, W = semantic_map.shape
+        semantic_map_gt = torch.zeros(C, H, W, device="cuda")
+
+        # Sort labels to match the sorted sam_masks
+        if viewpoint_cam.labels is not None and viewpoint_cam.label_features is not None:
+            labels = viewpoint_cam.labels.cuda()
+            label_features = viewpoint_cam.label_features.cuda()  # [num_classes, C]
+            masks = viewpoint_cam.original_masks.cuda()[sort_indices]
+            labels_sorted = labels[sort_indices]  # [N_masks]
+
+            # Build semantic map GT by iterating masks from largest to smallest scale
+            # Later masks (smaller scale) override earlier ones for overlapping pixels
+            for mask_idx in range(len(masks)):
+                mask = masks[mask_idx]  # [H, W]
+                label_idx = labels_sorted[mask_idx]
+                if label_idx >= 0 and label_idx < len(label_features):
+                    semantic_map_gt[:, mask] = label_features[label_idx].unsqueeze(1)  # [C] -> [C, num_pixels]
+
+        # Compute semantic L2 loss
+        semantic_loss = torch.tensor(0.0, device="cuda")
+        if viewpoint_cam.labels is not None and viewpoint_cam.label_features is not None:
             semantic_loss = ((semantic_map - semantic_map_gt) ** 2).mean()
             loss = loss + opt.semantic_loss_weight * semantic_loss
-        else:
-            semantic_loss = torch.tensor(0.0, device="cuda")
 
         with torch.no_grad():
             cosine_pos = corr[gt_corrs == 1].mean().nan_to_num()
@@ -608,20 +426,6 @@ def training(args, dataset, opt, pipe, iteration, saving_iterations, checkpoint_
 
         feature_gaussians.optimizer.step()
         feature_gaussians.optimizer.zero_grad(set_to_none = True)
-
-        if (
-            args.feature_snapshot_root
-            and iteration == native_snapshot_iteration
-            and iteration < opt.iterations
-        ):
-            _save_native_training_snapshot(
-                feature_gaussians,
-                scale_gate,
-                snapshot_root=args.feature_snapshot_root,
-                iteration=iteration,
-                seed=args.seed,
-                smooth_k=opt.smooth_K,
-            )
 
         iter_end.record()
 
@@ -636,84 +440,13 @@ def training(args, dataset, opt, pipe, iteration, saving_iterations, checkpoint_
             progress_bar.update(10)
 
     
-    # Adam moments are not needed for serialization and can otherwise leave too
-    # little headroom for KNN smoothing on large ScanNet scenes.
-    feature_gaussians.feature_smooth_map = None
-    feature_gaussians.optimizer = None
-    torch.cuda.empty_cache()
-
     # scene.save_feature(iteration, target = 'contrastive_feature', smooth_weights = torch.softmax(smooth_weights, dim = -1) if smooth_weights is not None else None, smooth_type = 'traditional', smooth_K = opt.smooth_K)
-    final_feature_path = args.contrastive_feature_point_cloud_path
-    final_gate_path = args.scale_gate_path
-    if args.feature_snapshot_root:
-        final_feature_part = os.path.join(
-            os.path.dirname(final_feature_path),
-            "contrastive_feature_point_cloud.part.ply",
-        )
-        scene.feature_gaussians.save_ply(
-            final_feature_part,
-            smooth_weights=torch.softmax(smooth_weights, dim=-1)
-            if smooth_weights is not None
-            else None,
-            smooth_type="traditional",
-            smooth_K=opt.smooth_K,
-        )
-        os.replace(final_feature_part, final_feature_path)
-    else:
-        scene.feature_gaussians.save_ply(final_feature_path,
-                                         smooth_weights=torch.softmax(smooth_weights, dim = -1) if smooth_weights is not None else None,
-                                         smooth_type = 'traditional',
-                                         smooth_K = opt.smooth_K)
+    scene.feature_gaussians.save_ply(args.contrastive_feature_point_cloud_path,
+                                     smooth_weights=torch.softmax(smooth_weights, dim = -1) if smooth_weights is not None else None,
+                                     smooth_type = 'traditional',
+                                     smooth_K = opt.smooth_K)
     # torch.save(scale_gate.state_dict(), os.path.join(scene.model_path, "point_cloud/iteration_{}/".format(iteration) + "scale_gate.pt"))
-    if args.feature_snapshot_root:
-        final_gate_part = os.path.join(
-            os.path.dirname(final_gate_path), "scale_gate.part.pt"
-        )
-        torch.save(scale_gate.state_dict(), final_gate_part)
-        os.replace(final_gate_part, final_gate_path)
-        final_directory = os.path.dirname(final_feature_path)
-        _write_json_atomic(
-            os.path.join(final_directory, "snapshot.json"),
-            {
-                "kind": "pmr3_scale_training_snapshot",
-                "status": "complete",
-                "iteration": int(opt.iterations),
-                "seed": int(args.seed),
-                "point_count": int(feature_gaussians.get_xyz.shape[0]),
-                "smooth_k": int(opt.smooth_K),
-                "feature_ply": os.path.abspath(final_feature_path),
-                "scale_gate": os.path.abspath(final_gate_path),
-                "optimizer_preserved": False,
-            },
-        )
-        _write_json_atomic(
-            os.path.join(args.feature_snapshot_root, "training_manifest.json"),
-            {
-                "kind": "pmr3_scale_training_trajectory",
-                "status": "training_complete",
-                "seed": int(args.seed),
-                "train_camera_count": int(train_camera_count),
-                "native_iteration": int(native_snapshot_iteration),
-                "final_iteration": int(opt.iterations),
-                "num_sampled_rays": int(opt.num_sampled_rays),
-                "producer_commit": os.environ.get("SAGA_EXPERIMENT_COMMIT"),
-                "source_path": os.path.abspath(args.source_path),
-                "images_path": os.path.abspath(args.images_path),
-                "sparse_path": os.path.abspath(args.sparse_path),
-                "point_cloud_path": os.path.abspath(args.point_cloud_path),
-                "masks_path": os.path.abspath(args.masks_path),
-                "labels_path": os.path.abspath(args.labels_path),
-                "label_features_path": os.path.abspath(args.label_features_path),
-                "mask_scales_path": os.path.abspath(args.mask_scales_path),
-                "smooth_k": int(opt.smooth_K),
-                "native_snapshot": _native_snapshot_directory(
-                    args.feature_snapshot_root, native_snapshot_iteration
-                ),
-                "final_snapshot": os.path.abspath(final_directory),
-            },
-        )
-    else:
-        torch.save(scale_gate.state_dict(), final_gate_path)
+    torch.save(scale_gate.state_dict(), args.scale_gate_path)
 
 def prepare_output_and_logger(args):    
     if not args.model_path:
@@ -741,17 +474,8 @@ def main():
         parser = ArgumentParser(description="Training script parameters")
         lp = ModelParams(parser)
         op = OptimizationParams(parser)
-        # Feature training historically used an adaptive camera-count budget.
-        # Keep it independent from the 30k default required by scene training.
-        parser.set_defaults(iterations=0)
         pp = PipelineParams(parser)
         parser.add_argument("--progress_path", type=str, required=True)
-        parser.add_argument("--seed", type=int, default=0)
-        parser.add_argument("--feature_snapshot_root", type=str, default="")
-        parser.add_argument("--semantic_masks_path", type=str, default="")
-        parser.add_argument("--semantic_labels_path", type=str, default="")
-        parser.add_argument("--semantic_mask_scales_path", type=str, default="")
-        parser.add_argument("--semantic_label_features_path", type=str, default="")
         parser.add_argument('--ip', type=str, default="127.0.0.1")
         parser.add_argument('--port', type=int, default=np.random.randint(10000, 20000))
         parser.add_argument('--debug_from', type=int, default=-1)
@@ -772,10 +496,6 @@ def main():
 
         # Initialize system state (RNG)
         safe_state(args.quiet)
-        random.seed(args.seed)
-        np.random.seed(args.seed)
-        torch.manual_seed(args.seed)
-        torch.cuda.manual_seed_all(args.seed)
 
         torch.autograd.set_detect_anomaly(args.detect_anomaly)
         training(args, lp.extract(args), op.extract(args), pp.extract(args), args.iteration, args.save_iterations, args.checkpoint_iterations, args.debug_from)

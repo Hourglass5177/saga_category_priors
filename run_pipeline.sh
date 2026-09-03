@@ -2,8 +2,6 @@
 
 set -euo pipefail
 
-# This entrypoint is deployed directly to Linux; keep it LF-normalized.
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 python_bin=""
 
@@ -24,60 +22,13 @@ scale_gate_path=""
 json_path=""
 progress_path=""
 render_path=""
+stage_trace_path=""
+candidate_bank_path=""
 
-prior_config=""
-prior_mapping_config=""
-prior_mode="off"
-prior_gate="on"
-prior_shrink="on"
-prior_metadata_path=""
-max_contributor_cache_path=""
 scene_scale_m_per_unit="0"
 seed=42
+min_cluster_size=10
 disable_other_classes=0
-minimal_metadata=0
-clustering_mode="legacy"
-class_prior_mode="uniform"
-category_priors=""
-class_first_config=""
-legacy_prior_config=""
-legacy_prior_mode="uniform"
-legacy_prior_score="unit"
-legacy_prior_semantic_source="gaussian"
-teacher_prior_mode="original"
-teacher_category_params=""
-teacher_evidence_protection="off"
-v3_shadow_mode="off"
-v3_shadow_output=""
-v3_branch_labels_output=""
-v3_shadow_git_commit=""
-v3_shadow_scene_id=""
-v4_candidate_mode="off"
-v4_candidate_output=""
-v4_candidate_labels_output=""
-v4_git_commit=""
-v4_scene_id=""
-v5_candidate_source="off"
-v5_candidate_output=""
-v5_candidate_labels_output=""
-v5_git_commit=""
-v5_scene_id=""
-v6_candidate_mode="off"
-v6_candidate_output=""
-v6_candidate_labels_output=""
-v6_git_commit=""
-v6_scene_id=""
-v7_causal_ablation="L0"
-category_denoise_action="off"
-category_denoise_bank_path=""
-category_candidate_trace_path=""
-category_candidate_sample_cap=5000
-category_candidate_score_threshold="0.20"
-category_cluster_audit_path=""
-category_cluster_conditions=()
-category_cluster_verify_determinism=0
-category_denoise_mode="uniform"
-category_denoise_scene_id=""
 
 sam_checkpoint_path="${SCRIPT_DIR}/weights/sam_vit_h_4b8939.pth"
 groundingdino_checkpoint_path="${SCRIPT_DIR}/weights/groundingdino_swint_ogc.pth"
@@ -87,9 +38,6 @@ sh_degree=0
 feature_dim=32
 downsample=1
 num_sampled_rays=1000
-feature_iterations=0
-feature_snapshot_root=""
-feature_seed=0
 
 usage() {
     cat <<EOF
@@ -124,76 +72,13 @@ Core options:
   --progress-path PATH
   --render-path PATH
 
-Category-prior postprocess options:
-  --prior-config PATH
-  --prior-mapping-config PATH
-  --prior-mode MODE              off|global|size|smooth|small|size-smooth|size-small|smooth-small|combined
-  --prior-gate MODE              on|off (default: on)
-  --prior-shrink MODE            on|off (default: on)
-  --prior-metadata-path PATH     Default: BASE/saga/output.json.metadata.json
-  --max-contributor-cache-path PATH  Shared cache for config-invariant renders
-  --scene-scale-m-per-unit FLOAT Required and positive when priors are enabled
-  --seed INT                     Default: 42
-  --disable-other-classes        Registered B0; default is B1-compatible enabled
-  --minimal-metadata             Omit per-artifact hashes in locked-run metadata
-
-Class-first postprocess options:
-  --clustering-mode MODE         legacy|class-first|legacy-prior
-  --class-prior-mode MODE        uniform|size|smooth|small|combined
-  --category-priors PATH
-  --class-first-config PATH
-  --legacy-prior-config PATH
-  --legacy-prior-mode MODE       uniform|size|smooth|small|combined
-  --legacy-prior-score MODE      unit|vote|assignment
-  --legacy-prior-semantic-source MODE  gaussian|vote
-
-Teacher-prior postprocess options:
-  --teacher-prior-mode MODE      off|original|all-uniform|size|smooth|small|combined
-  --teacher-category-params PATH Shared train-only category statistics/parameters
-  --teacher-evidence-protection MODE  off|multi-anchor
-
-V3 shadow audit options:
-  --v3-shadow-mode MODE          off|exact|exclusive|both
-  --v3-shadow-output PATH
-  --v3-branch-labels-output PATH
-  --v3-shadow-git-commit COMMIT
-  --v3-shadow-scene-id SCENE
-
-V4 candidate shadow options:
-  --v4-candidate-mode MODE       off|uniform|class-scale|class-core|combined
-  --v4-candidate-output PATH
-  --v4-candidate-labels-output PATH
-  --v4-git-commit COMMIT
-  --v4-scene-id SCENE
-
-V5 proposal-bank options:
-  --v5-candidate-source SOURCE  off|codebook|multiview
-  --v5-candidate-output PATH
-  --v5-candidate-labels-output PATH
-  --v5-git-commit COMMIT
-  --v5-scene-id SCENE
-
-V6 affinity-first proposal-bank options:
-  --v6-candidate-mode MODE      off|affinity-first
-  --v6-candidate-output PATH
-  --v6-candidate-labels-output PATH
-  --v6-git-commit COMMIT
-  --v6-scene-id SCENE
-
-All-category denoising options:
-  --category-denoise-action MODE  off|bank|candidate-repair|cluster-bank|replay|candidate-replay
-  --category-denoise-bank-path PATH
-  --category-candidate-trace-path PATH
-  --category-candidate-sample-cap INT  Default: 5000; only 10000 in the registered nested-sampling control
-  --category-candidate-score-threshold FLOAT  Frozen DEV2 U threshold for candidate-replay
-  --category-cluster-audit-path PATH  Required raw-label identity sidecar for cluster-bank
-  --category-cluster-condition MODE  Repeatable: R0-legacy|
-                                     R1-corrected-distance-legacy-expand|
-                                     R2-corrected-distance-anchored-expand|
-                                     G1-mutual-local-graph
-  --category-cluster-verify-determinism  Rebuild and compare the full family (DEV2 only)
-  --category-denoise-mode MODE    uniform|class
-  --category-denoise-scene-id SCENE
+Postprocess options:
+  --seed INT                    Default: 42
+  --min-cluster-size INT        Global HDBSCAN minimum cluster size (default: 10)
+  --disable-other-classes       Run the B0 global-only condition
+  --stage-trace-path PATH       Optional read-only stage trace
+  --candidate-bank-path PATH    Optional all-category CandidateBank capture
+  --scene-scale-m-per-unit NUM  Required and positive for CandidateBank capture
 
 Model options:
   --sam-checkpoint-path PATH
@@ -201,30 +86,22 @@ Model options:
   --groundingdino-config-path PATH
 
 Tunables:
-  --sh-degree INT          Default: 0
-  --feature-dim INT        Default: 32
-  --downsample INT         Default: 1
-  --num-sampled-rays INT   Default: 1000
-  --feature-iterations INT Default: 0 (adaptive: min(10 * cameras, 10000))
-  --feature-snapshot-root PATH Save the native-budget checkpoint during a longer feature run
-  --feature-seed INT       Default: 0 (the historical trainer default)
-  -h, --help               Show this help message
+  --sh-degree INT               Default: 0
+  --feature-dim INT             Default: 32
+  --downsample INT              Default: 1
+  --num-sampled-rays INT        Default: 1000
+  -h, --help                    Show this help message
 
 Examples:
   bash run_pipeline.sh --base-path data/temp/suzongbangongshi
-  bash run_pipeline.sh --base-path data/temp/suzongbangongshi --stage train
-  bash run_pipeline.sh --base-path data/temp/suzongbangongshi --stage render
-  bash run_pipeline.sh --base-path data/temp/suzongbangongshi --stage gui
+  bash run_pipeline.sh --base-path data/temp/suzongbangongshi --stage postprocess
+  bash run_pipeline.sh --base-path data/temp/suzongbangongshi --stage postprocess --disable-other-classes
 EOF
 }
 
 err() {
     echo "Error: $*" >&2
     exit 1
-}
-
-require_command() {
-    command -v "$1" >/dev/null 2>&1 || err "Required command not found: $1"
 }
 
 find_python() {
@@ -253,6 +130,12 @@ ensure_parent_dir() {
     mkdir -p "$(dirname "$1")"
 }
 
+is_positive_number() {
+    "$python_bin" -c \
+        'import math, sys; value = float(sys.argv[1]); raise SystemExit(0 if math.isfinite(value) and value > 0 else 1)' \
+        "$1"
+}
+
 resolve_defaults() {
     [[ -n "$base_path" ]] || err "--base-path is required"
 
@@ -277,14 +160,9 @@ resolve_defaults() {
     : "${json_path:=${base_path}/saga/output.json}"
     : "${progress_path:=${base_path}/saga/progress}"
     : "${render_path:=${base_path}/saga/render}"
-    : "${prior_metadata_path:=${json_path}.metadata.json}"
 }
 
 print_config() {
-    local cluster_conditions_display="<default:R0/R1/R2>"
-    if (( ${#category_cluster_conditions[@]} > 0 )); then
-        cluster_conditions_display="${category_cluster_conditions[*]}"
-    fi
     cat <<EOF
 Resolved configuration:
   python_bin: $python_bin
@@ -302,28 +180,12 @@ Resolved configuration:
   json_path: $json_path
   progress_path: $progress_path
   render_path: $render_path
-  prior_config: $prior_config
-  prior_mapping_config: $prior_mapping_config
-  prior_mode: $prior_mode
-  prior_gate: $prior_gate
-  prior_shrink: $prior_shrink
-  prior_metadata_path: $prior_metadata_path
-  max_contributor_cache_path: $max_contributor_cache_path
+  stage_trace_path: $stage_trace_path
+  candidate_bank_path: $candidate_bank_path
   scene_scale_m_per_unit: $scene_scale_m_per_unit
   seed: $seed
+  min_cluster_size: $min_cluster_size
   disable_other_classes: $disable_other_classes
-  clustering_mode: $clustering_mode
-  class_prior_mode: $class_prior_mode
-  category_priors: $category_priors
-  class_first_config: $class_first_config
-  teacher_prior_mode: $teacher_prior_mode
-  teacher_category_params: $teacher_category_params
-  category_denoise_action: $category_denoise_action
-  category_denoise_bank_path: $category_denoise_bank_path
-  category_denoise_scene_id: $category_denoise_scene_id
-  category_cluster_audit_path: $category_cluster_audit_path
-  category_cluster_conditions: $cluster_conditions_display
-  category_cluster_verify_determinism: $category_cluster_verify_determinism
   sam_checkpoint_path: $sam_checkpoint_path
   groundingdino_checkpoint_path: $groundingdino_checkpoint_path
   groundingdino_config_path: $groundingdino_config_path
@@ -331,9 +193,6 @@ Resolved configuration:
   feature_dim: $feature_dim
   downsample: $downsample
   num_sampled_rays: $num_sampled_rays
-  feature_iterations: $feature_iterations
-  feature_snapshot_root: $feature_snapshot_root
-  feature_seed: $feature_seed
 EOF
 }
 
@@ -402,76 +261,27 @@ preflight_stage() {
             ensure_parent_dir "$progress_path"
             ;;
         postprocess)
+            require_dir "$images_path" "Images directory"
+            require_dir "$sparse_path" "Sparse directory"
+            require_file "$point_cloud_path" "Point cloud"
+            require_dir "$masks_path" "Masks directory"
+            require_dir "$labels_path" "Labels directory"
+            require_dir "$mask_scales_path" "Mask scales directory"
             require_file "$contrastive_feature_point_cloud_path" "Contrastive feature point cloud"
             require_file "$scale_gate_path" "Scale gate weights"
+            if [[ "$disable_other_classes" -eq 0 || -n "$candidate_bank_path" ]]; then
+                require_file "$label_features_path" "Label features file"
+            fi
+            if [[ -n "$candidate_bank_path" ]]; then
+                is_positive_number "$scene_scale_m_per_unit" \
+                    || err "--candidate-bank-path requires positive --scene-scale-m-per-unit"
+                ensure_parent_dir "$candidate_bank_path"
+            fi
+            if [[ -n "$stage_trace_path" ]]; then
+                ensure_parent_dir "$stage_trace_path"
+            fi
             ensure_parent_dir "$json_path"
             ensure_parent_dir "$progress_path"
-            ensure_parent_dir "$prior_metadata_path"
-            if [[ "$clustering_mode" == "class-first" ]]; then
-                require_file "$label_features_path" "Label features file"
-                require_file "$category_priors" "Category priors"
-                require_file "$class_first_config" "Class-first config"
-            else
-                require_dir "$images_path" "Images directory"
-                require_dir "$sparse_path" "Sparse directory"
-                require_file "$point_cloud_path" "Point cloud"
-                require_dir "$masks_path" "Masks directory"
-                require_dir "$labels_path" "Labels directory"
-                require_dir "$mask_scales_path" "Mask scales directory"
-                if [[ "$disable_other_classes" -eq 0 || "$prior_mode" != "off" ]]; then
-                    require_file "$label_features_path" "Label features file"
-                else
-                    ensure_parent_dir "$label_features_path"
-                fi
-                if [[ "$prior_mode" != "off" ]]; then
-                    require_file "$prior_config" "Category priors"
-                    require_file "$prior_mapping_config" "Prior mapping config"
-                fi
-                if [[ "$clustering_mode" == "legacy-prior" ]]; then
-                    require_file "$category_priors" "Category priors"
-                    require_file "$legacy_prior_config" "Legacy-prior config"
-                fi
-                case "$teacher_prior_mode" in
-                    all-uniform|size|smooth|small|combined)
-                        require_file "$teacher_category_params" "Teacher category parameters"
-                        ;;
-                esac
-                if [[ "$v3_shadow_mode" != "off" ]]; then
-                    require_file "$label_features_path" "Label features file"
-                    ensure_parent_dir "$v3_shadow_output"
-                    ensure_parent_dir "$v3_branch_labels_output"
-                fi
-                if [[ "$v4_candidate_mode" != "off" ]]; then
-                    require_file "$label_features_path" "Label features file"
-                    require_file "$category_priors" "Category priors"
-                    ensure_parent_dir "$v4_candidate_output"
-                    ensure_parent_dir "$v4_candidate_labels_output"
-                fi
-                if [[ "$v5_candidate_source" != "off" ]]; then
-                    require_file "$label_features_path" "Label features file"
-                    ensure_parent_dir "$v5_candidate_output"
-                    ensure_parent_dir "$v5_candidate_labels_output"
-                fi
-                if [[ "$v6_candidate_mode" != "off" ]]; then
-                    require_file "$label_features_path" "Label features file"
-                    ensure_parent_dir "$v6_candidate_output"
-                    ensure_parent_dir "$v6_candidate_labels_output"
-                fi
-                if [[ "$category_denoise_action" != "off" ]]; then
-                    require_file "$label_features_path" "Label features file"
-                    require_file "$category_priors" "Category priors"
-                    [[ -n "$category_denoise_bank_path" ]] || err "--category-denoise-bank-path is required"
-                    ensure_parent_dir "$category_denoise_bank_path"
-                    if [[ "$category_denoise_action" == "candidate-repair" ]]; then
-                        [[ -n "$category_candidate_trace_path" ]] || err "--category-candidate-trace-path is required"
-                        ensure_parent_dir "$category_candidate_trace_path"
-                    fi
-                    if [[ "$category_denoise_action" == "cluster-bank" ]]; then
-                        [[ -n "$category_cluster_audit_path" ]] || err "--category-cluster-audit-path is required"
-                        ensure_parent_dir "$category_cluster_audit_path"
-                    fi
-                fi
-            fi
             ;;
         render)
             require_dir "$images_path" "Images directory"
@@ -520,10 +330,6 @@ run_scale() {
 
 run_train() {
     echo "Running stage: train"
-    local snapshot_args=()
-    if [[ -n "$feature_snapshot_root" ]]; then
-        snapshot_args+=(--feature_snapshot_root "$feature_snapshot_root")
-    fi
     "$python_bin" "${SCRIPT_DIR}/train_contrastive_feature.py" \
         --progress_path "$progress_path" \
         --sh_degree "$sh_degree" \
@@ -537,125 +343,26 @@ run_train() {
         --label_features_path "$label_features_path" \
         --contrastive_feature_point_cloud_path "$contrastive_feature_point_cloud_path" \
         --scale_gate_path "$scale_gate_path" \
-        --num_sampled_rays "$num_sampled_rays" \
-        --iterations "$feature_iterations" \
-        --seed "$feature_seed" \
-        "${snapshot_args[@]}"
+        --num_sampled_rays "$num_sampled_rays"
 }
 
 run_postprocess() {
     echo "Running stage: postprocess"
-    local prior_args=(
-        --prior_mode "$prior_mode"
-        --prior_gate "$prior_gate"
-        --prior_shrink "$prior_shrink"
-        --scene_scale_m_per_unit "$scene_scale_m_per_unit"
+    local postprocess_args=(
         --seed "$seed"
-        --prior_metadata_path "$prior_metadata_path"
-        --teacher-prior-mode "$teacher_prior_mode"
-        --teacher-evidence-protection "$teacher_evidence_protection"
-        --v7-causal-ablation "$v7_causal_ablation"
-        --category-denoise-action "$category_denoise_action"
-        --category-denoise-mode "$category_denoise_mode"
-        --category-candidate-score-threshold "$category_candidate_score_threshold"
+        --min-cluster-size "$min_cluster_size"
+        --scene-scale-m-per-unit "$scene_scale_m_per_unit"
     )
-    if [[ "$category_denoise_action" != "off" ]]; then
-        prior_args+=(
-            --category-denoise-bank-path "$category_denoise_bank_path"
-            --category-denoise-scene-id "$category_denoise_scene_id"
-            --category-priors "$category_priors"
-        )
-        if [[ "$category_denoise_action" == "candidate-repair" ]]; then
-            prior_args+=(
-                --category-candidate-trace-path "$category_candidate_trace_path"
-                --category-candidate-sample-cap "$category_candidate_sample_cap"
-            )
-        fi
-        if [[ "$category_denoise_action" == "cluster-bank" ]]; then
-            prior_args+=(--category-cluster-audit-path "$category_cluster_audit_path")
-            if [[ "$category_cluster_verify_determinism" -eq 1 ]]; then
-                prior_args+=(--category-cluster-verify-determinism)
-            fi
-            local cluster_condition
-            for cluster_condition in "${category_cluster_conditions[@]}"; do
-                prior_args+=(--category-cluster-condition "$cluster_condition")
-            done
-        fi
-    fi
-    if [[ "$prior_mode" != "off" ]]; then
-        prior_args+=(
-            --prior_config "$prior_config"
-            --prior_mapping_config "$prior_mapping_config"
-        )
-    fi
     if [[ "$disable_other_classes" -eq 1 ]]; then
-        prior_args+=(--disable_other_classes)
+        postprocess_args+=(--disable-other-classes)
     fi
-    if [[ -n "$max_contributor_cache_path" ]]; then
-        prior_args+=(--max_contributor_cache_path "$max_contributor_cache_path")
+    if [[ -n "$stage_trace_path" ]]; then
+        postprocess_args+=(--stage-trace-path "$stage_trace_path")
     fi
-    if [[ "$minimal_metadata" -eq 1 ]]; then
-        prior_args+=(--minimal_metadata)
+    if [[ -n "$candidate_bank_path" ]]; then
+        postprocess_args+=(--candidate-bank-path "$candidate_bank_path")
     fi
-    case "$teacher_prior_mode" in
-        all-uniform|size|smooth|small|combined)
-            prior_args+=(--teacher-category-params "$teacher_category_params")
-            ;;
-    esac
-    if [[ "$v3_shadow_mode" != "off" ]]; then
-        prior_args+=(
-            --v3-shadow-mode "$v3_shadow_mode"
-            --v3-shadow-output "$v3_shadow_output"
-            --v3-branch-labels-output "$v3_branch_labels_output"
-            --v3-shadow-git-commit "$v3_shadow_git_commit"
-            --v3-shadow-scene-id "$v3_shadow_scene_id"
-        )
-    fi
-    if [[ "$v4_candidate_mode" != "off" ]]; then
-        prior_args+=(
-            --v4-candidate-mode "$v4_candidate_mode"
-            --category-priors "$category_priors"
-            --v4-candidate-output "$v4_candidate_output"
-            --v4-candidate-labels-output "$v4_candidate_labels_output"
-            --v4-git-commit "$v4_git_commit"
-            --v4-scene-id "$v4_scene_id"
-        )
-    fi
-    if [[ "$v5_candidate_source" != "off" ]]; then
-        prior_args+=(
-            --v5-candidate-source "$v5_candidate_source"
-            --v5-candidate-output "$v5_candidate_output"
-            --v5-candidate-labels-output "$v5_candidate_labels_output"
-            --v5-git-commit "$v5_git_commit"
-            --v5-scene-id "$v5_scene_id"
-        )
-    fi
-    if [[ "$v6_candidate_mode" != "off" ]]; then
-        prior_args+=(
-            --v6-candidate-mode "$v6_candidate_mode"
-            --v6-candidate-output "$v6_candidate_output"
-            --v6-candidate-labels-output "$v6_candidate_labels_output"
-            --v6-git-commit "$v6_git_commit"
-            --v6-scene-id "$v6_scene_id"
-        )
-    fi
-    if [[ "$clustering_mode" == "class-first" ]]; then
-        prior_args+=(
-            --clustering-mode "$clustering_mode"
-            --class-prior-mode "$class_prior_mode"
-            --category-priors "$category_priors"
-            --class-first-config "$class_first_config"
-        )
-    elif [[ "$clustering_mode" == "legacy-prior" ]]; then
-        prior_args+=(
-            --clustering-mode "$clustering_mode"
-            --category-priors "$category_priors"
-            --legacy-prior-config "$legacy_prior_config"
-            --legacy-prior-mode "$legacy_prior_mode"
-            --legacy-prior-score "$legacy_prior_score"
-            --legacy-prior-semantic-source "$legacy_prior_semantic_source"
-        )
-    fi
+
     "$python_bin" "${SCRIPT_DIR}/postprocess.py" \
         --progress_path "$progress_path" \
         --sh_degree "$sh_degree" \
@@ -670,7 +377,7 @@ run_postprocess() {
         --contrastive_feature_point_cloud_path "$contrastive_feature_point_cloud_path" \
         --scale_gate_path "$scale_gate_path" \
         --json_path "$json_path" \
-        "${prior_args[@]}"
+        "${postprocess_args[@]}"
 }
 
 run_render() {
@@ -762,32 +469,12 @@ while [[ $# -gt 0 ]]; do
             render_path="$2"
             shift 2
             ;;
-        --prior-config)
-            prior_config="$2"
+        --stage-trace-path)
+            stage_trace_path="$2"
             shift 2
             ;;
-        --prior-mapping-config)
-            prior_mapping_config="$2"
-            shift 2
-            ;;
-        --prior-mode)
-            prior_mode="$2"
-            shift 2
-            ;;
-        --prior-gate)
-            prior_gate="$2"
-            shift 2
-            ;;
-        --prior-shrink)
-            prior_shrink="$2"
-            shift 2
-            ;;
-        --prior-metadata-path)
-            prior_metadata_path="$2"
-            shift 2
-            ;;
-        --max-contributor-cache-path)
-            max_contributor_cache_path="$2"
+        --candidate-bank-path)
+            candidate_bank_path="$2"
             shift 2
             ;;
         --scene-scale-m-per-unit)
@@ -798,181 +485,13 @@ while [[ $# -gt 0 ]]; do
             seed="$2"
             shift 2
             ;;
+        --min-cluster-size)
+            min_cluster_size="$2"
+            shift 2
+            ;;
         --disable-other-classes)
             disable_other_classes=1
             shift
-            ;;
-        --minimal-metadata)
-            minimal_metadata=1
-            shift
-            ;;
-        --clustering-mode)
-            clustering_mode="$2"
-            shift 2
-            ;;
-        --class-prior-mode)
-            class_prior_mode="$2"
-            shift 2
-            ;;
-        --category-priors)
-            category_priors="$2"
-            shift 2
-            ;;
-        --class-first-config)
-            class_first_config="$2"
-            shift 2
-            ;;
-        --legacy-prior-config)
-            legacy_prior_config="$2"
-            shift 2
-            ;;
-        --legacy-prior-mode)
-            legacy_prior_mode="$2"
-            shift 2
-            ;;
-        --legacy-prior-score)
-            legacy_prior_score="$2"
-            shift 2
-            ;;
-        --legacy-prior-semantic-source)
-            legacy_prior_semantic_source="$2"
-            shift 2
-            ;;
-        --teacher-prior-mode)
-            teacher_prior_mode="$2"
-            shift 2
-            ;;
-        --teacher-category-params)
-            teacher_category_params="$2"
-            shift 2
-            ;;
-        --teacher-evidence-protection)
-            teacher_evidence_protection="$2"
-            shift 2
-            ;;
-        --v7-causal-ablation)
-            v7_causal_ablation="$2"
-            shift 2
-            ;;
-        --category-denoise-action)
-            category_denoise_action="$2"
-            shift 2
-            ;;
-        --category-denoise-bank-path)
-            category_denoise_bank_path="$2"
-            shift 2
-            ;;
-        --category-candidate-trace-path)
-            category_candidate_trace_path="$2"
-            shift 2
-            ;;
-        --category-candidate-sample-cap)
-            category_candidate_sample_cap="$2"
-            shift 2
-            ;;
-        --category-candidate-score-threshold)
-            category_candidate_score_threshold="$2"
-            shift 2
-            ;;
-        --category-cluster-audit-path)
-            category_cluster_audit_path="$2"
-            shift 2
-            ;;
-        --category-cluster-condition)
-            category_cluster_conditions+=("$2")
-            shift 2
-            ;;
-        --category-cluster-verify-determinism)
-            category_cluster_verify_determinism=1
-            shift
-            ;;
-        --category-denoise-mode)
-            category_denoise_mode="$2"
-            shift 2
-            ;;
-        --category-denoise-scene-id)
-            category_denoise_scene_id="$2"
-            shift 2
-            ;;
-        --v3-shadow-mode)
-            v3_shadow_mode="$2"
-            shift 2
-            ;;
-        --v3-shadow-output)
-            v3_shadow_output="$2"
-            shift 2
-            ;;
-        --v3-branch-labels-output)
-            v3_branch_labels_output="$2"
-            shift 2
-            ;;
-        --v3-shadow-git-commit)
-            v3_shadow_git_commit="$2"
-            shift 2
-            ;;
-        --v3-shadow-scene-id)
-            v3_shadow_scene_id="$2"
-            shift 2
-            ;;
-        --v4-candidate-mode)
-            v4_candidate_mode="$2"
-            shift 2
-            ;;
-        --v4-candidate-output)
-            v4_candidate_output="$2"
-            shift 2
-            ;;
-        --v4-candidate-labels-output)
-            v4_candidate_labels_output="$2"
-            shift 2
-            ;;
-        --v4-git-commit)
-            v4_git_commit="$2"
-            shift 2
-            ;;
-        --v4-scene-id)
-            v4_scene_id="$2"
-            shift 2
-            ;;
-        --v5-candidate-source)
-            v5_candidate_source="$2"
-            shift 2
-            ;;
-        --v5-candidate-output)
-            v5_candidate_output="$2"
-            shift 2
-            ;;
-        --v5-candidate-labels-output)
-            v5_candidate_labels_output="$2"
-            shift 2
-            ;;
-        --v5-git-commit)
-            v5_git_commit="$2"
-            shift 2
-            ;;
-        --v5-scene-id)
-            v5_scene_id="$2"
-            shift 2
-            ;;
-        --v6-candidate-mode)
-            v6_candidate_mode="$2"
-            shift 2
-            ;;
-        --v6-candidate-output)
-            v6_candidate_output="$2"
-            shift 2
-            ;;
-        --v6-candidate-labels-output)
-            v6_candidate_labels_output="$2"
-            shift 2
-            ;;
-        --v6-git-commit)
-            v6_git_commit="$2"
-            shift 2
-            ;;
-        --v6-scene-id)
-            v6_scene_id="$2"
-            shift 2
             ;;
         --sam-checkpoint-path)
             sam_checkpoint_path="$2"
@@ -1002,18 +521,6 @@ while [[ $# -gt 0 ]]; do
             num_sampled_rays="$2"
             shift 2
             ;;
-        --feature-iterations)
-            feature_iterations="$2"
-            shift 2
-            ;;
-        --feature-snapshot-root)
-            feature_snapshot_root="$2"
-            shift 2
-            ;;
-        --feature-seed)
-            feature_seed="$2"
-            shift 2
-            ;;
         -h|--help)
             usage
             exit 0
@@ -1025,60 +532,17 @@ while [[ $# -gt 0 ]]; do
 done
 
 resolve_defaults
-[[ "$feature_iterations" =~ ^[0-9]+$ ]] || err "--feature-iterations must be nonnegative"
-[[ "$feature_seed" =~ ^[0-9]+$ ]] || err "--feature-seed must be nonnegative"
-[[ "$clustering_mode" == "legacy" || "$clustering_mode" == "class-first" \
-    || "$clustering_mode" == "legacy-prior" ]] \
-    || err "--clustering-mode must be legacy, class-first, or legacy-prior"
-if [[ "$clustering_mode" == "class-first" ]]; then
-    case "$class_prior_mode" in
-        uniform|size|smooth|small|combined) ;;
-        *) err "unsupported --class-prior-mode: $class_prior_mode" ;;
-    esac
-fi
-case "$teacher_prior_mode" in
-    off|original|all-uniform|size|smooth|small|combined) ;;
-    *) err "unsupported --teacher-prior-mode: $teacher_prior_mode" ;;
-esac
-case "$teacher_evidence_protection" in
-    off|multi-anchor) ;;
-    *) err "unsupported --teacher-evidence-protection: $teacher_evidence_protection" ;;
-esac
-case "$v3_shadow_mode" in
-    off|exact|exclusive|both) ;;
-    *) err "unsupported --v3-shadow-mode: $v3_shadow_mode" ;;
-esac
-case "$v4_candidate_mode" in
-    off|uniform|class-scale|class-core|combined) ;;
-    *) err "unsupported --v4-candidate-mode: $v4_candidate_mode" ;;
-esac
-case "$v5_candidate_source" in
-    off|codebook|multiview) ;;
-    *) err "unsupported --v5-candidate-source: $v5_candidate_source" ;;
-esac
-case "$v6_candidate_mode" in
-    off|affinity-first) ;;
-    *) err "unsupported --v6-candidate-mode: $v6_candidate_mode" ;;
-esac
-case "$category_denoise_action" in
-    off|bank|candidate-repair|cluster-bank|replay|candidate-replay) ;;
-    *) err "unsupported --category-denoise-action: $category_denoise_action" ;;
-esac
-if [[ "$category_denoise_action" == "cluster-bank" ]]; then
-    for cluster_condition in "${category_cluster_conditions[@]}"; do
-        case "$cluster_condition" in
-            R0-legacy|R1-corrected-distance-legacy-expand|R2-corrected-distance-anchored-expand|G1-mutual-local-graph) ;;
-            *) err "unsupported --category-cluster-condition: $cluster_condition" ;;
-        esac
-    done
-elif [[ -n "$category_cluster_audit_path" || ${#category_cluster_conditions[@]} -gt 0 || "$category_cluster_verify_determinism" -eq 1 ]]; then
-    err "category cluster arguments require --category-denoise-action cluster-bank"
-fi
+
+[[ "$seed" =~ ^[0-9]+$ ]] || err "--seed must be nonnegative"
+[[ "$min_cluster_size" =~ ^[1-9][0-9]*$ ]] || err "--min-cluster-size must be positive"
+[[ "$feature_dim" == "32" ]] || err "the active feature contract requires --feature-dim 32"
+
 if [[ -z "$python_bin" ]]; then
     find_python
 else
     require_file "$python_bin" "Python executable"
 fi
+
 check_python_scripts
 print_config
 

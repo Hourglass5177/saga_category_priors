@@ -307,9 +307,12 @@ except ImportError:
 
 def render_with_max_contributor(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None, filtered_mask = None):
     """
-    Render the scene. 
-    
-    Background tensor (bg_color) must be on GPU!
+    Render the scene and identify the strongest Gaussian at each pixel.
+
+    ``max_contributor`` is the Gaussian ID with the largest alpha-blending
+    contribution ``alpha * T_prev`` and ``max_contribute`` is that weight.
+    Pixels with no valid contribution use the explicit sentinel ``-1 / 0``.
+    Background tensor (bg_color) must be on GPU.
     """
  
     if GaussianRasterizerMaxContributor is None:
@@ -378,7 +381,7 @@ def render_with_max_contributor(viewpoint_camera, pc : GaussianModel, pipe, bg_c
         colors_precomp = override_color
 
     # Rasterize visible Gaussians to image, obtain their radii (on screen). 
-    rendered_image, max_contributor, max_contribute, historical_max_contributor, historical_max_contribute, radii = rasterizer(
+    rendered_image, max_contributor, max_contribute, radii = rasterizer(
         means3D = means3D,
         means2D = means2D,
         shs = shs,
@@ -393,8 +396,6 @@ def render_with_max_contributor(viewpoint_camera, pc : GaussianModel, pipe, bg_c
     return {"render": rendered_image,
             'max_contributor': max_contributor,
             'max_contribute': max_contribute,
-            'historical_max_contributor': historical_max_contributor,
-            'historical_max_contribute': historical_max_contribute,
             "viewspace_points": screenspace_points,
             "visibility_filter" : radii > 0,
             "radii": radii}

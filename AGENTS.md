@@ -1,15 +1,18 @@
 # Repository agent instructions
 
-For any task involving SAGA category priors, teacher-prior experiments, small-object
-protection, ScanNet tune/final evaluation, or continuation of the current research:
+For work on the active SAGA category-prior study:
 
-1. Read `category_priors/TEACHER_PRIOR_V3_EXPERIMENT_PLAN.md` **in full** before
-   editing code, starting a run, or interpreting results.
-2. Treat that document as the single source of truth for condition definitions,
-   stage gates, experimental units, stopping rules, and the current checkpoint.
-3. After completing a stage, update its "当前执行检查点" and "阶段记录" before
-   proceeding.
-4. Do not resume B2, class-first, prior-v2, branch-preservation, or selective-restore
-   workflows unless the active plan explicitly reactivates them.
+1. Read `category_priors/INSTANCE_RECHECK_BASELINE_STANDARD.md` before editing code,
+   starting a run, or interpreting results.
+2. Treat that document as the source of truth for the baseline identity, controlled
+   variables, evaluation protocol, data-leakage boundary, and prohibited workflows.
+3. The active question is the fixed DEV8 3D-candidate-to-2D recheck experiment. Do
+   not resume the retired V3--V10, ObjectBank, clean-baseline, prompt-scale,
+   HDBSCAN-repair, or full-instance-size workflows.
+4. Git history is the archive for retired experimental code. Do not add compatibility
+   adapters or restore old state machines to the active runtime.
+5. Ground truth may enter evaluation and post-hoc viewer selection only. It must not
+   enter candidate construction, projection, crop generation, model inference, or
+   replay decisions.
 
-This file is only a discovery pointer. Do not duplicate the experiment plan here.
+This file is only a discovery pointer; do not duplicate the baseline standard here.

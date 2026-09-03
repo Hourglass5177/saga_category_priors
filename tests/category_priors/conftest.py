@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 
-from category_priors.mapping import DEFAULT_MAPPING_CONFIG
 from category_priors.priors import fit_priors
 from category_priors.taxonomy import load_taxonomy
 
@@ -70,14 +69,3 @@ def fitted_priors(tmp_path: Path) -> dict[str, object]:
 @pytest.fixture()
 def stats_rows() -> list[dict[str, object]]:
     return make_stats_rows()
-
-
-@pytest.fixture()
-def mapping_config() -> dict[str, object]:
-    return {
-        "schema_version": DEFAULT_MAPPING_CONFIG["schema_version"],
-        "kind": DEFAULT_MAPPING_CONFIG["kind"],
-        "baseline": dict(DEFAULT_MAPPING_CONFIG["baseline"]),
-        "coefficients": dict(DEFAULT_MAPPING_CONFIG["coefficients"]),
-        "fixed": dict(DEFAULT_MAPPING_CONFIG["fixed"]),
-    }

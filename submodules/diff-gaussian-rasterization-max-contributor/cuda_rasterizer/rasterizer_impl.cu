@@ -219,8 +219,6 @@ int CudaRasterizer::Rasterizer::forward(
 	int* radii,
 	int* max_contributor,
 	float* max_contribute,
-	int* historical_max_contributor,
-	float* historical_max_contribute,
 	bool debug)
 {
 	const float focal_y = height / (2.0f * tan_fovy);
@@ -242,15 +240,6 @@ int CudaRasterizer::Rasterizer::forward(
 	size_t img_chunk_size = required<ImageState>(width * height);
 	char* img_chunkptr = imageBuffer(img_chunk_size);
 	ImageState imgState = ImageState::fromChunk(img_chunkptr, width * height);
-
-	if (max_contributor == nullptr)
-	{
-		max_contributor = imgState.max_contributor;
-	}
-	if (max_contribute == nullptr)
-	{
-		max_contribute = imgState.max_contribute;
-	}
 
 	if (NUM_CHANNELS != 3 && colors_precomp == nullptr)
 	{
@@ -344,8 +333,6 @@ int CudaRasterizer::Rasterizer::forward(
 		imgState.n_contrib,
 		max_contributor,
 		max_contribute,
-		historical_max_contributor,
-		historical_max_contribute,
 		background,
 		out_color), debug)
 

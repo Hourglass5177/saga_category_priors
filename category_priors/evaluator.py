@@ -12,8 +12,35 @@ from .io import hash_json, load_json, sha256_file, write_json
 from .instance_projection import project_declared_instances
 from .taxonomy import Taxonomy
 
-OVERLAPS = tuple(np.arange(0.50, 0.96, 0.05).round(2).tolist())
-PROTOCOL_VERSION = "scannet-official-instance-v1"
+SCANNET_OFFICIAL_OVERLAPS = tuple(
+    np.arange(0.50, 0.95, 0.05).round(2).tolist()
+)
+HISTORICAL_10_OVERLAPS = (*SCANNET_OFFICIAL_OVERLAPS, 0.95)
+# Backwards-compatible import name. Its value is now the actual ScanNet
+# protocol: nine thresholds from 0.50 through 0.90, with AP25 reported
+# separately.
+OVERLAPS = SCANNET_OFFICIAL_OVERLAPS
+PROTOCOL_VERSION = "scannet-official-instance-v2"
+
+
+def _evaluation_profile(
+    overlaps: Sequence[float],
+) -> tuple[str, str, str]:
+    """Return an unambiguous profile and mean-metric names.
+
+    The repository historically averaged ten thresholds through 0.95 and
+    called that result ScanNet official mAP. ScanNet's benchmark script stops
+    at 0.90. Keep the old ten-threshold view available for comparisons, but
+    label it explicitly as historical so it cannot be mistaken for the main
+    protocol again.
+    """
+
+    normalized = tuple(round(float(value), 2) for value in overlaps)
+    if normalized == SCANNET_OFFICIAL_OVERLAPS:
+        return "official_9", "map_50_90", "ap_50_90"
+    if normalized == HISTORICAL_10_OVERLAPS:
+        return "historical_10", "historical_map_50_95", "historical_ap_50_95"
+    return "custom", "map_mean", "ap_mean"
 
 
 @dataclass(frozen=True)
@@ -126,8 +153,20 @@ def saga_scene_predictions(
     diagnostics["gt_nearest_declared_fraction"] = (
         float(np.mean(mapped_labels >= 0)) if len(mapped_labels) else 0.0
     )
-    metadata = load_json(metadata_json) if metadata_json else {"instances": {}}
-    metadata_instances = metadata.get("instances", {})
+    # ``output.json`` is the sole prediction truth.  A legacy metadata sidecar
+    # may be supplied for read-only consistency checking, but it can never
+    # provide or override the class/score used by evaluation.
+    metadata = load_json(metadata_json) if metadata_json else None
+    metadata_instances = metadata.get("instances", {}) if metadata else {}
+    if metadata is not None:
+        output_ids = {str(int(value)) for value in output_instances if int(value) >= 0}
+        metadata_ids = {
+            str(int(value)) for value in metadata_instances if int(value) >= 0
+        }
+        if metadata_ids != output_ids:
+            raise ValueError(
+                f"{scene_id}: output and legacy metadata declare different instances"
+            )
     class_to_id = {name: index for index, name in enumerate(taxonomy.canonical_classes)}
     predictions: list[PredictedInstance] = []
     for raw_instance_id, properties in output_instances.items():
@@ -137,21 +176,28 @@ def saga_scene_predictions(
         class_name = str(properties.get("class", "")).strip().lower()
         if class_name not in class_to_id:
             continue
-        meta = metadata_instances.get(
-            str(instance_id), metadata_instances.get(instance_id, {})
-        )
-        if "score" not in meta and require_scores:
+        if "score" not in properties and require_scores:
             raise ValueError(
                 f"{scene_id}: instance {instance_id} is missing an AP score"
             )
-        metadata_class = str(meta.get("class", class_name)).strip().lower()
-        if metadata_class != class_name:
-            raise ValueError(
-                f"{scene_id}: instance {instance_id} class mismatch between output and metadata"
-            )
-        score = float(meta.get("score", 1.0))
+        score = float(properties.get("score", 1.0))
         if not math.isfinite(score) or not 0.0 <= score <= 1.0:
             raise ValueError(f"{scene_id}: invalid instance score {score}")
+        if metadata is not None:
+            meta = metadata_instances.get(
+                str(instance_id), metadata_instances.get(instance_id, {})
+            )
+            metadata_class = str(meta.get("class", "")).strip().lower()
+            if metadata_class != class_name:
+                raise ValueError(
+                    f"{scene_id}: instance {instance_id} class mismatch between output and metadata"
+                )
+            if "score" not in meta or not math.isclose(
+                float(meta["score"]), score, rel_tol=0.0, abs_tol=1e-12
+            ):
+                raise ValueError(
+                    f"{scene_id}: instance {instance_id} score mismatch between output and metadata"
+                )
         predictions.append(
             PredictedInstance(
                 scene_id=scene_id,
@@ -453,6 +499,10 @@ def evaluate_instances(
     overlaps: Sequence[float] = OVERLAPS,
     min_region_size: int = 100,
 ) -> dict[str, Any]:
+    overlaps = tuple(float(value) for value in overlaps)
+    evaluation_profile, aggregate_mean_key, class_mean_key = _evaluation_profile(
+        overlaps
+    )
     gt_by_scene = {scene.scene_id: scene for scene in ground_truth}
     if len(gt_by_scene) != len(ground_truth):
         raise ValueError("Ground-truth scene ids must be unique")
@@ -505,7 +555,7 @@ def evaluate_instances(
             )
             class_result[f"ap_{threshold:.2f}"] = ap
         valid_main = [class_result[f"ap_{threshold:.2f}"] for threshold in overlaps]
-        class_result["ap_50_95"] = (
+        class_result[class_mean_key] = (
             float(np.mean([value for value in valid_main if value is not None]))
             if any(value is not None for value in valid_main)
             else None
@@ -520,7 +570,7 @@ def evaluate_instances(
         finite = [float(value) for value in values if value is not None]
         aggregate[f"map_{threshold:.2f}"] = float(np.mean(finite)) if finite else None
     main_values = [aggregate[f"map_{threshold:.2f}"] for threshold in overlaps]
-    aggregate["map_50_95"] = (
+    aggregate[aggregate_mean_key] = (
         float(np.mean([value for value in main_values if value is not None]))
         if any(value is not None for value in main_values)
         else None
@@ -529,6 +579,8 @@ def evaluate_instances(
         "schema_version": "1.0",
         "protocol": "ScanNet200-SAGA20",
         "protocol_version": PROTOCOL_VERSION,
+        "evaluation_profile": evaluation_profile,
+        "primary_metric": aggregate_mean_key,
         "overlaps": list(overlaps),
         "min_region_size": min_region_size,
         "aggregate": aggregate,
@@ -555,13 +607,14 @@ def evaluate_manifest(
         scene_id = str(item["scene_id"])
         gt_path = base / item["gt_npz"]
         coords, gt_scene = load_ground_truth_npz(gt_path, scene_id)
+        metadata_value = item.get("metadata_json")
         scene_predictions, scene_diagnostics = saga_scene_predictions(
             scene_id=scene_id,
             gt_coords=coords,
             output_json=base / item["output_json"],
             gaussian_ply=base / item["gaussian_ply"],
             taxonomy=taxonomy,
-            metadata_json=base / item["metadata_json"],
+            metadata_json=(base / metadata_value) if metadata_value else None,
             transform=item["gaussian_to_gt_transform"],
             radius_m=radius_m,
             require_scores=True,

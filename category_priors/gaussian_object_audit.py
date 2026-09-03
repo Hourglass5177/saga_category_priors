@@ -25,10 +25,9 @@ from .evaluator import (
     saga_scene_predictions,
 )
 from .io import load_json, write_json, write_rows
-from .locked import SMALL_CATEGORIES
-from .runner import load_scene_runtime_manifest
+from .scene_manifest import load_scene_runtime_manifest
 from .taxonomy import Taxonomy
-from .viewer_materials import _condition_slug, _write_colored_ply
+from .viewer_io import condition_slug, write_colored_ply
 
 
 CORRECT_COLOR = np.asarray((52, 199, 89), dtype=np.uint8)
@@ -36,6 +35,15 @@ SAME_CLASS_WRONG_INSTANCE_COLOR = np.asarray((255, 203, 64), dtype=np.uint8)
 WRONG_CLASS_COLOR = np.asarray((230, 68, 68), dtype=np.uint8)
 UNSUPPORTED_COLOR = np.asarray((112, 112, 112), dtype=np.uint8)
 GT_COLOR = np.asarray((56, 132, 255), dtype=np.uint8)
+SMALL_CATEGORIES = (
+    "cup",
+    "switch",
+    "book",
+    "phone",
+    "speaker",
+    "lamp",
+    "trash can",
+)
 
 
 def _gaussian_ply(scene: Mapping[str, Any]) -> Path:
@@ -396,9 +404,9 @@ def _select_viewer_cases(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         reverse=True,
     )
     add(
-        "b1_changed",
-        [row for row in rows if row["condition"] == "B1-other-classes"],
-        key=lambda row: float(row.get("changed_fraction_vs_b0", 0.0)),
+        "changed_vs_reference",
+        [row for row in rows if float(row.get("changed_fraction_vs_reference", 0.0)) > 0],
+        key=lambda row: float(row.get("changed_fraction_vs_reference", 0.0)),
         reverse=True,
     )
     for index, row in enumerate(rows):
@@ -429,22 +437,22 @@ def _export_viewer_case(
         )
     gt_points = gt_xyz[gt_mask]
     case_dir = (
-        output_dir / str(case["scene_id"]) / _condition_slug(str(case["condition"]))
+        output_dir / str(case["scene_id"]) / condition_slug(str(case["condition"]))
         / f"{case['role']}-instance-{instance_id}"
     )
-    _write_colored_ply(
+    write_colored_ply(
         case_dir / "predicted_gaussians.ply",
         gaussian_xyz[predicted_indices].astype(np.float32),
         colors,
     )
-    _write_colored_ply(
+    write_colored_ply(
         case_dir / "matched_gt_points.ply",
         gt_points.astype(np.float32),
         np.tile(GT_COLOR, (len(gt_points), 1)),
     )
     overlay_xyz = np.concatenate((gaussian_xyz[predicted_indices], gt_points), axis=0)
     overlay_rgb = np.concatenate((colors, np.tile(GT_COLOR, (len(gt_points), 1))), axis=0)
-    _write_colored_ply(
+    write_colored_ply(
         case_dir / "overlay.ply", overlay_xyz.astype(np.float32), overlay_rgb
     )
     metrics = {
@@ -478,6 +486,10 @@ def audit_gaussian_object_runs(
     radius_m: float = 0.05,
     min_region_size: int = 100,
 ) -> dict[str, Any]:
+    condition_names = tuple(map(str, conditions))
+    if not condition_names:
+        raise ValueError("at least one condition is required")
+    reference_condition = condition_names[0]
     runtime = load_scene_runtime_manifest(scene_manifest)
     gt_root = Path(gt_dir)
     runs = Path(runs_root)
@@ -493,7 +505,7 @@ def audit_gaussian_object_runs(
         gaussian_xyz = apply_transform(load_ply_xyz(_gaussian_ply(scene)), _transform(scene))
         scene_arrays[scene_id] = (gt_xyz, gt.semantic, gt.instance, gaussian_xyz)
         reference_classes: np.ndarray | None = None
-        for condition in map(str, conditions):
+        for condition in condition_names:
             output_path, metadata_path = _prediction_path(runs, condition, scene_id, seed)
             if not metadata_path.is_file():
                 raise FileNotFoundError(
@@ -520,7 +532,7 @@ def audit_gaussian_object_runs(
                 class_id, _ = _class_id(payload, taxonomy.canonical_classes)
                 if class_id >= 0:
                     class_by_point[point_labels == instance_id] = class_id
-            if condition == "B0-legacy":
+            if condition == reference_condition:
                 reference_classes = class_by_point
             for row in audit["instances"]:
                 enriched = {
@@ -529,13 +541,13 @@ def audit_gaussian_object_runs(
                     "seed": int(seed),
                     **row,
                 }
-                if reference_classes is not None and condition == "B1-other-classes":
+                if reference_classes is not None and condition != reference_condition:
                     mask = point_labels == int(row["instance_id"])
-                    enriched["changed_fraction_vs_b0"] = float(
+                    enriched["changed_fraction_vs_reference"] = float(
                         np.mean(reference_classes[mask] != class_by_point[mask])
                     ) if np.any(mask) else 0.0
                 else:
-                    enriched["changed_fraction_vs_b0"] = 0.0
+                    enriched["changed_fraction_vs_reference"] = 0.0
                 all_rows.append(enriched)
             predictions, _ = saga_scene_predictions(
                 scene_id,
@@ -552,7 +564,7 @@ def audit_gaussian_object_runs(
             official_predictions[condition].extend(predictions)
 
     condition_summaries: dict[str, Any] = {}
-    for condition in map(str, conditions):
+    for condition in condition_names:
         rows = [row for row in all_rows if row["condition"] == condition]
         official = evaluate_instances(
             official_scenes[condition],
@@ -566,19 +578,21 @@ def audit_gaussian_object_runs(
         }
 
     comparison: dict[str, Any] = {
-        "kind": "b0_b1_gaussian_precision_comparison",
+        "kind": "gaussian_precision_comparison",
         "scene_ids": list(map(str, scene_ids)),
         "seed": int(seed),
         "radius_m": float(radius_m),
+        "reference_condition": reference_condition,
         "conditions": condition_summaries,
     }
-    if "B0-legacy" in condition_summaries and "B1-other-classes" in condition_summaries:
-        left = condition_summaries["B0-legacy"]
-        right = condition_summaries["B1-other-classes"]
-        comparison["b1_minus_b0"] = {
+    left = condition_summaries[reference_condition]
+    comparison["differences_vs_reference"] = {}
+    for condition in condition_names[1:]:
+        right = condition_summaries[condition]
+        comparison["differences_vs_reference"][condition] = {
             "micro_point_precision": right["micro_point_precision"] - left["micro_point_precision"],
             "mean_matched_gt_recall": right["mean_matched_gt_recall"] - left["mean_matched_gt_recall"],
-            "map_50_95": right["official"]["map_50_95"] - left["official"]["map_50_95"],
+            "map_50_90": right["official"]["map_50_90"] - left["official"]["map_50_90"],
             "map_0.50": right["official"]["map_0.50"] - left["official"]["map_0.50"],
             "map_0.25": right["official"]["map_0.25"] - left["official"]["map_0.25"],
         }
@@ -623,7 +637,8 @@ def audit_gaussian_object_runs(
         "kind": "gaussian_object_audit",
         "schema_version": "1.0",
         "scene_ids": list(map(str, scene_ids)),
-        "conditions": list(map(str, conditions)),
+        "conditions": list(condition_names),
+        "reference_condition": reference_condition,
         "seed": int(seed),
         "radius_m": float(radius_m),
         "min_region_size": int(min_region_size),

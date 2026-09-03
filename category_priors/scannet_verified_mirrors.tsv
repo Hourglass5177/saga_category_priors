@@ -1,8 +1,0 @@
-# Byte-identical raw ScanNet .sens transport mirrors. Every entry is pinned by
-# Git-LFS SHA-256 and size; the downloader revalidates both before atomic rename.
-# scene_id<TAB>url<TAB>bytes<TAB>sha256
-scene0025_00	https://huggingface.co/datasets/General-Level/General-Bench-Closeset/resolve/main/3D/generation/rgbd_to_mesh/scannet/rgbd/scene0025_00.sens?download=true	1083382626	a708de8ba8653f15a3dd64506362783846e183c4817d242903f7a70f3625abc2
-scene0046_00	https://huggingface.co/datasets/General-Level/General-Bench-Closeset/resolve/main/3D/generation/rgbd_to_mesh/scannet/rgbd/scene0046_00.sens?download=true	1332586337	29afd39d3696572c0b39e80eaf631db7a204df3701ee722bf1ce85db255af88c
-scene0231_00	https://huggingface.co/datasets/General-Level/General-Bench-Closeset/resolve/main/3D/generation/rgbd_to_mesh/scannet/rgbd/scene0231_00.sens?download=true	1351211991	615f0a816579bf77076ef0d7f4c5f2c9c84377b02a829b7e41e60a84b0c04574
-scene0356_00	https://huggingface.co/datasets/General-Level/General-Bench-Closeset/resolve/main/3D/generation/rgbd_to_mesh/scannet/rgbd/scene0356_00.sens?download=true	707922425	656d9022ca59ba4e0ebeb421c4b4bde5679f5639222b4fcf6e49e8b4636004ff
-scene0608_00	https://huggingface.co/datasets/General-Level/General-Bench-Closeset/resolve/main/3D/generation/rgbd_to_mesh/scannet/rgbd/scene0608_00.sens?download=true	931787123	5e98f7f621695b12fcb83fd85a978889d51a1a328c72de49322dc98bc38b6f54
