@@ -323,18 +323,24 @@ def _render_contributor(camera: Any, model: Any, args: Any, background: Any) -> 
     import diff_gaussian_rasterization_max_contributor as contributor_module
     from gaussian_renderer import render_with_max_contributor
 
-    expected = (
+    package_dir = (
         Path(__file__).resolve().parents[1]
         / "submodules"
         / "diff-gaussian-rasterization-max-contributor"
         / "diff_gaussian_rasterization_max_contributor"
-        / "__init__.py"
     ).resolve()
+    expected = (package_dir / "__init__.py").resolve()
     actual = Path(contributor_module.__file__).resolve()
     if actual != expected:
         raise RuntimeError(
             "wrong max-contributor extension imported: "
             f"expected {expected}, got {actual}"
+        )
+    binary = Path(contributor_module._C.__file__).resolve()
+    if binary.parent != package_dir:
+        raise RuntimeError(
+            "wrong max-contributor CUDA binary imported: "
+            f"expected it below {package_dir}, got {binary}"
         )
     rendered = render_with_max_contributor(camera, model, args, background)
     return (
