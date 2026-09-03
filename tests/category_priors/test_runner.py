@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import pytest
+
 from category_priors.io import hash_json, sha256_file, write_json
-from category_priors.runner import build_postprocess_command, execute_schedule
+from category_priors.runner import (
+    build_postprocess_command,
+    execute_schedule,
+    load_scene_runtime_manifest,
+)
 
 
 def run(condition: str) -> dict[str, object]:
@@ -14,6 +20,49 @@ def scene(tmp_path) -> dict[str, object]:
         "scene_scale_m_per_unit": 1.0,
         "python_bin": str(tmp_path / "env" / "python"),
     }
+
+
+def test_runtime_manifest_validates_declared_content_hash(tmp_path) -> None:
+    path = tmp_path / "runtime.json"
+    payload = {
+        "kind": "scene_runtime_manifest",
+        "scenes": [
+            {
+                "scene_id": "scene0000_00",
+                "base_path": "scene",
+                "scene_scale_m_per_unit": 1.0,
+            }
+        ],
+    }
+    payload["content_sha256"] = hash_json(payload)
+    write_json(path, payload)
+    loaded = load_scene_runtime_manifest(path)
+    assert loaded["scene0000_00"]["base_path"] == str(
+        (tmp_path / "scene").resolve()
+    )
+
+    payload["scenes"][0]["scene_scale_m_per_unit"] = 2.0
+    write_json(path, payload)
+    with pytest.raises(ValueError, match="content hash mismatch"):
+        load_scene_runtime_manifest(path)
+
+
+def test_unsigned_historical_runtime_manifest_remains_readable(tmp_path) -> None:
+    path = tmp_path / "runtime.json"
+    write_json(
+        path,
+        {
+            "kind": "scene_runtime_manifest",
+            "scenes": [
+                {
+                    "scene_id": "scene0000_00",
+                    "base_path": "scene",
+                    "scene_scale_m_per_unit": 1.0,
+                }
+            ],
+        },
+    )
+    assert set(load_scene_runtime_manifest(path)) == {"scene0000_00"}
 
 
 def test_baseline_conditions_are_distinct(tmp_path) -> None:

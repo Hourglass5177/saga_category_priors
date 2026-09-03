@@ -42,6 +42,12 @@ def _validate_content_hash(payload: Mapping[str, Any], label: str) -> None:
 
 def load_scene_runtime_manifest(path: str | Path) -> dict[str, dict[str, Any]]:
     payload = load_json(path)
+    # Runtime manifests predate the embedded hash contract and this loader is
+    # shared by those historical audit paths.  Requiring a hash here would
+    # break valid read-only reproductions; when a manifest does declare one,
+    # however, silently ignoring a mismatch would defeat the lock entirely.
+    if "content_sha256" in payload:
+        _validate_content_hash(payload, "Scene runtime manifest")
     if payload.get("kind") != "scene_runtime_manifest":
         raise ValueError("Expected a scene_runtime_manifest")
     scenes: dict[str, dict[str, Any]] = {}

@@ -132,6 +132,7 @@ def build_v9_t1_invocation(
     output_root: str | Path,
     condition: str,
     git_commit: str,
+    python_bin: str | Path | None = None,
 ) -> V9T1Invocation:
     if condition not in V9_T1_CONDITIONS:
         raise ValueError(f"unknown V9 T1 condition: {condition}")
@@ -142,7 +143,13 @@ def build_v9_t1_invocation(
         raise ValueError("git_commit must be non-empty")
 
     workspace_path = Path(workspace).resolve()
-    assets = _validate_scene_assets(scene, workspace_path)
+    scene_runtime = dict(scene)
+    if python_bin is not None:
+        # A registered outer runner may preflight one exact CUDA environment.
+        # Use that interpreter for every rebuilt scene instead of falling back
+        # to heterogeneous per-scene runtime-manifest entries.
+        scene_runtime["python_bin"] = str(Path(python_bin).resolve())
+    assets = _validate_scene_assets(scene_runtime, workspace_path)
     feature_ply, scale_gate = _resolve_existing_features(scene)
     paths = v9_t1_paths(output_root, condition, scene_id)
     command = [
@@ -297,6 +304,7 @@ def execute_v9_t1_runs(
     cgroup_root: str | Path | None = "/sys/fs/cgroup",
     disk_floor_gib: float = 80.0,
     executor: Executor | None = None,
+    python_bin: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run corrected T1-B0 then T1-B1, scene by scene, with exact resume."""
 
@@ -334,6 +342,7 @@ def execute_v9_t1_runs(
                 output_root=root,
                 condition=condition,
                 git_commit=git_commit,
+                python_bin=python_bin,
             )
             if resume and v9_t1_run_complete(invocation.paths, invocation.identity):
                 rows.append({

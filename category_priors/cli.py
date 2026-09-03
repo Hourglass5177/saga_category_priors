@@ -43,6 +43,56 @@ V10_CLASSIFIERS = V9_CLASSIFIERS
 V10_PRIOR_CONDITIONS = V9_CONDITIONS
 
 
+def _run_full_instance_size_prior_cli(args: argparse.Namespace) -> None:
+    """Lazily delegate the single public full-instance size-prior command."""
+
+    from .full_instance_size_experiment import main as experiment_main
+
+    argv = [
+        "--workspace",
+        str(args.workspace),
+        "--runtime-manifest",
+        str(args.runtime_manifest),
+        "--locked-runtime-manifest",
+        str(args.locked_runtime_manifest),
+        "--t1-root",
+        str(args.t1_root),
+        "--gt-dir",
+        str(args.gt_dir),
+        "--locked-gt-dir",
+        str(args.locked_gt_dir),
+        "--train-stats",
+        str(args.train_stats),
+        "--category-priors",
+        str(args.category_priors),
+        "--size-bins",
+        str(args.size_bins),
+        "--locked-evaluation-scenes",
+        str(args.locked_evaluation_scenes),
+        "--runs-root",
+        str(args.runs_root),
+        "--artifacts-root",
+        str(args.artifacts_root),
+        "--disk-floor-gib",
+        str(args.disk_floor_gib),
+        "--cgroup-root",
+        str(args.cgroup_root),
+    ]
+    for option, value in (
+        ("--rebuild-t1-root", args.rebuild_t1_root),
+        ("--taxonomy", args.taxonomy),
+        ("--git-commit", args.git_commit),
+        ("--python-bin", args.python_bin),
+    ):
+        if value is not None:
+            argv.extend((option, str(value)))
+    if args.allow_rebuild_missing_traces:
+        argv.append("--allow-rebuild-missing-traces")
+    exit_code = experiment_main(argv)
+    if exit_code not in (None, 0):  # pragma: no cover - current worker returns 0
+        raise SystemExit(exit_code)
+
+
 def _run_clean_baseline_cli(args: argparse.Namespace) -> None:
     """Delegate the four active clean-baseline commands to their narrow CLI.
 
@@ -873,6 +923,39 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--radius-m", type=float, default=0.05)
     audit.add_argument("--min-region-size", type=int, default=100)
     audit.set_defaults(func=_audit)
+
+    full_instance_size = commands.add_parser(
+        "run-full-instance-size-prior",
+        help="test global versus predicted-class size on frozen T1-B1 instances",
+    )
+    full_instance_size.add_argument("--workspace", type=Path, required=True)
+    full_instance_size.add_argument("--runtime-manifest", type=Path, required=True)
+    full_instance_size.add_argument(
+        "--locked-runtime-manifest", type=Path, required=True
+    )
+    full_instance_size.add_argument("--t1-root", type=Path, required=True)
+    full_instance_size.add_argument("--rebuild-t1-root", type=Path)
+    full_instance_size.add_argument("--gt-dir", type=Path, required=True)
+    full_instance_size.add_argument("--locked-gt-dir", type=Path, required=True)
+    full_instance_size.add_argument("--train-stats", type=Path, required=True)
+    full_instance_size.add_argument("--category-priors", type=Path, required=True)
+    full_instance_size.add_argument("--size-bins", type=Path, required=True)
+    full_instance_size.add_argument(
+        "--locked-evaluation-scenes", type=Path, required=True
+    )
+    full_instance_size.add_argument("--runs-root", type=Path, required=True)
+    full_instance_size.add_argument("--artifacts-root", type=Path, required=True)
+    full_instance_size.add_argument("--taxonomy", type=Path)
+    full_instance_size.add_argument("--git-commit")
+    full_instance_size.add_argument("--python-bin", type=Path)
+    full_instance_size.add_argument(
+        "--allow-rebuild-missing-traces", action="store_true"
+    )
+    full_instance_size.add_argument("--disk-floor-gib", type=float, default=80.0)
+    full_instance_size.add_argument(
+        "--cgroup-root", type=Path, default=Path("/sys/fs/cgroup")
+    )
+    full_instance_size.set_defaults(func=_run_full_instance_size_prior_cli)
 
     clean_evidence = commands.add_parser(
         "build-alpha-mask-evidence",

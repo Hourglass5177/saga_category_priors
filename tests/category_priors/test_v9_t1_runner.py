@@ -130,6 +130,26 @@ def test_t1_uses_existing_scene_features_and_registered_teacher_structure(
     assert forbidden.isdisjoint(b1.command)
 
 
+def test_t1_python_override_replaces_runtime_manifest_interpreter(
+    tmp_path: Path,
+) -> None:
+    _, workspace, scene = _fixture(tmp_path)
+    Path(scene["python_bin"]).unlink()
+    override = _touch(tmp_path / "preflight-env/bin/python", b"python")
+    invocation = build_v9_t1_invocation(
+        workspace=workspace,
+        scene=scene,
+        scene_id=scene["scene_id"],
+        output_root=tmp_path / "runs",
+        condition="T1-B1",
+        git_commit="fixed-commit",
+        python_bin=override,
+    )
+
+    assert Path(invocation.command[0]) == override.resolve()
+    assert invocation.identity["command"][0] == str(override.resolve())
+
+
 def test_t1_complete_requires_identity_strict_contract_and_full_trace(
     tmp_path: Path,
 ) -> None:
@@ -202,3 +222,31 @@ def test_t1_execution_is_ordered_resumable_and_never_trains(tmp_path: Path) -> N
     assert recovered["producer_git_commit"] == "fixed-commit"
     assert all(row["status"] == "registered_complete" for row in recovered["runs"])
     assert (tmp_path / "runs/execution_summary.json").is_file()
+
+
+def test_t1_execution_forwards_python_override_to_every_invocation(
+    tmp_path: Path,
+) -> None:
+    manifest, workspace, scene = _fixture(tmp_path)
+    override = _touch(tmp_path / "preflight-env/bin/python", b"python")
+    interpreters: list[Path] = []
+
+    def executor(invocation: V9T1Invocation) -> int:
+        interpreters.append(Path(invocation.command[0]))
+        _write_complete(invocation)
+        return 0
+
+    result = execute_v9_t1_runs(
+        scene_manifest=manifest,
+        output_root=tmp_path / "runs",
+        workspace=workspace,
+        git_commit="fixed-commit",
+        scene_ids=[scene["scene_id"]],
+        cgroup_root=None,
+        disk_floor_gib=0.0,
+        executor=executor,
+        python_bin=override,
+    )
+
+    assert result["complete"] == 2
+    assert interpreters == [override.resolve(), override.resolve()]
