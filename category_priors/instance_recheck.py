@@ -12,6 +12,9 @@ import argparse
 import json
 import math
 import os
+import re
+import sys
+import types
 from collections import defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -354,6 +357,23 @@ class GroundedSamCropReviewer:
 
     def __init__(self, *, dino_config: str, dino_checkpoint: str, sam_checkpoint: str) -> None:
         import torch
+
+        # The persisted offline GroundingDINO environment uses Hugging Face's
+        # BERT tokenizer.  Its pure-Python path only needs the stdlib regular
+        # expression API, while the optional visualizer (and pycocotools) is
+        # irrelevant to inference.  Keep those optional packages out of the
+        # runtime contract rather than downloading them on a fresh GPU host.
+        if "regex" not in sys.modules:
+            try:
+                __import__("regex")
+            except ImportError:
+                sys.modules["regex"] = re
+        try:
+            __import__("pycocotools")
+        except ImportError:
+            visualizer = types.ModuleType("groundingdino.util.visualizer")
+            visualizer.COCOVisualizer = type("COCOVisualizer", (), {})
+            sys.modules.setdefault("groundingdino.util.visualizer", visualizer)
         from groundingdino.util.inference import Model
         from segment_anything import SamPredictor, sam_model_registry
 
