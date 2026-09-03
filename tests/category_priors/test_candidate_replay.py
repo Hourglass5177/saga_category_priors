@@ -6,10 +6,14 @@ import numpy as np
 import pytest
 
 from category_priors.candidate_replay import (
+    candidate_bank_to_replay_candidates,
+    candidate_export_ids,
     LegacyReplayCandidate,
     replay_candidates_through_legacy,
 )
+from category_priors.candidate_bank import CandidateBank
 from category_priors.legacy_candidate_replay import legacy_knn_filter
+from category_priors.prediction_contract import normalize_prediction
 
 
 def _xyz(count: int) -> np.ndarray:
@@ -128,10 +132,10 @@ def test_accepted_candidates_are_not_protected_or_reinserted() -> None:
     assert row.pre_knn_owned_count == 3
     assert row.post_knn_total_count == 0
     assert not row.survived_post_filter
-    assert row.final_id is None
+    assert row.post_filter_raw_label is None
 
 
-def test_surviving_branch_keeps_branch_class_and_q_without_secondary_vote() -> None:
+def test_surviving_branch_carries_only_branch_hint_before_final_vote() -> None:
     candidate = _candidate(
         4, [0, 1, 2], [0, 1], q=0.625, branch_class="toilet"
     )
@@ -145,11 +149,11 @@ def test_surviving_branch_keeps_branch_class_and_q_without_secondary_vote() -> N
     )
 
     raw_label = result.candidate_raw_labels[4]
-    assert result.candidate_class_by_raw_label[raw_label] == "toilet"
-    assert result.candidate_score_by_raw_label[raw_label] == pytest.approx(0.625)
+    assert result.candidate_branch_class_by_raw_label[raw_label] == "toilet"
+    assert result.candidate_q_by_raw_label[raw_label] == pytest.approx(0.625)
     row = result.candidates[0]
-    assert row.final_id == raw_label
-    assert row.final_class == "toilet"
+    assert row.post_filter_raw_label == raw_label
+    assert row.branch_class_hint == "toilet"
     assert result.diagnostics["secondary_class_vote_applied"] is False
 
 
@@ -229,3 +233,77 @@ def test_replay_is_deterministic_read_only_and_has_no_gt_or_prior_interface() ->
         for name in parameter_names
         for forbidden in ("gt", "prior", "semantic", "vote", "protected")
     )
+
+
+def _bank_with_reassigned_raw_core() -> CandidateBank:
+    class_names = ("chair",) + tuple(f"unused-{index}" for index in range(31))
+    return CandidateBank(
+        class_names=class_names,
+        saga20_names=("chair",),
+        scene_scale_m_per_unit=1.0,
+        seed=42,
+        global_pre_knn=np.full(6, -1, dtype=np.int64),
+        semantic_top1=np.zeros(6, dtype=np.int64),
+        semantic_top1_score=np.full(6, 0.8),
+        branch_full_labels=np.asarray([0, 0, 0, 1, 1, 1]),
+        branch_core_labels=np.asarray([0, 0, 1, 1, 1, 0]),
+        assignment_confidence=np.full(6, 0.7),
+        candidates=(
+            {
+                "candidate_id": 0,
+                "branch_class": "chair",
+                "branch_class_index": 0,
+                "full_point_count": 3,
+                "core_point_count": 3,
+                "base_score": 0.6,
+            },
+            {
+                "candidate_id": 1,
+                "branch_class": "chair",
+                "branch_class_index": 0,
+                "full_point_count": 3,
+                "core_point_count": 3,
+                "base_score": 0.5,
+            },
+        ),
+        diagnostics={},
+    )
+
+
+def test_bank_adapter_intersects_raw_core_with_full_and_records_loss() -> None:
+    converted = candidate_bank_to_replay_candidates(_bank_with_reassigned_raw_core())
+    assert len(converted.candidates) == 2
+    np.testing.assert_array_equal(converted.candidates[0].full_point_indices, [0, 1, 2])
+    np.testing.assert_array_equal(converted.candidates[0].trusted_core_indices, [0, 1])
+    np.testing.assert_array_equal(converted.candidates[1].trusted_core_indices, [3, 4])
+    assert converted.diagnostics["raw_core_outside_full_count"] == 2
+    assert converted.diagnostics["candidates_with_raw_core_outside_full"] == 2
+    assert converted.candidates[0].q_score == pytest.approx(0.6)
+    assert not converted.candidates[0].full_point_indices.flags.writeable
+
+
+def test_bank_adapter_requires_frozen_vote_score() -> None:
+    bank = _bank_with_reassigned_raw_core()
+    rows = [dict(row) for row in bank.candidates]
+    rows[0].pop("base_score")
+    invalid = CandidateBank(**{**bank.__dict__, "candidates": tuple(rows)})
+    with pytest.raises(ValueError, match="attach 2D vote evidence"):
+        candidate_bank_to_replay_candidates(invalid)
+
+
+def test_candidate_to_raw_to_export_chain_is_explicit() -> None:
+    converted = candidate_bank_to_replay_candidates(_bank_with_reassigned_raw_core())
+    replay = replay_candidates_through_legacy(
+        xyz_scene=_xyz(6),
+        global_pre_knn=np.full(6, -1, dtype=np.int64),
+        candidates=converted.candidates,
+        accepted_candidate_ids=(1,),
+        k=1,
+        min_count=1,
+    )
+    raw_id = replay.candidate_raw_labels[1]
+    contracted = normalize_prediction(
+        replay.after_filter,
+        {raw_id: {"class": "chair", "score": 0.75}},
+    )
+    assert dict(candidate_export_ids(replay, contracted)) == {1: 0}

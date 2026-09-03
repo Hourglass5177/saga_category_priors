@@ -2,7 +2,7 @@
 
 `SegAnyGAussians` 是一个基于 3D Gaussian Splatting 的三维开放词汇分割与实例后处理项目。本仓库当前更适合作为“工程使用版”来理解：你先准备好 COLMAP 稀疏重建和预训练 3DGS 点云，再依次执行 `grounded_SAM_masks.py`、`get_scale.py`、`train_contrastive_feature.py`、`postprocess.py`，得到最终的三维实例结果与 `output.json`。
 
-公开 SAGA 的论文任务以提示式分割为主；本仓库中的自动实例后处理属于老师交付原型的工程扩展，不能称为公开 SAGA 的官方自动实例基线。当前类别先验研究已经收束为一个小型二维复核实验，基线和评价口径见 [category_priors/INSTANCE_RECHECK_BASELINE_STANDARD.md](category_priors/INSTANCE_RECHECK_BASELINE_STANDARD.md)。历史实验代码不再属于活跃运行路径，由 Git 历史保存。
+公开 SAGA 的论文任务以提示式分割为主；本仓库中的自动实例后处理属于老师交付原型的工程扩展，不能称为公开 SAGA 的官方自动实例基线。当前类别先验研究已经收束为一个小型二维复核实验，基线和评价口径见 [category_priors/INSTANCE_RECHECK_BASELINE_STANDARD.md](category_priors/INSTANCE_RECHECK_BASELINE_STANDARD.md)。历史实验代码不再属于活跃运行路径，由 Git 历史保存；关键路线和提交可从 [docs/RETIRED_EXPERIMENT_INDEX.md](docs/RETIRED_EXPERIMENT_INDEX.md) 查找。
 
 论文链接：<https://arxiv.org/abs/2312.00860>
 

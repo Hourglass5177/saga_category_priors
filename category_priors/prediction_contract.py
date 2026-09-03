@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 
 import numpy as np
@@ -13,6 +14,7 @@ import numpy as np
 class PredictionContractResult:
     point_labels: np.ndarray
     instances: dict[str, dict[str, Any]]
+    export_id_by_raw: Mapping[int, int]
     audit: dict[str, Any]
 
 
@@ -165,10 +167,12 @@ def normalize_prediction(
     valid.sort(key=lambda row: row[0])
     output_labels = np.full(labels.shape, -1, dtype=np.int64)
     output_instances: dict[str, dict[str, Any]] = {}
+    export_id_by_raw: dict[int, int] = {}
     declared_old_ids: list[int] = []
     for new_id, (old_id, metadata, mask) in enumerate(valid):
         output_labels[mask] = new_id
         output_instances[str(new_id)] = metadata
+        export_id_by_raw[old_id] = new_id
         declared_old_ids.append(old_id)
 
     raw_nonnegative = labels >= 0
@@ -180,6 +184,7 @@ def normalize_prediction(
     return PredictionContractResult(
         point_labels=output_labels,
         instances=output_instances,
+        export_id_by_raw=MappingProxyType(export_id_by_raw),
         audit={
             "schema": "saga-strict-prediction-contract-v1",
             "point_count": int(len(labels)),

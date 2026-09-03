@@ -1,0 +1,51 @@
+{
+  "schema": "saga-instance-recheck-strata-v1",
+  "source": {
+    "dataset": "scannet200",
+    "split": "train",
+    "category_priors_sha256": "c22de44aec27e8ede05b7d0126cfe4ffeb350daffb7efd9fa31245c64167c37d",
+    "source_table": "train_instance_stats.parquet",
+    "source_table_sha256": "0c6b0520c690c1b70627dc9fd24dc621c2c8fa6d95262ee92b037f10ad2e7996"
+  },
+  "small_instance": {
+    "field": "gt_bbox_diagonal_m",
+    "comparison": "less_than_or_equal",
+    "threshold_m": 0.886095877588466,
+    "derivation": "exp(global.raw.geometry.log_bbox_diag_m.q25), scene-balanced over ScanNet-train SAGA20 instances"
+  },
+  "tail_classes": {
+    "count": 7,
+    "derivation": "ceil(20/3) lowest ScanNet-train instance counts; exact-count ties use canonical class name ascending",
+    "names": [
+      "socket",
+      "speaker",
+      "switch",
+      "fan",
+      "refrigerator",
+      "cup",
+      "phone"
+    ]
+  },
+  "training_instance_counts": {
+    "chair": 3502,
+    "table": 902,
+    "plant": 282,
+    "tv": 177,
+    "painting": 647,
+    "sofa": 405,
+    "cabinet": 591,
+    "bed": 298,
+    "socket": 11,
+    "book": 204,
+    "switch": 52,
+    "door": 1192,
+    "window": 928,
+    "lamp": 345,
+    "speaker": 41,
+    "fan": 60,
+    "refrigerator": 119,
+    "cup": 124,
+    "phone": 130,
+    "trash can": 851
+  }
+}

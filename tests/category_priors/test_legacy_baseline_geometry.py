@@ -36,8 +36,9 @@ def test_teacher_stage_trace_uses_neutral_l0_schema() -> None:
         encoding="utf-8"
     )
 
-    assert '"schema": "saga-teacher-stage-trace-v2"' in source
+    assert '"schema": "saga-teacher-stage-trace-v3"' in source
     assert '"level": "L0"' in source
+    assert '"export_id_by_raw"' in source
     assert "saga-v9-legacy-stage-trace-v1" not in source
 
 
@@ -45,10 +46,18 @@ def test_teacher_postprocess_enforces_clean_input_and_output_contracts() -> None
     source = (Path(__file__).resolve().parents[2] / "postprocess.py").read_text(
         encoding="utf-8"
     )
+    voting = (
+        Path(__file__).resolve().parents[2]
+        / "category_priors"
+        / "semantic_voting.py"
+    ).read_text(encoding="utf-8")
 
     assert "DEFAULT_SELECTED_CLASSES = SAGA20_CLASSES" in source
     assert "except Exception" not in source
-    assert "masks = masks > 0.5" in source
-    assert "mask labels fall outside the 32-class table" in source
+    assert "from category_priors.semantic_voting import" in source
+    assert "masks = masks > 0.5" in voting
+    assert "mask labels fall outside the 32-class table" in voting
     assert "vote_histogram_33" in source
     assert "vote_ratios_32" in source
+    assert "finalize_prediction(" in source
+    assert "normalize_prediction(" not in source

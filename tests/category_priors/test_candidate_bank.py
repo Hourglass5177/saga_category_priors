@@ -13,6 +13,7 @@ from category_priors.candidate_bank import (
     MIN_CLUSTER_SIZE,
     MIN_SAMPLES,
     SAMPLE_CAP,
+    SCHEMA,
     SEMANTIC_THRESHOLD,
     SEMANTIC_WEIGHT,
     SPATIAL_WEIGHT,
@@ -324,6 +325,10 @@ def test_class_seed_is_stable_and_class_specific() -> None:
     assert stable_class_seed(42, "chair") == stable_class_seed(42, "chair")
     assert stable_class_seed(42, "chair") != stable_class_seed(42, "cup")
     assert stable_class_seed(42, "chair") != stable_class_seed(43, "chair")
+
+
+def test_retired_denoising_bank_schema_is_not_silently_reused() -> None:
+    assert SCHEMA == "saga-instance-recheck-candidate-bank-v1"
 
 
 def test_metric_pca_extents_are_rotation_invariant() -> None:

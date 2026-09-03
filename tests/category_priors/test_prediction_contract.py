@@ -24,6 +24,7 @@ def test_contract_projects_orphans_and_reindexes_instances() -> None:
 
     assert result.point_labels.tolist() == [1, 1, 0, -1, -1, 0]
     assert list(result.instances) == ["0", "1"]
+    assert dict(result.export_id_by_raw) == {4: 0, 8: 1}
     assert result.audit["ignored_negative_metadata_ids"] == [-1]
     assert result.audit["orphan_instance_ids"] == [9]
     assert result.audit["orphan_gaussian_count"] == 1
@@ -91,3 +92,16 @@ def test_auxiliary_metadata_is_remapped_from_raw_to_export_ids() -> None:
     assert remapped["1"]["raw"] == 10
     assert remapped["0"]["point_count"] == 2
     assert remapped["1"]["point_count"] == 2
+
+
+def test_contract_exposes_read_only_raw_to_export_mapping() -> None:
+    contracted = normalize_prediction(
+        [7, 2, 7, -1],
+        {
+            "2": {"class": "chair", "score": 0.4},
+            "7": {"class": "table", "score": 0.8},
+        },
+    )
+    assert dict(contracted.export_id_by_raw) == {2: 0, 7: 1}
+    with pytest.raises(TypeError):
+        contracted.export_id_by_raw[2] = 9

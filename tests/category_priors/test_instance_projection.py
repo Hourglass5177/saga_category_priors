@@ -4,7 +4,10 @@ import numpy as np
 import pytest
 
 from category_priors.gaussian_object_audit import evaluate_gaussian_object_precision
-from category_priors.instance_projection import project_declared_instances
+from category_priors.instance_projection import (
+    bounded_recheck_crop_side,
+    project_declared_instances,
+)
 
 
 def test_projection_preserves_declared_labels_and_does_not_mutate_input() -> None:
@@ -82,3 +85,27 @@ def test_projection_ignores_negative_metadata_ids_as_background() -> None:
 def test_projection_rejects_invalid_declared_instance_ids(instance_id: object) -> None:
     with pytest.raises((TypeError, ValueError)):
         project_declared_instances([0], {instance_id: {"class": "chair"}})
+
+
+def test_recheck_crop_side_uses_frozen_formula_and_whole_image_cap() -> None:
+    ordinary = bounded_recheck_crop_side(
+        candidate_side_px=20,
+        candidate_diagonal_m=0.5,
+        prior_diagonal_m=1.0,
+        image_width=640,
+        image_height=480,
+    )
+    assert ordinary.prior_scaled_side_px == pytest.approx(40.0)
+    assert ordinary.crop_side_px == pytest.approx(60.0)
+    assert not ordinary.crop_capped
+
+    tiny = bounded_recheck_crop_side(
+        candidate_side_px=20,
+        candidate_diagonal_m=0.00001,
+        prior_diagonal_m=1.0,
+        image_width=640,
+        image_height=480,
+    )
+    assert tiny.requested_side_px > 640
+    assert tiny.crop_side_px == 640
+    assert tiny.crop_capped

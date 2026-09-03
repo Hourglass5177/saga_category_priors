@@ -10,6 +10,7 @@ undeclared non-negative labels are projected to background, and the raw payload
 is never mutated.
 """
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -97,6 +98,56 @@ class DeclaredInstanceProjection:
             "projected_background_gaussian_fraction",
         )
         return {key: float(stats[key]) for key in keys}
+
+
+@dataclass(frozen=True)
+class RecheckCropScale:
+    """Pre-registered square crop side before pixel-coordinate rounding."""
+
+    candidate_side_px: float
+    prior_scaled_side_px: float
+    requested_side_px: float
+    crop_side_px: float
+    crop_capped: bool
+
+
+def bounded_recheck_crop_side(
+    *,
+    candidate_side_px: float,
+    candidate_diagonal_m: float,
+    prior_diagonal_m: float,
+    image_width: int,
+    image_height: int,
+) -> RecheckCropScale:
+    """Apply the frozen physical-size crop formula and whole-image cap."""
+
+    side = float(candidate_side_px)
+    candidate_diagonal = float(candidate_diagonal_m)
+    prior_diagonal = float(prior_diagonal_m)
+    width = int(image_width)
+    height = int(image_height)
+    if (
+        not math.isfinite(side)
+        or side <= 0
+        or not math.isfinite(candidate_diagonal)
+        or candidate_diagonal < 0
+        or not math.isfinite(prior_diagonal)
+        or prior_diagonal <= 0
+        or width <= 0
+        or height <= 0
+    ):
+        raise ValueError("crop inputs must be finite and physically valid")
+    prior_scaled = side * prior_diagonal / max(candidate_diagonal, 1e-4)
+    requested = 1.5 * max(side, prior_scaled)
+    maximum = float(max(width, height))
+    bounded = min(requested, maximum)
+    return RecheckCropScale(
+        candidate_side_px=side,
+        prior_scaled_side_px=prior_scaled,
+        requested_side_px=requested,
+        crop_side_px=bounded,
+        crop_capped=requested > maximum,
+    )
 
 
 def _declared_ids(

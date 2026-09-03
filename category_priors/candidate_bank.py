@@ -18,10 +18,9 @@ import numpy as np
 
 from .geometry import pca_sorted_extents_m
 
-# Keep the historical schema value so existing frozen DEV8 banks can be read
-# without rebuilding HDBSCAN candidates.  It is an asset-identity contract,
-# not a dependency on the retired category-denoising runtime.
-SCHEMA = "saga-category-denoise-bank-v1"
+# The recheck experiment deliberately creates one fresh bank per scene under
+# the current contract.  Retired denoising banks are not silently upgraded.
+SCHEMA = "saga-instance-recheck-candidate-bank-v1"
 EXPECTED_CLASS_COUNT = 32
 SEMANTIC_THRESHOLD = 0.7
 SAMPLE_CAP = 5_000

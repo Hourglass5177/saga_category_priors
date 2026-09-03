@@ -22,7 +22,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from hdbscan import HDBSCAN
-from tqdm import tqdm
 
 from arguments import ModelParams, PipelineParams
 from category_priors.candidate_bank import SAGA20_CLASSES
@@ -31,8 +30,12 @@ from category_priors.legacy_candidate_replay import (
     legacy_filter_small_clusters,
     legacy_knn_filter,
 )
-from category_priors.prediction_contract import normalize_prediction
-from gaussian_renderer import render_with_max_contributor
+from category_priors.prediction_finalization import (
+    finalize_prediction,
+    prediction_output_payload,
+    write_prediction_output_atomic,
+)
+from category_priors.semantic_voting import compute_instance_vote_evidence
 from scene import FeatureGaussianModel, GaussianModel
 from scene.dataset_readers import (
     readColmapCameras,
@@ -279,199 +282,6 @@ def _load_cameras(args):
     return cameraList_from_camInfos(cameras, 1, args)
 
 
-def _load_mask_and_labels(args, camera):
-    mask_path = os.path.join(args.masks_path, f"{camera.image_name}.pt")
-    label_path = os.path.join(args.labels_path, f"{camera.image_name}.pt")
-    has_mask = os.path.isfile(mask_path)
-    has_label = os.path.isfile(label_path)
-    if not has_mask and not has_label:
-        return None
-    if has_mask != has_label:
-        raise FileNotFoundError(
-            f"mask/label pair is incomplete for frame {camera.image_name}"
-        )
-    masks = torch.load(mask_path, map_location="cpu")
-    labels = torch.load(label_path, map_location="cpu")
-    if masks.ndim != 3:
-        raise ValueError(f"{mask_path}: masks must have shape [M,H,W]")
-    if masks.shape[-2:] != (camera.image_height, camera.image_width):
-        masks = F.interpolate(
-            masks.float().unsqueeze(1),
-            mode="bilinear",
-            size=(camera.image_height, camera.image_width),
-            align_corners=False,
-        ).squeeze(1) > 0.5
-    else:
-        masks = masks > 0.5
-    labels = torch.as_tensor(labels).reshape(-1)
-    if len(labels) != len(masks):
-        raise ValueError(f"{camera.image_name}: mask and label counts differ")
-    invalid = (labels < 0) | (labels >= len(args.classes))
-    if bool(invalid.any()):
-        values = sorted({int(value) for value in labels[invalid].tolist()})
-        raise ValueError(
-            f"{camera.image_name}: mask labels fall outside the 32-class table: {values}"
-        )
-    return masks, labels
-
-
-def compute_instance_vote_evidence(
-    *,
-    label_sets: Mapping[str, torch.Tensor | np.ndarray],
-    camera_list,
-    gs_model,
-    args,
-    bg_color: torch.Tensor,
-    update_progress: bool,
-) -> tuple[
-    dict[str, dict[int, np.ndarray]],
-    dict[str, dict[int, np.ndarray]],
-]:
-    """Return normalized foreground ratios and raw 32-class-plus-background votes."""
-
-    prepared: dict[str, torch.Tensor] = {}
-    instance_ids: dict[str, list[int]] = {}
-    votes: dict[str, np.ndarray] = {}
-    for name, raw_labels in label_sets.items():
-        labels = torch.as_tensor(raw_labels, dtype=torch.long).detach().cpu()
-        prepared[name] = labels
-        ids = [int(value) for value in torch.unique(labels) if int(value) >= 0]
-        instance_ids[name] = ids
-        width = max(ids) + 1 if ids else 0
-        votes[name] = np.zeros((width, len(args.classes) + 1), dtype=np.int64)
-
-    for index, camera in tqdm(list(enumerate(camera_list))):
-        if update_progress:
-            with open(args.progress_path, "w", encoding="utf-8") as handle:
-                handle.write(str((index + 1) * 100 // len(camera_list)))
-        loaded = _load_mask_and_labels(args, camera)
-        if loaded is None:
-            continue
-        masks, labels_2d = loaded
-        render = render_with_max_contributor(camera, gs_model, args, bg_color)
-        contributor = render["max_contributor"].detach().cpu().long()
-        contribution = render["max_contribute"].detach().cpu()
-        expected_shape = (camera.image_height, camera.image_width)
-        if contributor.shape != expected_shape or contribution.shape != expected_shape:
-            raise ValueError(
-                f"{camera.image_name}: contributor render has an invalid shape"
-            )
-        valid = (
-            (contributor >= 0)
-            & (contributor < int(gs_model.get_xyz.shape[0]))
-            & torch.isfinite(contribution)
-            & (contribution > 0)
-        )
-        gaussian_count = int(gs_model.get_xyz.shape[0])
-        if gaussian_count <= 0:
-            raise ValueError("RGB Gaussian model is empty")
-        safe_contributor = contributor.clamp(min=0, max=gaussian_count - 1)
-        background = torch.ones(expected_shape, dtype=torch.bool)
-        for mask in masks:
-            background &= ~mask
-
-        for name, point_labels in prepared.items():
-            if not instance_ids[name]:
-                continue
-            if len(point_labels) != int(gs_model.get_xyz.shape[0]):
-                raise ValueError(f"{name}: label count differs from RGB Gaussian count")
-            pixel_instances = point_labels[safe_contributor].clone()
-            pixel_instances[~valid] = -1
-            maximum_id = votes[name].shape[0] - 1
-            for label_2d, mask in zip(labels_2d, masks):
-                label_index = int(label_2d)
-                values = pixel_instances[mask]
-                values = values[(values >= 0) & (values <= maximum_id)]
-                if values.numel():
-                    votes[name][:, label_index] += torch.bincount(
-                        values, minlength=maximum_id + 1
-                    ).numpy()
-            values = pixel_instances[background]
-            values = values[(values >= 0) & (values <= maximum_id)]
-            if values.numel():
-                votes[name][:, len(args.classes)] += torch.bincount(
-                    values, minlength=maximum_id + 1
-                ).numpy()
-
-    result: dict[str, dict[int, np.ndarray]] = {}
-    raw_result: dict[str, dict[int, np.ndarray]] = {}
-    for name, ids in instance_ids.items():
-        rows: dict[int, np.ndarray] = {}
-        raw_rows: dict[int, np.ndarray] = {}
-        for instance_id in ids:
-            raw_row = votes[name][instance_id].astype(np.int64, copy=True)
-            raw_rows[instance_id] = raw_row
-            row = raw_row.astype(np.float64, copy=False)
-            denominator = float(row.sum())
-            rows[instance_id] = (
-                row[:-1] / denominator
-                if denominator > 0
-                else np.zeros(len(args.classes), dtype=np.float64)
-            )
-        result[name] = rows
-        raw_result[name] = raw_rows
-    return result, raw_result
-
-
-def _get_bbox(
-    point_labels: torch.Tensor,
-    xyz: torch.Tensor,
-    is_big_gaussian: torch.Tensor,
-) -> dict[int, list[float]]:
-    """Preserve the handoff's yaw-oriented 3D bounding boxes."""
-
-    from trimesh.bounds import oriented_bounds_2D
-
-    bbox: dict[int, list[float]] = {}
-    for raw_id in torch.unique(point_labels).tolist():
-        instance_id = int(raw_id)
-        if instance_id < 0:
-            continue
-        points = xyz[(point_labels == instance_id) & ~is_big_gaussian].numpy()
-        if len(points) == 0:
-            bbox[instance_id] = [0.0] * 24
-            continue
-        if len(points) < 3:
-            minimum = points.min(axis=0)
-            maximum = points.max(axis=0)
-            corners = np.asarray([
-                [maximum[0], maximum[1], maximum[2]],
-                [maximum[0], maximum[1], minimum[2]],
-                [maximum[0], minimum[1], minimum[2]],
-                [maximum[0], minimum[1], maximum[2]],
-                [minimum[0], maximum[1], maximum[2]],
-                [minimum[0], maximum[1], minimum[2]],
-                [minimum[0], minimum[1], minimum[2]],
-                [minimum[0], minimum[1], maximum[2]],
-            ])
-            bbox[instance_id] = corners.reshape(-1).tolist()
-            continue
-
-        transform_2d, extents_2d = oriented_bounds_2D(points[:, [0, 2]])
-        transform_3d = np.eye(4)
-        transform_3d[0, 0] = transform_2d[0, 0]
-        transform_3d[0, 2] = transform_2d[0, 1]
-        transform_3d[0, 3] = transform_2d[0, 2]
-        transform_3d[2, 0] = transform_2d[1, 0]
-        transform_3d[2, 2] = transform_2d[1, 1]
-        transform_3d[2, 3] = transform_2d[1, 2]
-        homogeneous = np.column_stack((points, np.ones(len(points))))
-        transformed = (transform_3d @ homogeneous.T).T[:, :3]
-        ymin = float(transformed[:, 1].min())
-        ymax = float(transformed[:, 1].max())
-        half_x, half_z = np.asarray(extents_2d) / 2.0
-        local = np.asarray([
-            [half_x, ymax, half_z], [half_x, ymax, -half_z],
-            [half_x, ymin, -half_z], [half_x, ymin, half_z],
-            [-half_x, ymax, half_z], [-half_x, ymax, -half_z],
-            [-half_x, ymin, -half_z], [-half_x, ymin, half_z],
-        ])
-        local_h = np.column_stack((local, np.ones(8)))
-        world = (np.linalg.inv(transform_3d) @ local_h.T).T[:, :3]
-        bbox[instance_id] = world.reshape(-1).tolist()
-    return bbox
-
-
 def _write_stage_trace(
     path: str,
     *,
@@ -486,6 +296,7 @@ def _write_stage_trace(
     exported_prediction: np.ndarray,
     branch_instance_classes: Mapping[int, str],
     raw_instances: Mapping[int, dict],
+    export_id_by_raw: Mapping[int, int],
     vote_histogram_33: Mapping[int, np.ndarray],
     vote_ratios_32: Mapping[int, np.ndarray],
 ) -> None:
@@ -507,13 +318,16 @@ def _write_stage_trace(
         )
     os.replace(temporary, destination)
     metadata = {
-        "schema": "saga-teacher-stage-trace-v2",
+        "schema": "saga-teacher-stage-trace-v3",
         "point_count": int(len(final_internal_labels)),
         "level": "L0",
         "branch_instance_classes": {
             str(key): value for key, value in sorted(branch_instance_classes.items())
         },
         "raw_instances": {str(key): value for key, value in raw_instances.items()},
+        "export_id_by_raw": {
+            str(key): int(value) for key, value in sorted(export_id_by_raw.items())
+        },
         "vote_histogram_33": {
             str(key): np.asarray(value, dtype=np.int64).tolist()
             for key, value in vote_histogram_33.items()
@@ -785,25 +599,17 @@ def main() -> None:
             save_candidate_bank(candidate_bank, args.candidate_bank_path)
             print(f"CandidateBank saved to {args.candidate_bank_path}")
 
-    def get_class(ratio: np.ndarray) -> str:
-        if float(ratio.max()) < args.label_threshold:
-            return "background"
-        return args.classes[int(ratio.argmax())]
-
-    bbox = _get_bbox(point_labels, point_xyz, is_big_gaussian)
-    classes = {instance_id: get_class(ratio) for instance_id, ratio in instance_ratio.items()}
-    raw_instances: dict[int, dict] = {}
-    for instance_id in bbox.keys() & classes.keys():
-        ratio = np.asarray(instance_ratio[instance_id], dtype=np.float64)
-        raw_instances[instance_id] = {
-            "bbox": bbox[instance_id], "class": classes[instance_id],
-            "score": float(ratio.max()) if ratio.size else 0.0,
-        }
-    raw_instances = {
-        key: value for key, value in raw_instances.items()
-        if value["class"] in DEFAULT_SELECTED_CLASSES
-    }
-    contracted = normalize_prediction(point_labels.tolist(), raw_instances)
+    finalized = finalize_prediction(
+        point_labels=point_labels,
+        xyz_scene=point_xyz,
+        is_big_gaussian=is_big_gaussian,
+        vote_ratios_by_raw=instance_ratio,
+        class_names=args.classes,
+        selected_classes=DEFAULT_SELECTED_CLASSES,
+        label_threshold=args.label_threshold,
+    )
+    contracted = finalized.contracted
+    raw_instances = dict(finalized.raw_instances)
 
     if args.stage_trace_path:
         _write_stage_trace(
@@ -819,22 +625,17 @@ def main() -> None:
             exported_prediction=contracted.point_labels,
             branch_instance_classes=branch_instance_classes,
             raw_instances=raw_instances,
+            export_id_by_raw=contracted.export_id_by_raw,
             vote_histogram_33=raw_votes["prediction"],
             vote_ratios_32=instance_ratio,
         )
 
-    output = {
-        "point_labels": contracted.point_labels.tolist(),
-        "is_big_gaussian": is_big_gaussian.tolist(),
-        "is_transparent_gaissian": is_transparent_gaussian.tolist(),
-        "instances": contracted.instances,
-        "prediction_contract": contracted.audit,
-    }
-    output_path = Path(args.json_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_temporary = output_path.with_name(output_path.name + ".part")
-    output_temporary.write_text(json.dumps(output), encoding="utf-8")
-    os.replace(output_temporary, output_path)
+    output = prediction_output_payload(
+        finalized,
+        is_big_gaussian=is_big_gaussian,
+        is_transparent_gaussian=is_transparent_gaussian,
+    )
+    write_prediction_output_atomic(args.json_path, output)
 
     if args.clean:
         for directory in (args.masks_path, args.labels_path, args.mask_scales_path):

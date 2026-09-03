@@ -35,7 +35,7 @@ SAME_CLASS_WRONG_INSTANCE_COLOR = np.asarray((255, 203, 64), dtype=np.uint8)
 WRONG_CLASS_COLOR = np.asarray((230, 68, 68), dtype=np.uint8)
 UNSUPPORTED_COLOR = np.asarray((112, 112, 112), dtype=np.uint8)
 GT_COLOR = np.asarray((56, 132, 255), dtype=np.uint8)
-SMALL_CATEGORIES = (
+VIEWER_SMALL_CATEGORY_EXAMPLES = (
     "cup",
     "switch",
     "book",
@@ -382,13 +382,21 @@ def _select_viewer_cases(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     )
     add(
         "tiny_small_success",
-        [row for row in rows if row["class_name"] in SMALL_CATEGORIES],
+        [
+            row
+            for row in rows
+            if row["class_name"] in VIEWER_SMALL_CATEGORY_EXAMPLES
+        ],
         key=lambda row: (float(row["point_precision"]), float(row["gt_to_gaussian_recall"])),
         reverse=True,
     )
     add(
         "tiny_small_failure",
-        [row for row in rows if row["class_name"] in SMALL_CATEGORIES],
+        [
+            row
+            for row in rows
+            if row["class_name"] in VIEWER_SMALL_CATEGORY_EXAMPLES
+        ],
         key=lambda row: (float(row["point_precision"]), float(row["gt_to_gaussian_recall"])),
     )
     add(

@@ -13,9 +13,9 @@ but otherwise execute the same path:
    filter implementation;
 4. nothing is protected or inserted after those operations.
 
-Candidate classes and AP scores are frozen branch metadata.  There is no
-second semantic vote in this replay, and there is no GT, prior, evaluator, or
-file-system input.
+Candidate branch classes and Q scores are carried only as frozen diagnostics.
+The shared finalizer applies the actual semantic vote after replay.  There is
+no GT, prior, evaluator, or file-system input here.
 """
 
 from dataclasses import dataclass
@@ -24,12 +24,14 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
+from .candidate_bank import CandidateBank, validate_candidate_bank
 from .legacy_candidate_replay import (
     GLOBAL_KNN_K,
     GLOBAL_MIN_COUNT,
     LegacyKNNFilterResult,
     legacy_knn_filter,
 )
+from .prediction_contract import PredictionContractResult
 
 
 @dataclass(frozen=True)
@@ -47,6 +49,14 @@ class LegacyReplayCandidate:
     q_score: float
     full_point_indices: Any
     trusted_core_indices: Any
+
+
+@dataclass(frozen=True)
+class CandidateBankReplayInput:
+    """Explicit, audited projection from a frozen bank into replay rows."""
+
+    candidates: tuple[LegacyReplayCandidate, ...]
+    diagnostics: Mapping[str, Any]
 
 
 @dataclass(frozen=True)
@@ -74,8 +84,8 @@ class CandidateSurvivalDiagnostic:
     label_present_post_filter: bool
     survived_post_knn: bool
     survived_post_filter: bool
-    final_id: int | None
-    final_class: str | None
+    post_filter_raw_label: int | None
+    branch_class_hint: str | None
 
     def to_dict(self) -> dict[str, Any]:
         return dict(self.__dict__)
@@ -90,11 +100,73 @@ class CandidateLegacyReplayResult:
     after_filter: np.ndarray
     accepted_candidate_ids: tuple[int, ...]
     candidate_raw_labels: Mapping[int, int]
-    candidate_class_by_raw_label: Mapping[int, str]
-    candidate_score_by_raw_label: Mapping[int, float]
+    candidate_branch_class_by_raw_label: Mapping[int, str]
+    candidate_q_by_raw_label: Mapping[int, float]
     candidates: tuple[CandidateSurvivalDiagnostic, ...]
     legacy: LegacyKNNFilterResult
     diagnostics: Mapping[str, Any]
+
+
+def candidate_bank_to_replay_candidates(bank: CandidateBank) -> CandidateBankReplayInput:
+    """Convert bank membership without pretending raw HDBSCAN core survived.
+
+    Candidate geometry is always the frozen ``branch_full`` membership.  A raw
+    HDBSCAN core point is trusted for replay conflict diagnostics only when it
+    also belongs to that final full candidate.  Core points reassigned outside
+    the full mask are counted and otherwise ignored.
+    """
+
+    validate_candidate_bank(bank)
+    full_labels = np.asarray(bank.branch_full_labels, dtype=np.int64)
+    core_labels = np.asarray(bank.branch_core_labels, dtype=np.int64)
+    rows: list[LegacyReplayCandidate] = []
+    per_candidate: list[dict[str, Any]] = []
+    dropped_total = 0
+    for metadata in bank.candidates:
+        candidate_id = int(metadata["candidate_id"])
+        if "base_score" not in metadata:
+            raise ValueError(
+                f"candidate {candidate_id} has no frozen base_score; attach 2D vote "
+                "evidence before replay"
+            )
+        full = np.flatnonzero(full_labels == candidate_id).astype(np.int64, copy=False)
+        raw_core = np.flatnonzero(core_labels == candidate_id).astype(
+            np.int64, copy=False
+        )
+        trusted_core = raw_core[np.isin(raw_core, full, assume_unique=True)]
+        dropped = int(len(raw_core) - len(trusted_core))
+        dropped_total += dropped
+        rows.append(
+            LegacyReplayCandidate(
+                candidate_id=candidate_id,
+                branch_class=str(metadata["branch_class"]),
+                q_score=float(metadata["base_score"]),
+                full_point_indices=_readonly(full),
+                trusted_core_indices=_readonly(trusted_core),
+            )
+        )
+        per_candidate.append(
+            {
+                "candidate_id": candidate_id,
+                "full_point_count": int(len(full)),
+                "raw_core_point_count": int(len(raw_core)),
+                "trusted_core_point_count": int(len(trusted_core)),
+                "raw_core_outside_full_count": dropped,
+            }
+        )
+    return CandidateBankReplayInput(
+        candidates=tuple(rows),
+        diagnostics=MappingProxyType(
+            {
+                "candidate_count": len(rows),
+                "raw_core_outside_full_count": dropped_total,
+                "candidates_with_raw_core_outside_full": int(
+                    sum(row["raw_core_outside_full_count"] > 0 for row in per_candidate)
+                ),
+                "per_candidate": tuple(per_candidate),
+            }
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -104,6 +176,22 @@ class _ValidatedCandidate:
     q_score: float
     full: np.ndarray
     core: np.ndarray
+
+
+def candidate_export_ids(
+    replay: CandidateLegacyReplayResult,
+    contracted: PredictionContractResult,
+) -> Mapping[int, int]:
+    """Close ``candidate_id -> raw label -> export id`` for surviving outputs."""
+
+    result = {
+        int(candidate_id): int(contracted.export_id_by_raw[raw_label])
+        for candidate_id, raw_label in replay.candidate_raw_labels.items()
+        if raw_label in contracted.export_id_by_raw
+    }
+    if len(set(result.values())) != len(result):
+        raise ValueError("multiple candidates map to the same exported instance")
+    return MappingProxyType(result)
 
 
 def _as_numpy(value: Any, dtype: Any) -> np.ndarray:
@@ -371,16 +459,16 @@ def replay_candidates_through_legacy(
                 label_present_post_filter=post_filter_total > 0,
                 survived_post_knn=retained_knn > 0,
                 survived_post_filter=retained_filter > 0,
-                final_id=raw_label if post_filter_total else None,
-                final_class=row.branch_class if post_filter_total else None,
+                post_filter_raw_label=raw_label if post_filter_total else None,
+                branch_class_hint=row.branch_class if post_filter_total else None,
             )
         )
 
-    candidate_class = {
+    candidate_branch_class = {
         raw_label: rows[candidate_id].branch_class
         for candidate_id, raw_label in candidate_raw_labels.items()
     }
-    candidate_score = {
+    candidate_q = {
         raw_label: rows[candidate_id].q_score
         for candidate_id, raw_label in candidate_raw_labels.items()
     }
@@ -427,8 +515,8 @@ def replay_candidates_through_legacy(
         after_filter=legacy.after_filter,
         accepted_candidate_ids=accepted,
         candidate_raw_labels=MappingProxyType(dict(candidate_raw_labels)),
-        candidate_class_by_raw_label=MappingProxyType(candidate_class),
-        candidate_score_by_raw_label=MappingProxyType(candidate_score),
+        candidate_branch_class_by_raw_label=MappingProxyType(candidate_branch_class),
+        candidate_q_by_raw_label=MappingProxyType(candidate_q),
         candidates=tuple(diagnostics_rows),
         legacy=legacy,
         diagnostics=result_diagnostics,
@@ -436,8 +524,11 @@ def replay_candidates_through_legacy(
 
 
 __all__ = [
+    "CandidateBankReplayInput",
     "CandidateLegacyReplayResult",
     "CandidateSurvivalDiagnostic",
     "LegacyReplayCandidate",
+    "candidate_bank_to_replay_candidates",
+    "candidate_export_ids",
     "replay_candidates_through_legacy",
 ]
