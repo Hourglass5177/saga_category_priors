@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -11,6 +12,48 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from gaussian_renderer import render_with_max_contributor
+
+
+def summarize_mask_label_assets(args, camera_list) -> dict[str, int | str]:
+    """Validate the semantic-vote roots and count paired camera assets.
+
+    A completely missing mask/label root used to look like a legitimate scene
+    with no labelled frames.  That silently produced all-zero votes and erased
+    every predicted instance during finalization.  Keep legitimate per-frame
+    abstentions, but reject an empty or wrong asset root before GPU work starts.
+    """
+
+    roots: dict[str, Path] = {}
+    for attribute in ("masks_path", "labels_path"):
+        raw = str(getattr(args, attribute, "") or "").strip()
+        if not raw:
+            raise ValueError(f"--{attribute} is required for final semantic voting")
+        root = Path(raw).expanduser()
+        if not root.is_dir():
+            raise FileNotFoundError(f"--{attribute} is not a directory: {root}")
+        roots[attribute] = root
+
+    paired = 0
+    missing = 0
+    for camera in camera_list:
+        mask_exists = (roots["masks_path"] / f"{camera.image_name}.pt").is_file()
+        label_exists = (roots["labels_path"] / f"{camera.image_name}.pt").is_file()
+        if mask_exists != label_exists:
+            raise FileNotFoundError(
+                f"mask/label pair is incomplete for frame {camera.image_name}"
+            )
+        if mask_exists:
+            paired += 1
+        else:
+            missing += 1
+    if paired == 0:
+        raise ValueError("no paired mask/label frames were found for semantic voting")
+    return {
+        "masks_path": str(roots["masks_path"].resolve()),
+        "labels_path": str(roots["labels_path"].resolve()),
+        "paired_frame_count": paired,
+        "missing_pair_frame_count": missing,
+    }
 
 
 def load_mask_and_labels(args, camera):
@@ -74,6 +117,7 @@ def compute_instance_vote_evidence(
         width = max(ids) + 1 if ids else 0
         votes[name] = np.zeros((width, len(args.classes) + 1), dtype=np.int64)
 
+    loaded_pair_count = 0
     for index, camera in tqdm(list(enumerate(camera_list))):
         if update_progress:
             with open(args.progress_path, "w", encoding="utf-8") as handle:
@@ -81,6 +125,7 @@ def compute_instance_vote_evidence(
         loaded = load_mask_and_labels(args, camera)
         if loaded is None:
             continue
+        loaded_pair_count += 1
         masks, labels_2d = loaded
         render = render_with_max_contributor(camera, gs_model, args, bg_color)
         contributor = render["max_contributor"].detach().cpu().long()
@@ -127,6 +172,11 @@ def compute_instance_vote_evidence(
                     values, minlength=maximum_id + 1
                 ).numpy()
 
+    if loaded_pair_count == 0 and any(instance_ids.values()):
+        raise ValueError(
+            "semantic voting loaded zero mask/label pairs while predicted instances exist"
+        )
+
     result: dict[str, dict[int, np.ndarray]] = {}
     raw_result: dict[str, dict[int, np.ndarray]] = {}
     for name, ids in instance_ids.items():
@@ -147,4 +197,8 @@ def compute_instance_vote_evidence(
     return result, raw_result
 
 
-__all__ = ["compute_instance_vote_evidence", "load_mask_and_labels"]
+__all__ = [
+    "compute_instance_vote_evidence",
+    "load_mask_and_labels",
+    "summarize_mask_label_assets",
+]

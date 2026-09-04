@@ -550,7 +550,10 @@ def run_scene(args: Any) -> dict[str, Any]:
     import torch
     from scene import FeatureGaussianModel, GaussianModel
 
-    from .semantic_voting import compute_instance_vote_evidence
+    from .semantic_voting import (
+        compute_instance_vote_evidence,
+        summarize_mask_label_assets,
+    )
 
     if tuple(args.classes) != DEFAULT_CLASSES:
         raise ValueError("the recheck runtime requires the frozen 32-class order")
@@ -573,6 +576,7 @@ def run_scene(args: Any) -> dict[str, Any]:
     is_big = max_scale > max_scale.median() * args.scale_threshold
     is_transparent = feature_model.get_opacity.detach().cpu().squeeze() < args.opcity_threshold
     cameras = _load_cameras(args)
+    semantic_vote_assets = summarize_mask_label_assets(args, cameras)
     background = torch.tensor(
         [1, 1, 1] if args.white_background else [0, 0, 0],
         dtype=torch.float32,
@@ -703,6 +707,7 @@ def run_scene(args: Any) -> dict[str, Any]:
         "candidate_count": len(bank.candidates),
         "projectable_candidate_count": len(selected),
         "selected_camera_count": len(selected_camera_indices),
+        "semantic_vote_assets": semantic_vote_assets,
         "gaussian_xyz_sha256": bank.gaussian_xyz_sha256,
         "candidate_bank_replay": dict(replay_input.diagnostics),
         "global_reviews": [asdict(row) for row in global_reviews],
