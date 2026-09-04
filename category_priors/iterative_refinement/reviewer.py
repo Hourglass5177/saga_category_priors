@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import sys
 import types
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -226,6 +226,7 @@ class GroundedSamFullImageReviewer:
         crop_spec: CropSpec,
         seed_mask_full: Any,
         negative_mask_full: Any,
+        seed_prompt_mask_full: Any | None = None,
         classes: Sequence[str],
         config: RefinementConfig = RefinementConfig(),
     ) -> tuple[MaskHypothesis, ...]:
@@ -262,16 +263,29 @@ class GroundedSamFullImageReviewer:
         y1 = min(crop_spec.top + crop_spec.side, self._image.shape[0])
         if x1 > x0 and y1 > y0:
             crop_region[y0:y1, x0:x1] = True
-        positive = dispersed_prompt_points(np.asarray(seed_mask_full, dtype=bool) & crop_region, 4)
+        prompt_source = seed_mask_full if seed_prompt_mask_full is None else seed_prompt_mask_full
+        positive = dispersed_prompt_points(np.asarray(prompt_source, dtype=bool) & crop_region, 4)
+        if not len(positive):
+            positive = dispersed_prompt_points(np.asarray(seed_mask_full, dtype=bool) & crop_region, 4)
         negative = dispersed_prompt_points(np.asarray(negative_mask_full, dtype=bool) & crop_region, 4)
         points = np.concatenate((positive, negative), axis=0)
         labels = np.concatenate((np.ones(len(positive)), np.zeros(len(negative)))).astype(np.int32)
         hypotheses: list[MaskHypothesis] = []
         for box_ordinal, proposal in enumerate(proposals):
+            x0, y0, x1, y1 = proposal.box_image_xyxy
+            clipped_box = (
+                float(np.clip(x0, 0, self._image.shape[1])),
+                float(np.clip(y0, 0, self._image.shape[0])),
+                float(np.clip(x1, 0, self._image.shape[1])),
+                float(np.clip(y1, 0, self._image.shape[0])),
+            )
+            if clipped_box[2] <= clipped_box[0] or clipped_box[3] <= clipped_box[1]:
+                continue
+            proposal = replace(proposal, box_image_xyxy=clipped_box)
             masks, scores, _ = self._sam.predict(
                 point_coords=points if len(points) else None,
                 point_labels=labels if len(points) else None,
-                box=np.asarray(proposal.box_image_xyxy, dtype=np.float32),
+                box=np.asarray(clipped_box, dtype=np.float32),
                 multimask_output=True,
             )
             hypotheses.extend(

@@ -320,13 +320,12 @@ def _review_round(
     tasks: dict[int, list[tuple[CandidateSeed, ViewObservation]]] = {}
     for seed in seeds:
         for row in observations.get(seed.candidate_id, ())[: config.views_per_round]:
-            if row.independent:
-                tasks.setdefault(row.camera_index, []).append((seed, row))
+            tasks.setdefault(row.camera_index, []).append((seed, row))
     hypotheses: list[MaskHypothesis] = []
     for camera_index in sorted(tasks):
         camera = cameras[camera_index]
         image = camera_rgb(camera)
-        contributor, _, _ = camera_maps[camera_index]
+        contributor, max_weights, opacity = camera_maps[camera_index]
         cached_rows: dict[int, tuple[MaskHypothesis, ...]] = {}
         pending: list[tuple[CandidateSeed, ViewObservation, str, Path]] = []
         for seed, observation in sorted(tasks[camera_index], key=lambda pair: pair[0].candidate_id):
@@ -346,6 +345,13 @@ def _review_round(
         hypotheses.extend(row for rows in cached_rows.values() for row in rows)
         for seed, observation, identity, cache_path in pending:
             seed_mask = _projection_mask(seed.seed_support, contributor)
+            contributor_fraction = np.divide(
+                max_weights, opacity, out=np.zeros_like(max_weights, dtype=np.float32),
+                where=opacity > 0,
+            )
+            prompt_mask = seed_mask & (opacity >= config.hard_opacity_min) & (
+                contributor_fraction >= config.hard_contributor_fraction_min
+            )
             competing = (contributor >= 0) & (b0_labels[np.clip(contributor, 0, len(b0_labels) - 1)] >= 0) & ~seed_mask
             class_name = seed.branch_class if condition == "class" else None
             prior = size_prior_from_payload(priors, class_name)
@@ -360,7 +366,8 @@ def _review_round(
                     reviewer.review_crop(
                         candidate_id=seed.candidate_id, round_index=round_index,
                         camera_index=camera_index, crop_spec=crop,
-                        seed_mask_full=seed_mask, negative_mask_full=competing,
+                        seed_mask_full=seed_mask, seed_prompt_mask_full=prompt_mask,
+                        negative_mask_full=competing,
                         classes=classes, config=config,
                     )
                 )

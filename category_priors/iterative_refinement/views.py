@@ -212,24 +212,30 @@ def select_consistent_hypotheses(
         for selected_cameras in itertools.combinations(cameras, count):
             for choice in itertools.product(*(grouped[camera] for camera in selected_cameras)):
                 pair_scores: list[float] = []
-                valid = True
+                supported = {item.hypothesis_id: False for item in choice}
                 for left, right in itertools.combinations(choice, 2):
                     pair = tuple(sorted((left.camera_index, right.camera_index)))
                     if not independent_camera_pairs.get(pair, False):
-                        valid = False
-                        break
-                    pair_scores.append(
-                        weighted_jaccard(
-                            soft_membership.get(left.hypothesis_id, {}),
-                            soft_membership.get(right.hypothesis_id, {}),
-                        )
+                        continue
+                    pair_score = weighted_jaccard(
+                        soft_membership.get(left.hypothesis_id, {}),
+                        soft_membership.get(right.hypothesis_id, {}),
                     )
-                if not valid or not pair_scores or min(pair_scores) < config.mask_jaccard_min:
+                    pair_scores.append(pair_score)
+                    if pair_score >= config.mask_jaccard_min:
+                        supported[left.hypothesis_id] = True
+                        supported[right.hypothesis_id] = True
+                if (
+                    not pair_scores
+                    or float(np.mean(pair_scores)) < config.mask_jaccard_min
+                    or not all(supported.values())
+                ):
                     continue
                 penalties = hypothesis_penalties or {}
                 score = (
                     len(choice),
                     float(np.mean(pair_scores)),
+                    float(np.mean([float(penalties.get(item.hypothesis_id, 1.0)) for item in choice])),
                     float(np.mean([item.seed_coverage for item in choice])),
                     float(np.mean([item.sam_score * float(penalties.get(item.hypothesis_id, 1.0)) for item in choice])),
                     float(np.mean([item.detection_score for item in choice])),

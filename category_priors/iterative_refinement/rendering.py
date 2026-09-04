@@ -34,7 +34,11 @@ def render_camera_maps(camera: Any, model: Any, pipeline: Any, background: Any) 
     ids = rendered["max_contributor"].detach().cpu().numpy().astype(np.int64, copy=False)
     weights = rendered["max_contribute"].detach().cpu().numpy().astype(np.float64, copy=False)
     probe = torch.ones((int(model.get_xyz.shape[0]), 3), dtype=model.get_xyz.dtype, device=model.get_xyz.device)
-    opacity_render = render_mask(camera, model, pipeline, background, precomputed_mask=probe)["mask"]
+    # Probe colors encode accumulated alpha.  A white raster background would
+    # make empty pixels look opaque, so attribution always uses zero background
+    # independently of the RGB scene's rendering convention.
+    zero_background = torch.zeros_like(background)
+    opacity_render = render_mask(camera, model, pipeline, zero_background, precomputed_mask=probe)["mask"]
     opacity = opacity_render.detach()[0].float().cpu().numpy().astype(np.float64, copy=False)
     empty = (~np.isfinite(weights)) | (weights <= 0) | (~np.isfinite(opacity)) | (opacity <= 0)
     ids = ids.copy()
@@ -66,9 +70,10 @@ def render_alpha_mass(
     visible_gradient: np.ndarray | None = None
     inside_batches: list[tuple[Sequence[int], np.ndarray]] = []
     valid_count = 0
+    zero_background = torch.zeros_like(background)
     for batch_number, (indices, targets) in enumerate(iter_three_channel_masks(mask_array)):
         probe = torch.ones((point_count, 3), dtype=model.get_xyz.dtype, device=model.get_xyz.device, requires_grad=True)
-        image = render_mask(camera, model, pipeline, background, precomputed_mask=probe)["mask"]
+        image = render_mask(camera, model, pipeline, zero_background, precomputed_mask=probe)["mask"]
         opacity = image.detach()[0].float().cpu().numpy()
         objective = build_alpha_objective(indices, targets, opacity, min_opacity=config.alpha_opacity_min)
         coefficients = torch.as_tensor(objective.inside_coefficients, dtype=image.dtype, device=image.device)
