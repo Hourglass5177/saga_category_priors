@@ -2,6 +2,7 @@ from __future__ import annotations
 
 """Correct max-contributor and streaming normalized-alpha rendering wrappers."""
 
+import os
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -11,14 +12,21 @@ from .contracts import RefinementConfig
 from .evidence import AlphaMass, alpha_mass_from_gradients, build_alpha_objective, iter_three_channel_masks
 
 
-def validate_max_contributor_extension() -> None:
-    import diff_gaussian_rasterization_max_contributor as module
-
-    package = (
+def expected_max_contributor_package() -> Path:
+    configured = os.environ.get("SAGA_MAX_CONTRIBUTOR_PACKAGE_ROOT")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return (
         Path(__file__).resolve().parents[2]
         / "submodules" / "diff-gaussian-rasterization-max-contributor"
         / "diff_gaussian_rasterization_max_contributor"
     ).resolve()
+
+
+def validate_max_contributor_extension() -> None:
+    import diff_gaussian_rasterization_max_contributor as module
+
+    package = expected_max_contributor_package()
     if Path(module.__file__).resolve() != (package / "__init__.py").resolve():
         raise RuntimeError("wrong max-contributor Python extension imported")
     if Path(module._C.__file__).resolve().parent != package:
@@ -91,4 +99,9 @@ def render_alpha_mass(
     return alpha_mass_from_gradients(visible_gradient, inside_batches, len(mask_array), valid_count)
 
 
-__all__ = ["render_alpha_mass", "render_camera_maps", "validate_max_contributor_extension"]
+__all__ = [
+    "expected_max_contributor_package",
+    "render_alpha_mass",
+    "render_camera_maps",
+    "validate_max_contributor_extension",
+]

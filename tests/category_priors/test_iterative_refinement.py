@@ -29,6 +29,7 @@ from category_priors.iterative_refinement.reviewer import (
     dispersed_prompt_points,
     rank_detection_proposals,
 )
+from category_priors.iterative_refinement.rendering import expected_max_contributor_package
 from category_priors.iterative_refinement.runtime_io import save_scene_cache
 from category_priors.iterative_refinement.views import (
     CropSpec,
@@ -211,3 +212,9 @@ def test_sparse_cache_round_trip_is_json_and_npz_only(tmp_path) -> None:
     with np.load(tmp_path / "refinement_cache.npz", allow_pickle=False) as archive:
         assert archive["mask_0"].tolist() == mask.packed_mask.tolist()
         assert archive["s_balanced_0_anchors"].tolist() == [1]
+
+
+def test_max_contributor_producer_can_be_pinned_for_read_only_reuse(tmp_path, monkeypatch) -> None:
+    producer = tmp_path / "producer" / "diff_gaussian_rasterization_max_contributor"
+    monkeypatch.setenv("SAGA_MAX_CONTRIBUTOR_PACKAGE_ROOT", str(producer))
+    assert expected_max_contributor_package() == producer.resolve()
