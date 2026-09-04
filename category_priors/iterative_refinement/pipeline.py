@@ -343,6 +343,7 @@ def _review_round(
     cache_root: Path,
     gaussian_sha: str,
 ) -> tuple[tuple[MaskHypothesis, ...], dict[int, GaussianEvidence], dict[int, tuple[MaskHypothesis, ...]]]:
+    seed_by_id = {seed.candidate_id: seed for seed in seeds}
     tasks: dict[int, list[tuple[CandidateSeed, ViewObservation]]] = {}
     for seed in seeds:
         for row in observations.get(seed.candidate_id, ())[: config.views_per_round]:

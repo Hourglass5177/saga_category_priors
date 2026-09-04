@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 from dataclasses import replace
+import inspect
 from pathlib import Path
 
 from category_priors.iterative_refinement.contracts import (
@@ -24,7 +25,7 @@ from category_priors.iterative_refinement.local_refine import (
     trim_oversize_additions,
 )
 from category_priors.iterative_refinement.objects import combine_states, merge_objects_once
-from category_priors.iterative_refinement.pipeline import candidate_export_contract
+from category_priors.iterative_refinement.pipeline import _review_round, candidate_export_contract
 from category_priors.iterative_refinement.reviewer import (
     dispersed_prompt_points,
     rank_detection_proposals,
@@ -218,3 +219,10 @@ def test_max_contributor_producer_can_be_pinned_for_read_only_reuse(tmp_path, mo
     producer = tmp_path / "producer" / "diff_gaussian_rasterization_max_contributor"
     monkeypatch.setenv("SAGA_MAX_CONTRIBUTOR_PACKAGE_ROOT", str(producer))
     assert expected_max_contributor_package() == producer.resolve()
+
+
+def test_review_round_builds_seed_index_before_class_prior_lookup() -> None:
+    source = inspect.getsource(_review_round)
+    assignment = source.index("seed_by_id =")
+    lookup = source.index("seed_by_id[row.candidate_id]")
+    assert assignment < lookup
