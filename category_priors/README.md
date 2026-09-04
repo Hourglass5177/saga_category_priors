@@ -2,9 +2,9 @@
 
 这个目录只保留当前研究需要的公共数据合同、候选库、旧后处理重放和评价工具。过去的 V3–V10、ObjectBank、提示尺度、HDBSCAN 修复和三维尺寸恢复实验已经退出活跃代码；如需追溯，请查看 Git 历史，而不是把旧状态机重新接回运行路径。
 
-当前研究问题是：老师兼容自动流程产生全 SAGA20 分支候选后，把每个具有可用投影视角的候选投回最清楚的二维图像，用 GroundingDINO 与 SAM 做一次复核，是否能减少假实例；按预测类别的典型物理尺寸决定裁图范围，是否比全类别共用一个尺寸更好。
+当前研究问题是：老师兼容自动流程产生全 SAGA20 分支候选后，能否通过最多两轮的多视角二维重新识别、完整 SAM 掩码回写、局部图精修和受约束 B0 融合，真正补全或清理三维实例；在完整闭环健康后，逐类别尺寸是否比全局尺寸提供额外收益。
 
-在开始实现或运行前，必须完整阅读 [INSTANCE_RECHECK_BASELINE_STANDARD.md](INSTANCE_RECHECK_BASELINE_STANDARD.md)。其中固定了候选同源关系、投影和裁图规则、二维复核逻辑、B0 漏检救回指标、ScanNet 官方评价口径，以及真实标注不得进入运行时的边界。
+在开始实现或运行前，必须完整阅读 [ITERATIVE_REFINEMENT_EXPERIMENT_STANDARD.md](ITERATIVE_REFINEMENT_EXPERIMENT_STANDARD.md)。旧的 [INSTANCE_RECHECK_BASELINE_STANDARD.md](INSTANCE_RECHECK_BASELINE_STANDARD.md) 只记录已经结案的一次布尔复核。
 
 ## 保留的公共能力
 
@@ -23,14 +23,7 @@
 
 ## 当前阶段
 
-本次仓库重整只建立干净基线和技术标准，尚未实现或运行二维复核实验。下一阶段最多新增两个小模块：
-
-```text
-instance_recheck.py
-recheck_evaluation.py
-```
-
-正式比较固定为 `B0/raw/global/class`，只运行 DEV8。每个场景只在当前基线下生成一次带完整指纹的候选库，随后三条件只读共享；不得下载或训练，不得为不同条件重跑候选生成，也不得通过保护式 KNN、事后插回或新对象主干改变候选几何。
+活动实现位于 `iterative_refinement/`，以冻结 CandidateBank 和 B0 为输入。旧 `instance_recheck.py` 及其 `B0/raw/global/class` 结果只作静态对照；新系统不会把精修结果重新送进旧全场 KNN/filter10。
 
 ## 基础命令
 
@@ -41,4 +34,23 @@ python -m category_priors fit --stats train_instances.parquet --output category_
 python -m category_priors evaluate --manifest evaluation_manifest.json --output metrics.json
 ```
 
-二维复核命令会在下一阶段实现完成后再写入这里。在此之前，README 不提供占位命令，避免把尚未验证的接口误当成可运行功能。
+新的唯一入口是 `run_iterative_refinement.py`。它不导入旧后处理器，也不会重跑 HDBSCAN：
+
+```bash
+python run_iterative_refinement.py prepare \
+  --candidate-bank <candidate-bank> --stage-trace <stage_trace.npz> \
+  --b0-output <B0/output.json> --scene-id <scene> --output-dir <reservoir>
+
+python run_iterative_refinement.py refine \
+  --candidate-bank <candidate-bank> --reservoir <reservoir> \
+  --priors <category_priors.json> --condition class --output-dir <scene-output> \
+  --point_cloud_path <30k-point-cloud.ply> \
+  --contrastive_feature_point_cloud_path <2k-feature.ply> \
+  --images_path <images> --sparse_path <COLMAP-sparse> \
+  --masks_path <semantic-masks> --labels_path <semantic-labels> \
+  --groundingdino-config-path <config.py> \
+  --groundingdino-checkpoint-path <checkpoint.pth> \
+  --sam-checkpoint-path <sam_vit_h.pth>
+```
+
+`refine` 一次生成稳健、平衡、覆盖三种局部图重放结果。`replay` 只核验并复用这三份结果；`evaluate` 在独立进程读取 GT，运行 B0 漏检救回和官方指标评价。正式云端命令必须记录全部绝对资产路径和当前提交。
