@@ -64,6 +64,32 @@ def _empty_evidence(candidate_id: int) -> GaussianEvidence:
     return GaussianEvidence(candidate_id, np.empty(0, np.int64), np.empty(0), np.empty(0), np.empty(0), 0, 0, ())
 
 
+def candidate_export_contract(
+    fused_object_raw_labels: Mapping[int, int],
+    export_id_by_raw: Mapping[int, int],
+    state_by_object: Mapping[int, ObjectState],
+) -> tuple[dict[str, int], dict[str, list[int]]]:
+    """Return the evaluator chain plus lossless many-parent lineage.
+
+    The legacy evaluator models one source candidate per exported prediction.
+    Refinement objects may legitimately merge multiple source candidates, so a
+    stable canonical parent is exposed to that evaluator and the complete set is
+    recorded separately for audit and viewer reconstruction.
+    """
+    evaluator_chain: dict[str, int] = {}
+    lineage: dict[str, list[int]] = {}
+    for object_id, raw_id in sorted(fused_object_raw_labels.items()):
+        export_id = export_id_by_raw.get(raw_id)
+        if export_id is None:
+            continue
+        parent_ids = tuple(sorted(state_by_object[object_id].parent_candidate_ids))
+        if not parent_ids:
+            continue
+        evaluator_chain[str(parent_ids[0])] = int(export_id)
+        lineage[str(export_id)] = [int(value) for value in parent_ids]
+    return evaluator_chain, lineage
+
+
 def _round_seed(seed: CandidateSeed, state: ObjectState) -> CandidateSeed:
     anchor = np.union1d(seed.seed_anchor, state.hard_positive_ids)
     anchor = np.intersect1d(anchor, state.point_ids, assume_unique=True)
@@ -736,14 +762,13 @@ def run_scene(args: Any) -> dict[str, Any]:
             is_transparent_gaussian=diagnostic_masks[:, 1],
         )
         state_by_object = {row.object_id: row for row in accepted_states}
-        candidate_export_ids = {}
-        for object_id, raw_id in fused.object_raw_labels.items():
-            export_id = finalized.contracted.export_id_by_raw.get(raw_id)
-            if export_id is None:
-                continue
-            for parent_id in state_by_object[object_id].parent_candidate_ids:
-                candidate_export_ids[str(parent_id)] = int(export_id)
+        candidate_export_ids, candidate_export_lineage = candidate_export_contract(
+            fused.object_raw_labels,
+            finalized.contracted.export_id_by_raw,
+            state_by_object,
+        )
         payload["candidate_export_ids"] = candidate_export_ids
+        payload["candidate_export_lineage"] = candidate_export_lineage
         payload.update({"condition": args.condition, "profile": profile_name})
         write_prediction_output_atomic(output / profile_name / "output.json", payload)
         for state in states:

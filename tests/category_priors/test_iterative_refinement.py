@@ -24,6 +24,7 @@ from category_priors.iterative_refinement.local_refine import (
     trim_oversize_additions,
 )
 from category_priors.iterative_refinement.objects import combine_states, merge_objects_once
+from category_priors.iterative_refinement.pipeline import candidate_export_contract
 from category_priors.iterative_refinement.reviewer import (
     dispersed_prompt_points,
     rank_detection_proposals,
@@ -178,6 +179,16 @@ def test_merge_is_one_pass_and_does_not_close_a_weak_chain() -> None:
         prior_by_object=prior, round_index=1,
     )
     assert len(merged) == 2
+
+
+def test_merged_export_has_one_evaluator_source_and_lossless_lineage() -> None:
+    state = ObjectState(
+        7, (9, 3), np.array([0, 1, 2]), np.array([0]), np.array([0]),
+        np.array([2., 2., 2.]), np.array([1., 1., 1.]), "chair", True, 2, True,
+    )
+    evaluator, lineage = candidate_export_contract({7: 42}, {42: 5}, {7: state})
+    assert evaluator == {"3": 5}
+    assert lineage == {"5": [3, 9]}
 
 
 def test_runtime_does_not_import_gt_or_legacy_postprocessing() -> None:
