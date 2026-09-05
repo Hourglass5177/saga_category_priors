@@ -190,7 +190,7 @@ def test_no_hard_evidence_skips_local_graph(monkeypatch) -> None:
         seed=seed, evidence=evidence,
         xyz_m=np.zeros((4, 3)), affinity=np.ones((4, 2)),
         b0_labels=np.full(4, -1), prior=SizePrior(1., (2., 2., 2.), "global"),
-        profile=RefinementProfile("test", 1., 1.), round_index=1,
+        profile=RefinementProfile("balanced", 1., 1.), round_index=1,
         review_class=None, reliable_review_class=False,
     )
     assert result.no_hard_evidence
