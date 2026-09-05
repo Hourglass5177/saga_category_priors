@@ -20,6 +20,7 @@ from .runtime_io import json_atomic
 
 FORMULA_VERSION = "normalized-alpha-t-prev-v1"
 CACHE_SCHEMA = "saga-alpha-evidence-v1"
+KERNEL_VERSION = "alpha-mass-fused-v2-reverse"
 
 
 def _update_array(digest: Any, value: Any) -> None:
@@ -99,6 +100,8 @@ def validate_fused_extension() -> Any:
         raise RuntimeError("wrong fused alpha-mass Python package imported")
     if Path(module._C.__file__).resolve().parent != package:
         raise RuntimeError("wrong fused alpha-mass CUDA binary imported")
+    if module.KERNEL_VERSION != KERNEL_VERSION:
+        raise RuntimeError("fused alpha-mass Python/kernel version mismatch")
     return module
 
 
@@ -222,7 +225,7 @@ class AlphaEvidenceCache:
         return {
             "schema": CACHE_SCHEMA,
             "formula": FORMULA_VERSION,
-            "kernel": "alpha-mass-fused-v1",
+            "kernel": KERNEL_VERSION,
             "gaussian_render_sha256": self.gaussian_identity,
             "camera_sha256": camera_render_sha256(camera),
             "opacity_min": float(config.alpha_opacity_min),
