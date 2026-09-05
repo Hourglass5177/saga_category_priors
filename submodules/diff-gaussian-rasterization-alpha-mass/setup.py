@@ -21,7 +21,6 @@ setup(
                 str(HERE / "ext.cpp"),
             ],
             include_dirs=[str(BASE), str(BASE / "third_party" / "glm")],
-            define_macros=[("ALPHA_MASS_NO_COLOR", None)],
         )
     ],
     cmdclass={"build_ext": BuildExtension},
