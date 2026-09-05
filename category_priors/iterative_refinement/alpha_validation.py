@@ -118,6 +118,8 @@ def validate_alpha_backend(args: Any) -> dict[str, Any]:
         inside_error = np.abs(reference.inside_mass - fused.inside_mass)
         tolerance_visible = 5e-5 * np.maximum(reference.visible_mass, 1.0)
         tolerance_inside = 5e-5 * np.maximum(reference.visible_mass[None, :], 1.0)
+        visible_ratio = visible_error / tolerance_visible
+        inside_ratio = inside_error / tolerance_inside
         reference_soft = (reference.inside_mass >= config.alpha_inside_mass_min) & (
             np.divide(reference.inside_mass, reference.visible_mass[None], out=np.zeros_like(reference.inside_mass), where=reference.visible_mass[None] > 0)
             >= config.alpha_inside_ratio_min
@@ -130,6 +132,10 @@ def validate_alpha_backend(args: Any) -> dict[str, Any]:
             "camera_index": camera_index, "mask_count": len(camera_masks),
             "visible_max_abs": float(visible_error.max(initial=0)),
             "inside_max_abs": float(inside_error.max(initial=0)),
+            "visible_max_tolerance_ratio": float(visible_ratio.max(initial=0)),
+            "inside_max_tolerance_ratio": float(inside_ratio.max(initial=0)),
+            "visible_outside_tolerance": int(np.count_nonzero(visible_ratio > 1.0)),
+            "inside_outside_tolerance": int(np.count_nonzero(inside_ratio > 1.0)),
             "within_tolerance": bool(np.all(visible_error <= tolerance_visible) and np.all(inside_error <= tolerance_inside)),
             "soft_support_exact": bool(np.array_equal(reference_soft, fused_soft)),
             "near_threshold_fraction": float(np.mean(
