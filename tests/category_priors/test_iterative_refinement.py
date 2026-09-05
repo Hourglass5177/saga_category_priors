@@ -23,13 +23,19 @@ from category_priors.iterative_refinement.evidence import (
 from category_priors.iterative_refinement.local_refine import (
     SizePrior,
     binary_graph_cut,
+    build_local_graph_workset,
     fuse_objects_with_b0,
     local_roi_point_ids,
+    refine_candidate_from_workset,
     refine_candidate_local,
     trim_oversize_additions,
 )
 from category_priors.iterative_refinement.objects import combine_states, merge_objects_once
-from category_priors.iterative_refinement.pipeline import _review_round, candidate_export_contract
+from category_priors.iterative_refinement.pipeline import (
+    _cached_candidate_refinement,
+    _review_round,
+    candidate_export_contract,
+)
 from category_priors.iterative_refinement.reviewer import (
     dispersed_prompt_points,
     rank_detection_proposals,
@@ -41,7 +47,13 @@ from category_priors.iterative_refinement.alpha_backend import (
     mask_sha256,
     pack_mask_bits,
 )
-from category_priors.iterative_refinement.runtime_io import save_scene_cache
+from category_priors.iterative_refinement.runtime_io import (
+    load_local_result,
+    load_local_workset,
+    save_local_result,
+    save_local_workset,
+    save_scene_cache,
+)
 from category_priors.iterative_refinement.views import (
     CropSpec,
     crop_box_to_image,
@@ -304,3 +316,134 @@ def test_fused_backend_producer_can_be_pinned(tmp_path, monkeypatch) -> None:
     producer = tmp_path / "producer" / "diff_gaussian_rasterization_alpha_mass"
     monkeypatch.setenv("SAGA_ALPHA_MASS_PACKAGE_ROOT", str(producer))
     assert expected_fused_package() == producer.resolve()
+
+
+def test_one_hard_point_does_not_activate_a_disconnected_region() -> None:
+    xyz = np.array([
+        [0., 0., 0.], [.01, 0., 0.], [.02, 0., 0.],
+        [1., 0., 0.], [1.01, 0., 0.], [1.02, 0., 0.],
+    ])
+    seed = CandidateSeed(4, (4,), "chair", np.array([0, 3, 4]), np.array([0]), "post_filter", .5)
+    evidence = GaussianEvidence(
+        4, np.array([0, 3]), np.array([2., 0.]), np.zeros(2), np.ones(2), 2, 0, ("h",),
+    )
+    workset = build_local_graph_workset(
+        seed=seed, evidence=evidence, xyz_m=xyz, affinity=np.ones((6, 2)),
+        b0_labels=np.full(6, -1), prior=SizePrior(.2, (2., 2., 2.), "global"),
+        scene_tree=cKDTree(xyz),
+    )
+    assert set(workset.roi_point_ids.tolist()) == {0, 1, 2}
+    result = refine_candidate_from_workset(
+        seed=seed, workset=workset, xyz_m=xyz,
+        prior=SizePrior(.2, (2., 2., 2.), "global"),
+        profile=RefinementProfile("balanced", 1., 1.), round_index=1,
+        review_class="chair", reliable_review_class=True,
+    )
+    assert {3, 4}.issubset(set(result.state.point_ids.tolist()))
+    assert result.diagnostics["processed_components"] == 1
+
+
+def test_three_profiles_reuse_one_profile_independent_workset() -> None:
+    xyz = np.array([[0., 0., 0.], [.01, 0., 0.], [.02, 0., 0.]])
+    seed = CandidateSeed(0, (0,), "chair", np.array([0]), np.array([0]), "post_filter", .5)
+    evidence = GaussianEvidence(0, np.array([0]), np.array([2.]), np.zeros(1), np.ones(1), 2, 0, ("h",))
+    workset = build_local_graph_workset(
+        seed=seed, evidence=evidence, xyz_m=xyz, affinity=np.ones((3, 2)),
+        b0_labels=np.full(3, -1), prior=SizePrior(.2, (2., 2., 2.), "global"),
+    )
+    edge_snapshot = workset.graph_edges.copy()
+    for profile in (
+        RefinementProfile("stable", .5, 2.),
+        RefinementProfile("balanced", 1., 1.),
+        RefinementProfile("coverage", 2., .5),
+    ):
+        refine_candidate_from_workset(
+            seed=seed, workset=workset, xyz_m=xyz,
+            prior=SizePrior(.2, (2., 2., 2.), "global"), profile=profile,
+            round_index=1, review_class=None, reliable_review_class=False,
+        )
+    assert np.array_equal(workset.graph_edges, edge_snapshot)
+
+
+def test_fixed_axis_batch_trim_is_deterministic_and_protects_evidence() -> None:
+    xyz = np.array([[0., 0., 0.], [.01, 0., 0.], [.02, 0., 0.], [1., 0., 0.], [2., 0., 0.]])
+    kwargs = dict(
+        selected_ids=np.arange(5), original_ids=np.array([0]), hard_positive_ids=np.array([1]),
+        margins=np.array([5., 4., 3., -2., -1.]), xyz_m=xyz, limit=(.1, .1, .1),
+    )
+    first, removed = trim_oversize_additions(**kwargs)
+    second, _ = trim_oversize_additions(**kwargs)
+    assert np.array_equal(first, second)
+    assert {0, 1}.issubset(set(first.tolist()))
+    assert removed >= 1
+
+
+def test_fixed_axis_trim_does_not_reintroduce_an_unselected_anchor() -> None:
+    xyz = np.array([[0., 0., 0.], [1., 0., 0.], [2., 0., 0.]])
+    selected, _ = trim_oversize_additions(
+        selected_ids=np.array([1, 2]), original_ids=np.array([0]),
+        hard_positive_ids=np.empty(0, dtype=np.int64), margins=np.array([-2., -1.]),
+        xyz_m=xyz, limit=(.1, .1, .1),
+    )
+    assert 0 not in selected
+
+
+def test_fixed_axis_trim_accepts_an_empty_graph_result() -> None:
+    selected, removed = trim_oversize_additions(
+        selected_ids=np.empty(0, dtype=np.int64), original_ids=np.array([0]),
+        hard_positive_ids=np.empty(0, dtype=np.int64), margins=np.empty(0),
+        xyz_m=np.zeros((1, 3)), limit=(.1, .1, .1),
+    )
+    assert selected.size == 0 and removed == 0
+
+
+def test_local_workset_and_result_checkpoint_round_trip(tmp_path) -> None:
+    xyz = np.array([[0., 0., 0.], [.01, 0., 0.]])
+    seed = CandidateSeed(0, (0,), "chair", np.array([0]), np.array([0]), "post_filter", .5)
+    evidence = GaussianEvidence(0, np.array([0]), np.array([2.]), np.zeros(1), np.ones(1), 2, 0, ("h",))
+    prior = SizePrior(.2, (2., 2., 2.), "global")
+    workset = build_local_graph_workset(
+        seed=seed, evidence=evidence, xyz_m=xyz, affinity=np.ones((2, 2)),
+        b0_labels=np.full(2, -1), prior=prior,
+    )
+    save_local_workset(tmp_path / "work", "identity-a", workset)
+    loaded = load_local_workset(tmp_path / "work", "identity-a")
+    assert loaded is not None and np.array_equal(loaded.roi_point_ids, workset.roi_point_ids)
+    assert load_local_workset(tmp_path / "work", "identity-b") is None
+    (tmp_path / "work" / "workset.npz").write_bytes(b"damaged")
+    assert load_local_workset(tmp_path / "work", "identity-a") is None
+    save_local_workset(tmp_path / "work", "identity-a", workset)
+    result = refine_candidate_from_workset(
+        seed=seed, workset=workset, xyz_m=xyz, prior=prior,
+        profile=RefinementProfile("balanced", 1., 1.), round_index=1,
+        review_class=None, reliable_review_class=False,
+    )
+    save_local_result(tmp_path / "result", "result-a", result)
+    restored = load_local_result(tmp_path / "result", "result-a")
+    assert restored is not None and np.array_equal(restored.state.point_ids, result.state.point_ids)
+    assert restored.diagnostics["result_cache_hit"]
+
+
+def test_candidate_checkpoint_reuses_workset_then_completed_profile(tmp_path) -> None:
+    xyz = np.array([[0., 0., 0.], [.01, 0., 0.]])
+    seed = CandidateSeed(0, (0,), "chair", np.array([0]), np.array([0]), "post_filter", .5)
+    evidence = GaussianEvidence(0, np.array([0]), np.array([2.]), np.zeros(1), np.ones(1), 2, 0, ("h",))
+    common = dict(
+        seed=seed, evidence=evidence, xyz=xyz, affinity=np.ones((2, 2)),
+        b0=np.full(2, -1), prior=SizePrior(.2, (2., 2., 2.), "global"),
+        round_index=1, review_class=None, reliable=False,
+        config=RefinementConfig(), scene_tree=cKDTree(xyz), cache_root=tmp_path,
+        cache_mode="readwrite", cache_context={"commit": "test"},
+    )
+    _, workset_hit, result_hit = _cached_candidate_refinement(
+        **common, profile=RefinementProfile("stable", .5, 2.),
+    )
+    assert not workset_hit and not result_hit
+    _, workset_hit, result_hit = _cached_candidate_refinement(
+        **common, profile=RefinementProfile("balanced", 1., 1.),
+    )
+    assert workset_hit and not result_hit
+    _, workset_hit, result_hit = _cached_candidate_refinement(
+        **common, profile=RefinementProfile("balanced", 1., 1.),
+    )
+    assert workset_hit and result_hit

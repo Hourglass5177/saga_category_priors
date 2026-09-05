@@ -41,12 +41,21 @@ from .evidence import (
     hypothesis_gaussian_evidence,
     normalized_soft_membership,
 )
-from .local_refine import fuse_objects_with_b0, refine_candidate_local, size_prior_from_payload
+from .local_refine import (
+    build_local_graph_workset,
+    fuse_objects_with_b0,
+    refine_candidate_from_workset,
+    size_prior_from_payload,
+)
 from .objects import merge_objects_once, split_disconnected_objects
 from .alpha_backend import AlphaEvidenceCache, gaussian_render_sha256
 from .rendering import render_alpha_mass, render_camera_maps
 from .reviewer import GroundedSamFullImageReviewer
-from .runtime_io import camera_center, camera_rgb, file_sha256, focal_geometric_mean, json_atomic, load_cameras, npz_atomic, save_scene_cache
+from .runtime_io import (
+    camera_center, camera_rgb, file_sha256, focal_geometric_mean, json_atomic,
+    load_cameras, load_local_result, load_local_workset, npz_atomic,
+    refinement_identity, save_local_result, save_local_workset, save_scene_cache,
+)
 from .seeds import load_reservoir
 from .views import (
     make_crop_spec,
@@ -475,32 +484,103 @@ def _review_round(
     return tuple(hypotheses), evidence_by_candidate, selected_by_candidate
 
 
+def _cached_candidate_refinement(
+    *, seed: CandidateSeed, evidence: GaussianEvidence, xyz: np.ndarray,
+    affinity: np.ndarray, b0: np.ndarray, prior: Any, profile: Any,
+    round_index: int, review_class: str | None, reliable: bool,
+    config: RefinementConfig, scene_tree: Any, cache_root: Path,
+    cache_mode: str, cache_context: Mapping[str, Any],
+) -> tuple[Any, bool, bool]:
+    workset_id = refinement_identity(
+        {
+            **dict(cache_context), "kind": "local-workset-v1", "round": round_index,
+            "candidate_id": seed.candidate_id, "prior": asdict(prior), "config": asdict(config),
+        },
+        (
+            seed.seed_support, seed.seed_anchor, evidence.point_ids,
+            evidence.hard_positive_views, evidence.hard_negative_views,
+            evidence.alpha_soft_support,
+        ),
+    )
+    variant = cache_root / f"round{round_index}" / f"candidate_{seed.candidate_id:05d}" / f"variant_{workset_id[:16]}"
+    workset = None if cache_mode == "off" else load_local_workset(variant, workset_id)
+    workset_hit = workset is not None
+    if workset is None:
+        if cache_mode == "readonly":
+            raise FileNotFoundError(f"missing valid local workset: {variant}")
+        workset = build_local_graph_workset(
+            seed=seed, evidence=evidence, xyz_m=xyz, affinity=affinity,
+            b0_labels=b0, prior=prior, config=config, scene_tree=scene_tree,
+        )
+        if cache_mode == "readwrite":
+            save_local_workset(variant, workset_id, workset)
+    result_id = refinement_identity(
+        {
+            **dict(cache_context), "kind": "local-result-v1", "workset": workset_id,
+            "profile": asdict(profile), "round": round_index,
+            "review_class": review_class, "reliable": reliable,
+            "trim_contract": "fixed-pca-prefix-v1",
+        }, (),
+    )
+    result_root = variant / profile.name
+    result = None if cache_mode == "off" else load_local_result(result_root, result_id)
+    result_hit = result is not None
+    if result is None:
+        if cache_mode == "readonly":
+            raise FileNotFoundError(f"missing valid local result: {result_root}")
+        result = refine_candidate_from_workset(
+            seed=seed, workset=workset, xyz_m=xyz, prior=prior, profile=profile,
+            round_index=round_index, review_class=review_class,
+            reliable_review_class=reliable, config=config,
+        )
+        if cache_mode == "readwrite":
+            save_local_result(result_root, result_id, result)
+    return result, workset_hit, result_hit
+
+
 def _refine_profiles(
     *, seeds: Sequence[CandidateSeed], evidence: Mapping[int, GaussianEvidence],
     selected: Mapping[int, Sequence[MaskHypothesis]], xyz: np.ndarray,
     affinity: np.ndarray, b0: np.ndarray, priors: Mapping[str, Any],
     condition: str, round_index: int, config: RefinementConfig,
-    scene_tree: Any | None = None,
-) -> tuple[dict[str, tuple[ObjectState, ...]], list[LineageRecord]]:
-    states_by_profile: dict[str, tuple[ObjectState, ...]] = {}
+    scene_tree: Any | None = None, cache_root: Path, cache_mode: str,
+    cache_context: Mapping[str, Any], progress: Any | None = None,
+) -> tuple[dict[str, tuple[ObjectState, ...]], list[LineageRecord], list[dict[str, Any]]]:
+    states_by_profile: dict[str, list[ObjectState]] = {name: [] for name in PROFILES}
     lineage: list[LineageRecord] = []
-    for profile_name, profile in PROFILES.items():
-        states = []
-        for seed in seeds:
-            review_class, reliable = _review_class(selected.get(seed.candidate_id, ()))
-            class_name = (
-                seed.branch_class
-                if condition == "class" and round_index == 1
-                else (review_class if condition == "class" and reliable else None)
+    diagnostics: list[dict[str, Any]] = []
+    completed = 0
+    total = len(seeds) * len(PROFILES)
+    for seed in seeds:
+        review_class, reliable = _review_class(selected.get(seed.candidate_id, ()))
+        class_name = seed.branch_class if condition == "class" and round_index == 1 else (
+            review_class if condition == "class" and reliable else None
+        )
+        prior = size_prior_from_payload(priors, class_name)
+        for profile_name, profile in PROFILES.items():
+            result, workset_hit, result_hit = _cached_candidate_refinement(
+                seed=seed, evidence=evidence[seed.candidate_id], xyz=xyz,
+                affinity=affinity, b0=b0, prior=prior, profile=profile,
+                round_index=round_index, review_class=review_class, reliable=reliable,
+                config=config, scene_tree=scene_tree, cache_root=cache_root,
+                cache_mode=cache_mode, cache_context=cache_context,
             )
-            prior = size_prior_from_payload(priors, class_name)
-            result = refine_candidate_local(
-                seed=seed, evidence=evidence[seed.candidate_id], xyz_m=xyz,
-                affinity=affinity, b0_labels=b0, prior=prior, profile=profile,
-                round_index=round_index, review_class=review_class,
-                reliable_review_class=reliable, config=config, scene_tree=scene_tree,
-            )
-            states.append(result.state)
+            states_by_profile[profile_name].append(result.state)
+            row = {
+                "round": round_index, "candidate_id": seed.candidate_id,
+                "profile": profile_name, "workset_cache_hit": workset_hit,
+                "result_cache_hit": result_hit, **dict(result.diagnostics),
+            }
+            diagnostics.append(row)
+            completed += 1
+            if progress is not None:
+                progress({
+                    "round": round_index, "candidate_id": seed.candidate_id,
+                    "profile": profile_name, "completed": completed, "total": total,
+                    "workset_cache_hits": sum(int(item["workset_cache_hit"]) for item in diagnostics),
+                    "result_cache_hits": sum(int(item["result_cache_hit"]) for item in diagnostics),
+                    "latest_diagnostics": row,
+                })
             lineage.append(LineageRecord(
                 node_id=f"{profile_name}:r{round_index}:refine:{seed.candidate_id}",
                 parent_node_ids=(f"seed:{seed.candidate_id}",),
@@ -510,8 +590,7 @@ def _refine_profiles(
                 removed_point_ids=tuple(np.setdiff1d(seed.seed_support, result.state.point_ids).tolist()),
                 hypothesis_ids=evidence[seed.candidate_id].selected_hypothesis_ids,
             ))
-        states_by_profile[profile_name] = tuple(states)
-    return states_by_profile, lineage
+    return {name: tuple(rows) for name, rows in states_by_profile.items()}, lineage, diagnostics
 
 
 def _refine_second_round_profiles(
@@ -519,9 +598,14 @@ def _refine_second_round_profiles(
     evidence: Mapping[int, GaussianEvidence], selected: Mapping[int, Sequence[MaskHypothesis]],
     xyz: np.ndarray, affinity: np.ndarray, b0: np.ndarray, priors: Mapping[str, Any],
     condition: str, config: RefinementConfig, scene_tree: Any | None = None,
-) -> tuple[dict[str, tuple[ObjectState, ...]], list[LineageRecord]]:
+    cache_root: Path, cache_mode: str, cache_context: Mapping[str, Any],
+    progress: Any | None = None,
+) -> tuple[dict[str, tuple[ObjectState, ...]], list[LineageRecord], list[dict[str, Any]]]:
     output: dict[str, tuple[ObjectState, ...]] = {}
     lineage: list[LineageRecord] = []
+    diagnostics: list[dict[str, Any]] = []
+    completed = 0
+    total = sum(len(rows) for rows in states1.values())
     seeds_by_id = {row.candidate_id: row for row in original_seeds}
     for profile_name, profile in PROFILES.items():
         states = []
@@ -532,13 +616,29 @@ def _refine_second_round_profiles(
             if condition == "class" and reliable and review_class is not None:
                 seed = replace(seed, branch_class=review_class)
             prior = size_prior_from_payload(priors, review_class if condition == "class" and reliable else None)
-            result = refine_candidate_local(
-                seed=seed, evidence=evidence[seed.candidate_id], xyz_m=xyz,
-                affinity=affinity, b0_labels=b0, prior=prior, profile=profile,
-                round_index=2, review_class=review_class,
-                reliable_review_class=reliable, config=config, scene_tree=scene_tree,
+            result, workset_hit, result_hit = _cached_candidate_refinement(
+                seed=seed, evidence=evidence[seed.candidate_id], xyz=xyz,
+                affinity=affinity, b0=b0, prior=prior, profile=profile,
+                round_index=2, review_class=review_class, reliable=reliable,
+                config=config, scene_tree=scene_tree, cache_root=cache_root,
+                cache_mode=cache_mode, cache_context=cache_context,
             )
             states.append(result.state)
+            row = {
+                "round": 2, "candidate_id": seed.candidate_id, "profile": profile_name,
+                "workset_cache_hit": workset_hit, "result_cache_hit": result_hit,
+                **dict(result.diagnostics),
+            }
+            diagnostics.append(row)
+            completed += 1
+            if progress is not None:
+                progress({
+                    "round": 2, "candidate_id": seed.candidate_id, "profile": profile_name,
+                    "completed": completed, "total": total,
+                    "workset_cache_hits": sum(int(item["workset_cache_hit"]) for item in diagnostics),
+                    "result_cache_hits": sum(int(item["result_cache_hit"]) for item in diagnostics),
+                    "latest_diagnostics": row,
+                })
             lineage.append(LineageRecord(
                 node_id=f"{profile_name}:r2:refine:{seed.candidate_id}",
                 parent_node_ids=(f"{profile_name}:r1:refine:{seed.candidate_id}",),
@@ -549,7 +649,7 @@ def _refine_second_round_profiles(
                 hypothesis_ids=evidence[seed.candidate_id].selected_hypothesis_ids,
             ))
         output[profile_name] = tuple(states)
-    return output, lineage
+    return output, lineage, diagnostics
 
 
 def _load_models(args: Any) -> tuple[Any, Any, np.ndarray, np.ndarray, np.ndarray]:
@@ -584,16 +684,27 @@ def run_scene(args: Any) -> dict[str, Any]:
     stage_started = time.perf_counter()
     last_stage = stage_started
     stage_seconds: dict[str, float] = {}
+    latest_complete_stage = "initializing"
 
     def mark_stage(name: str) -> None:
-        nonlocal last_stage
+        nonlocal last_stage, latest_complete_stage
         now = time.perf_counter()
         stage_seconds[name] = now - last_stage
         last_stage = now
+        latest_complete_stage = name
         json_atomic(output / "stage_progress.json", {
             "state": "running", "latest_complete_stage": name,
             "stage_seconds": stage_seconds,
             "elapsed_seconds": now - stage_started,
+        })
+
+    def mark_candidate(payload: Mapping[str, Any]) -> None:
+        json_atomic(output / "stage_progress.json", {
+            "state": "running", "latest_complete_stage": latest_complete_stage,
+            "active_stage": f"round{payload['round']}_local_refinement",
+            "candidate_progress": dict(payload), "stage_seconds": stage_seconds,
+            "elapsed_seconds": time.perf_counter() - stage_started,
+            "updated_at_unix": time.time(),
         })
     seeds, b0, reservoir_metadata = load_reservoir(args.reservoir)
     bank = load_candidate_bank(args.candidate_bank)
@@ -604,6 +715,18 @@ def run_scene(args: Any) -> dict[str, Any]:
     rgb, _, xyz_scene, affinity, diagnostic_masks = _load_models(args)
     if len(xyz_scene) != len(b0) or bank.gaussian_xyz_sha256 != gaussian_xyz_sha256(xyz_scene):
         raise ValueError("reservoir/bank/Gaussian identity mismatch")
+    refinement_cache_mode = getattr(args, "refinement_cache_mode", "readwrite")
+    if refinement_cache_mode not in {"readwrite", "readonly", "off"}:
+        raise ValueError("refinement_cache_mode must be readwrite, readonly, or off")
+    refinement_cache_root = Path(getattr(args, "refinement_cache_dir", None) or (output / "local_refinement"))
+    runtime_commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parents[2], text=True
+    ).strip()
+    cache_context = {
+        "commit": runtime_commit, "gaussian_xyz_sha256": bank.gaussian_xyz_sha256,
+        "affinity_asset_sha256": file_sha256(args.contrastive_feature_point_cloud_path),
+        "b0_identity": refinement_identity({"kind": "b0"}, (b0,)),
+    }
     xyz = xyz_scene * float(bank.scene_scale_m_per_unit)
     # The former runtime rebuilt the same 1.5M-point tree once per candidate,
     # profile, and round. That was mathematically redundant and explains the
@@ -654,11 +777,14 @@ def run_scene(args: Any) -> dict[str, Any]:
         gaussian_sha=bank.gaussian_xyz_sha256,
     )
     mark_stage("round1_review_and_alpha")
-    states1, profile_lineage = _refine_profiles(
+    states1, profile_lineage, diagnostics1 = _refine_profiles(
         seeds=seeds, evidence=evidence1, selected=selected1, xyz=xyz,
         affinity=affinity, b0=b0, priors=priors, condition=args.condition,
         round_index=1, config=config, scene_tree=scene_tree,
+        cache_root=refinement_cache_root, cache_mode=refinement_cache_mode,
+        cache_context=cache_context, progress=mark_candidate,
     )
+    json_atomic(output / "local_refinement_round1_diagnostics.json", diagnostics1)
     mark_stage("round1_local_refinement")
     lineage = [
         LineageRecord(
@@ -670,6 +796,27 @@ def run_scene(args: Any) -> dict[str, Any]:
         for seed in seeds
     ]
     lineage.extend(profile_lineage)
+    # The candidate-level cache is the executable checkpoint; this compact
+    # round-level index makes the completed C1 state and its lineage auditable
+    # before any second-round model work begins.
+    round1_arrays: dict[str, np.ndarray] = {}
+    round1_rows = []
+    for profile_name, states in states1.items():
+        for ordinal, state in enumerate(states):
+            key = f"{profile_name}_{ordinal:05d}"
+            round1_arrays[key] = state.point_ids
+            round1_rows.append({
+                "profile": profile_name, "candidate_id": state.object_id,
+                "point_key": key, "changed": state.changed,
+                "review_class": state.review_class,
+            })
+    npz_atomic(output / "round1_checkpoint.npz", **round1_arrays)
+    json_atomic(output / "round1_checkpoint.json", {
+        "schema": "saga-local-refinement-round-checkpoint-v1",
+        "commit": runtime_commit, "states": round1_rows,
+        "lineage": [row.__dict__ for row in lineage],
+    })
+    mark_stage("round1_checkpoint")
     # Round two observes the balanced C1 state.  The three graph profiles still
     # replay identical model evidence, so their only varying factors remain the
     # registered unary/pairwise weights.
@@ -744,12 +891,15 @@ def run_scene(args: Any) -> dict[str, Any]:
             )
         else:
             combined_evidence[seed.candidate_id] = evidence1[seed.candidate_id]
-    states2, lineage2 = _refine_second_round_profiles(
+    states2, lineage2, diagnostics2 = _refine_second_round_profiles(
         original_seeds=seeds, states1=states1,
         evidence=combined_evidence, selected=combined_selected,
         xyz=xyz, affinity=affinity, b0=b0, priors=priors,
         condition=args.condition, config=config, scene_tree=scene_tree,
+        cache_root=refinement_cache_root, cache_mode=refinement_cache_mode,
+        cache_context=cache_context, progress=mark_candidate,
     )
+    json_atomic(output / "local_refinement_round2_diagnostics.json", diagnostics2)
     mark_stage("round2_local_refinement")
     lineage.extend(lineage2)
     independent_pairs = {}
@@ -867,9 +1017,7 @@ def run_scene(args: Any) -> dict[str, Any]:
         }
     mark_stage("voting_and_export")
     provenance = {
-        "commit": subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parents[2], text=True
-        ).strip(),
+        "commit": runtime_commit,
         "condition": args.condition,
         "candidate_bank": str(Path(args.candidate_bank).resolve()),
         "reservoir": str(Path(args.reservoir).resolve()),
@@ -879,6 +1027,8 @@ def run_scene(args: Any) -> dict[str, Any]:
         "alpha_backend": args.alpha_backend,
         "alpha_cache_dir": str(alpha_cache_root.resolve()),
         "alpha_cache_mode": args.alpha_cache_mode,
+        "refinement_cache_dir": str(refinement_cache_root.resolve()),
+        "refinement_cache_mode": refinement_cache_mode,
         "alpha_cache_stats": asdict(alpha_cache.stats),
         "stage_seconds": stage_seconds,
         "review_cache_source": None if review_cache_source is None else str(review_cache_source.resolve()),
@@ -896,6 +1046,15 @@ def run_scene(args: Any) -> dict[str, Any]:
         "profiles": {name: asdict(value) for name, value in PROFILES.items()},
         "round2_triggered_candidates": [row.candidate_id for row in triggered],
         "reservoir_provenance": reservoir_metadata.get("provenance", {}),
+        "local_refinement_diagnostics": {
+            "round1": diagnostics1,
+            "round2": diagnostics2,
+            "pathological_candidates": sorted(
+                diagnostics1 + diagnostics2,
+                key=lambda row: float(row.get("total_profile_seconds", 0.0)),
+                reverse=True,
+            )[:20],
+        },
     }
     save_scene_cache(
         output, hypotheses=hypotheses1 + hypotheses2,

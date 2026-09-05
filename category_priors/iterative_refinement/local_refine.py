@@ -2,6 +2,7 @@ from __future__ import annotations
 
 """Deterministic local graph refinement, size control, and constrained B0 fusion."""
 
+import time
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -35,6 +36,24 @@ class LocalRefinementResult:
     graph_too_large: bool
     no_hard_evidence: bool
     size_trimmed_count: int
+    diagnostics: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class LocalGraphWorkset:
+    """Profile-independent local graph and evidence for one candidate state."""
+
+    roi_point_ids: np.ndarray
+    graph_edges: np.ndarray
+    base_edge_weights: np.ndarray
+    component_labels: np.ndarray
+    base_positive: np.ndarray
+    alpha_soft_support: np.ndarray
+    negative: np.ndarray
+    hard_positive: np.ndarray
+    hard_negative: np.ndarray
+    hard_count: np.ndarray
+    outside_support_ids: np.ndarray
     diagnostics: Mapping[str, Any]
 
 
@@ -163,6 +182,147 @@ def mutual_local_edges(
     return np.asarray(edges, dtype=np.int64).reshape(-1, 2), np.asarray(weights, dtype=np.float64)
 
 
+def mutual_local_topology(
+    xyz_m: Any,
+    affinity: Any,
+    roi_point_ids: Any,
+    config: RefinementConfig = RefinementConfig(),
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return profile-independent mutual-neighbor edges and their base weights."""
+    xyz = np.asarray(xyz_m, dtype=np.float64)
+    features = np.asarray(affinity, dtype=np.float64)
+    ids = np.asarray(roi_point_ids, dtype=np.int64)
+    if not len(ids):
+        return np.empty((0, 2), dtype=np.int64), np.empty(0, dtype=np.float64)
+    local_xyz = xyz[ids]
+    local_features = features[ids]
+    norms = np.linalg.norm(local_features, axis=1, keepdims=True)
+    local_features = np.divide(local_features, norms, out=np.zeros_like(local_features), where=norms > 0)
+    count = len(ids)
+    k = min(config.graph_neighbors + 1, count)
+    distances, neighbors = cKDTree(local_xyz).query(
+        local_xyz, k=k, distance_upper_bound=config.graph_edge_radius_m,
+    )
+    if k == 1:
+        distances = distances[:, None]
+        neighbors = neighbors[:, None]
+    directed: dict[tuple[int, int], float] = {}
+    for left in range(count):
+        for distance, right in zip(distances[left, 1:], neighbors[left, 1:]):
+            right_id = int(right)
+            if right_id >= count or not np.isfinite(distance) or left == right_id:
+                continue
+            directed[(left, right_id)] = float(distance)
+    edges: list[tuple[int, int]] = []
+    weights: list[float] = []
+    for (left, right), distance in sorted(directed.items()):
+        if left >= right or (right, left) not in directed:
+            continue
+        cosine = max(float(local_features[left] @ local_features[right]), 0.0)
+        edges.append((left, right))
+        weights.append(float(np.exp(
+            -(distance * distance) / (2.0 * config.graph_edge_radius_m**2)
+        ) * cosine**2))
+    return np.asarray(edges, dtype=np.int64).reshape(-1, 2), np.asarray(weights, dtype=np.float64)
+
+
+def _active_local_roi_point_ids(
+    xyz_m: np.ndarray,
+    seed: CandidateSeed,
+    evidence: GaussianEvidence,
+    prior: SizePrior,
+    config: RefinementConfig,
+    scene_tree: cKDTree,
+) -> np.ndarray:
+    evidence_ids = np.asarray(evidence.point_ids, dtype=np.int64)
+    hard_ids = evidence_ids[np.asarray(evidence.hard_positive_views) >= 2]
+    sources = np.union1d(seed.seed_anchor, hard_ids)
+    if not len(sources):
+        return np.empty(0, dtype=np.int64)
+    radius = float(np.clip(
+        config.graph_radius_fraction * prior.diagonal_q50_m,
+        config.graph_radius_min_m,
+        config.graph_radius_max_m,
+    ))
+    discovered: set[int] = set(int(value) for value in sources)
+    for start in range(0, len(sources), 4096):
+        for neighbors in scene_tree.query_ball_point(xyz_m[sources[start:start + 4096]], r=radius):
+            discovered.update(int(value) for value in neighbors)
+    return np.asarray(sorted(discovered), dtype=np.int64)
+
+
+def build_local_graph_workset(
+    *,
+    seed: CandidateSeed,
+    evidence: GaussianEvidence,
+    xyz_m: Any,
+    affinity: Any,
+    b0_labels: Any,
+    prior: SizePrior,
+    config: RefinementConfig = RefinementConfig(),
+    scene_tree: cKDTree | None = None,
+) -> LocalGraphWorkset:
+    """Build one reusable graph for all refinement profiles."""
+    started = time.perf_counter()
+    xyz = np.asarray(xyz_m, dtype=np.float64)
+    b0 = np.asarray(b0_labels, dtype=np.int64)
+    hard_present = bool(np.any(np.asarray(evidence.hard_positive_views) >= 2))
+    if not hard_present:
+        return LocalGraphWorkset(
+            np.empty(0, np.int64), np.empty((0, 2), np.int64), np.empty(0),
+            np.empty(0, np.int64), np.empty(0), np.empty(0), np.empty(0),
+            np.empty(0, bool), np.empty(0, bool), np.empty(0), seed.seed_support.copy(),
+            {"reason": "no_two_view_hard_support", "total_seconds": time.perf_counter() - started},
+        )
+    tree = scene_tree if scene_tree is not None else cKDTree(xyz)
+    roi_started = time.perf_counter()
+    roi = _active_local_roi_point_ids(xyz, seed, evidence, prior, config, tree)
+    roi_seconds = time.perf_counter() - roi_started
+    topology_started = time.perf_counter()
+    edges, base_weights = mutual_local_topology(xyz, affinity, roi, config)
+    topology_seconds = time.perf_counter() - topology_started
+    component_started = time.perf_counter()
+    if len(roi):
+        if len(edges):
+            adjacency = coo_matrix(
+                (np.ones(2 * len(edges), dtype=np.int8),
+                 (np.concatenate((edges[:, 0], edges[:, 1])), np.concatenate((edges[:, 1], edges[:, 0])))),
+                shape=(len(roi), len(roi)),
+            ).tocsr()
+            component_count, component_labels = connected_components(adjacency, directed=False)
+        else:
+            component_count = len(roi)
+            component_labels = np.arange(len(roi), dtype=np.int64)
+    else:
+        component_count, component_labels = 0, np.empty(0, dtype=np.int64)
+    component_seconds = time.perf_counter() - component_started
+    unary_started = time.perf_counter()
+    neutral = RefinementProfile("balanced", 1.0, 1.0)
+    positive, negative, hp, hn, hard_count = _evidence_on_roi(seed, evidence, roi, b0, neutral)
+    position = {int(point_id): index for index, point_id in enumerate(roi)}
+    alpha_soft = np.zeros(len(roi), dtype=np.float64)
+    for point_id, value in zip(evidence.point_ids, evidence.alpha_soft_support):
+        offset = position.get(int(point_id))
+        if offset is not None:
+            alpha_soft[offset] = float(value)
+    base_positive = positive - alpha_soft
+    unary_seconds = time.perf_counter() - unary_started
+    outside = np.setdiff1d(seed.seed_support, roi, assume_unique=True)
+    return LocalGraphWorkset(
+        roi, edges, base_weights, np.asarray(component_labels, dtype=np.int64),
+        base_positive, alpha_soft, negative, hp, hn, hard_count, outside,
+        {
+            "reason": "ready", "raw_roi_points": int(len(roi)), "edge_count": int(len(edges)),
+            "component_count": int(component_count), "hard_positive_points": int(np.count_nonzero(hp)),
+            "anchor_points": int(np.count_nonzero(np.isin(roi, seed.seed_anchor))),
+            "soft_evidence_points": int(np.count_nonzero(alpha_soft > 0)),
+            "roi_seconds": roi_seconds, "topology_seconds": topology_seconds,
+            "component_seconds": component_seconds, "unary_seconds": unary_seconds,
+            "total_seconds": time.perf_counter() - started,
+        },
+    )
+
+
 def _evidence_on_roi(
     seed: CandidateSeed,
     evidence: GaussianEvidence,
@@ -288,47 +448,74 @@ def trim_oversize_additions(
     limit: tuple[float, float, float],
 ) -> tuple[np.ndarray, int]:
     selected = np.asarray(selected_ids, dtype=np.int64)
+    if not len(selected):
+        return selected, 0
     if _within_extent_limit(xyz_m[selected], limit):
         return selected, 0
-    protected = set(int(value) for value in original_ids) | set(int(value) for value in hard_positive_ids)
+    # Anchors/hard positives are protected only when the graph actually selected
+    # them.  An anchor may legitimately lose the cut; it must not be reintroduced
+    # by the size pass (and it has no projection in ``selected`` in that case).
+    protected_candidates = set(int(value) for value in original_ids) | set(
+        int(value) for value in hard_positive_ids
+    )
+    protected = set(int(value) for value in selected if int(value) in protected_candidates)
     margin_by_id = {int(point_id): float(value) for point_id, value in zip(selected, margins)}
-    removable = sorted(
+    removable = np.asarray(sorted(
         (int(value) for value in selected if int(value) not in protected),
         key=lambda point_id: (margin_by_id[point_id], point_id),
-    )
-    retained = set(int(value) for value in selected)
-    for point_id in removable:
-        retained.remove(point_id)
-        candidate = np.asarray(sorted(retained), dtype=np.int64)
-        if _within_extent_limit(xyz_m[candidate], limit):
-            return candidate, len(selected) - len(candidate)
-    return np.asarray(sorted(retained), dtype=np.int64), len(selected) - len(retained)
+    ), dtype=np.int64)
+    if not len(removable):
+        return np.asarray(sorted(protected), dtype=np.int64), 0
+    all_xyz = np.asarray(xyz_m, dtype=np.float64)
+    points = all_xyz[selected]
+    centered = points - points.mean(axis=0, keepdims=True)
+    covariance = centered.T @ centered / max(len(points), 1)
+    _, axes = np.linalg.eigh(covariance)
+    projections = points @ axes
+    projection_by_id = {int(point_id): projections[index] for index, point_id in enumerate(selected)}
+    protected_ids = np.asarray(sorted(protected), dtype=np.int64)
+    protected_projection = np.asarray([projection_by_id[int(point_id)] for point_id in protected_ids])
+    removable_projection = np.asarray([projection_by_id[int(point_id)] for point_id in removable])
+    suffix_min = np.minimum.accumulate(removable_projection[::-1], axis=0)[::-1]
+    suffix_max = np.maximum.accumulate(removable_projection[::-1], axis=0)[::-1]
+    if len(protected_projection):
+        protected_min = protected_projection.min(axis=0)
+        protected_max = protected_projection.max(axis=0)
+    else:
+        protected_min = np.full(3, np.inf)
+        protected_max = np.full(3, -np.inf)
+    cutoff = len(removable)
+    limit_array = np.asarray(limit, dtype=np.float64)
+    for index in range(len(removable) + 1):
+        if index < len(removable):
+            lower = np.minimum(protected_min, suffix_min[index])
+            upper = np.maximum(protected_max, suffix_max[index])
+        else:
+            lower, upper = protected_min, protected_max
+        extents = np.sort(np.maximum(upper - lower, 0.0))
+        if np.all(extents <= limit_array + 1e-9):
+            cutoff = index
+            break
+    retained = np.union1d(protected_ids, removable[cutoff:])
+    return retained, int(cutoff)
 
 
-def refine_candidate_local(
+def refine_candidate_from_workset(
     *,
     seed: CandidateSeed,
-    evidence: GaussianEvidence,
+    workset: LocalGraphWorkset,
     xyz_m: Any,
-    affinity: Any,
-    b0_labels: Any,
     prior: SizePrior,
     profile: RefinementProfile,
     round_index: int,
     review_class: str | None,
     reliable_review_class: bool,
     config: RefinementConfig = RefinementConfig(),
-    scene_tree: cKDTree | None = None,
 ) -> LocalRefinementResult:
+    started = time.perf_counter()
     xyz = np.asarray(xyz_m, dtype=np.float64)
-    b0 = np.asarray(b0_labels, dtype=np.int64)
-    # A candidate cannot change without at least one Gaussian supported by two
-    # independent views.  Previously we discovered this only after building a
-    # potentially 100k-node ROI and local k-NN graph.  The graph is unused on
-    # this path, so skip that mathematically dead work before any spatial
-    # query.  The predicate is profile-independent and identical to the hard
-    # foreground predicate produced by _evidence_on_roi below.
-    if not bool(np.any(np.asarray(evidence.hard_positive_views) >= 2)):
+    roi = workset.roi_point_ids
+    if workset.diagnostics.get("reason") == "no_two_view_hard_support":
         points = seed.seed_support.copy()
         state = ObjectState(
             object_id=seed.candidate_id,
@@ -350,57 +537,110 @@ def refine_candidate_local(
             False,
             True,
             0,
-            {"reason": "no_two_view_hard_support", "roi_points": 0, "edge_count": 0},
+            dict(workset.diagnostics) | {
+                "reason": "no_two_view_hard_support", "roi_points": 0, "edge_count": 0,
+                "profile": profile.name, "total_profile_seconds": time.perf_counter() - started,
+            },
         )
-    roi = local_roi_point_ids(xyz, seed, evidence, prior, config, scene_tree=scene_tree)
-    too_large = len(roi) > config.graph_node_limit
-    if too_large:
-        points = seed.seed_support
-        state = ObjectState(
-            seed.candidate_id,
-            seed.parent_candidate_ids,
-            points,
-            np.intersect1d(seed.seed_anchor, points, assume_unique=True),
-            np.empty(0, dtype=np.int64),
-            np.zeros(len(points)),
-            np.zeros(len(points)),
-            review_class,
-            reliable_review_class,
-            round_index,
-            False,
+    p = workset.base_positive + profile.alpha_weight * workset.alpha_soft_support
+    n = workset.negative
+    hp, hn = workset.hard_positive, workset.hard_negative
+    roi_margin = p - n
+    selected_parts: list[np.ndarray] = [workset.outside_support_ids]
+    anchor_mask = np.isin(roi, seed.seed_anchor)
+    processed_components = 0
+    anchor_only_components = 0
+    skipped_components = 0
+    oversized_components = 0
+    processed_nodes = 0
+    processed_edges = 0
+    maxflow_seconds = 0.0
+    labels = workset.component_labels
+    component_ids, component_sizes = np.unique(
+        labels, return_counts=True,
+    ) if len(labels) else (
+        np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int64)
+    )
+    # connected_components labels are not guaranteed to be contiguous in the
+    # ROI order.  Group node offsets once instead of flatnonzero(labels == id)
+    # for every component.
+    node_order = np.argsort(labels, kind="stable") if len(labels) else np.empty(0, dtype=np.int64)
+    component_starts = np.r_[0, np.cumsum(component_sizes[:-1])]
+    component_nodes = {
+        int(component_id): node_order[start:start + size]
+        for component_id, start, size in zip(component_ids, component_starts, component_sizes)
+    }
+    component_count = int(component_ids[-1]) + 1 if len(component_ids) else 0
+    hard_by_component = np.bincount(labels, weights=hp.astype(np.int8), minlength=component_count) > 0
+    anchor_by_component = np.bincount(
+        labels, weights=anchor_mask.astype(np.int8), minlength=component_count,
+    ) > 0
+    anchor_only_components = int(np.count_nonzero(anchor_by_component & ~hard_by_component))
+    skipped_components = int(np.count_nonzero(~anchor_by_component & ~hard_by_component))
+    # Every seed member in a component without hard support is preserved in one
+    # vectorized operation.  Such components never enter max-flow.
+    seed_in_roi = np.isin(roi, seed.seed_support)
+    if len(labels):
+        selected_parts.append(roi[seed_in_roi & ~hard_by_component[labels]])
+    # Partition the edge table once.  The former per-component boolean scan made
+    # this stage O(number_of_components * number_of_edges) on fragmented scenes.
+    edge_rows_by_component: dict[int, np.ndarray] = {}
+    if len(workset.graph_edges):
+        edge_components = labels[workset.graph_edges[:, 0]]
+        edge_order = np.argsort(edge_components, kind="stable")
+        ordered_components = edge_components[edge_order]
+        unique_edge_components, starts = np.unique(ordered_components, return_index=True)
+        stops = np.r_[starts[1:], len(edge_order)]
+        edge_rows_by_component = {
+            int(component_id): edge_order[start:stop]
+            for component_id, start, stop in zip(unique_edge_components, starts, stops)
+        }
+    for component_id in component_ids[hard_by_component[component_ids]]:
+        node_offsets = component_nodes[int(component_id)]
+        component_points = roi[node_offsets]
+        seed_points = component_points[seed_in_roi[node_offsets]]
+        if len(node_offsets) > config.graph_node_limit:
+            selected_parts.append(seed_points)
+            oversized_components += 1
+            continue
+        edge_rows = edge_rows_by_component.get(int(component_id), np.empty(0, dtype=np.int64))
+        if len(edge_rows):
+            positive_rows = workset.base_edge_weights[edge_rows] > 0
+            edge_rows = edge_rows[positive_rows]
+        component_edges_global = workset.graph_edges[edge_rows]
+        # ``node_offsets`` is sorted and every endpoint belongs to this component.
+        # searchsorted avoids allocating an ROI-sized lookup per component.
+        component_edges = np.searchsorted(node_offsets, component_edges_global)
+        component_weights = workset.base_edge_weights[edge_rows] * profile.pairwise_weight
+        flow_started = time.perf_counter()
+        foreground, _ = binary_graph_cut(
+            p[node_offsets], n[node_offsets], hp[node_offsets], hn[node_offsets],
+            component_edges, component_weights,
         )
-        return LocalRefinementResult(state, roi, np.empty((0, 2), np.int64), True, False, 0, {"reason": "graph_node_limit"})
-    edges, edge_weights = mutual_local_edges(xyz, affinity, roi, profile, config)
-    p, n, hp, hn, hard_count = _evidence_on_roi(seed, evidence, roi, b0, profile)
-    no_hard = not bool(np.any(hp))
-    if no_hard:
-        selected = seed.seed_support.copy()
-        margin = np.zeros(len(selected), dtype=np.float64)
-        hard_ids = np.empty(0, dtype=np.int64)
-        hard_counts = np.zeros(len(selected), dtype=np.float64)
-        trimmed = 0
-    else:
-        foreground, roi_margin = binary_graph_cut(p, n, hp, hn, edges, edge_weights)
-        selected = roi[foreground]
-        hard_ids = roi[hp & foreground]
-        selected_margin = roi_margin[foreground]
-        selected_hard_count = hard_count[foreground]
-        selected, trimmed = trim_oversize_additions(
-            selected,
-            # The full pre-KNN support is deliberately *not* immutable: it is
-            # precisely where legacy centre assignment can have introduced
-            # pollution.  Only the last surviving in-support anchor and
-            # two-view hard positives are protected from size trimming.
-            seed.seed_anchor,
-            hard_ids,
-            selected_margin,
-            xyz,
-            prior.extents_q95_m,
-        )
-        index = {int(point_id): offset for offset, point_id in enumerate(roi)}
-        margin = np.asarray([roi_margin[index[int(point_id)]] for point_id in selected])
-        hard_counts = np.asarray([hard_count[index[int(point_id)]] for point_id in selected])
-        hard_ids = selected[hard_counts >= 2]
+        maxflow_seconds += time.perf_counter() - flow_started
+        selected_parts.append(component_points[foreground])
+        processed_components += 1
+        processed_nodes += len(node_offsets)
+        processed_edges += len(component_edges)
+    selected = np.unique(np.concatenate(selected_parts)) if selected_parts else np.empty(0, dtype=np.int64)
+    index = {int(point_id): offset for offset, point_id in enumerate(roi)}
+    margin = np.asarray([roi_margin[index[int(point_id)]] if int(point_id) in index else 0.0 for point_id in selected])
+    hard_counts = np.asarray([
+        workset.hard_count[index[int(point_id)]] if int(point_id) in index else 0.0
+        for point_id in selected
+    ])
+    hard_ids = selected[hard_counts >= 2]
+    trim_started = time.perf_counter()
+    selected, trimmed = trim_oversize_additions(
+        selected, seed.seed_anchor, hard_ids, margin, xyz, prior.extents_q95_m,
+    )
+    trim_seconds = time.perf_counter() - trim_started
+    pretrim_selected = np.unique(np.concatenate(selected_parts)) if selected_parts else np.empty(0, np.int64)
+    margin_by_id = {int(point_id): float(value) for point_id, value in zip(pretrim_selected, margin)}
+    count_by_id = {int(point_id): float(value) for point_id, value in zip(pretrim_selected, hard_counts)}
+    margin = np.asarray([margin_by_id.get(int(point_id), 0.0) for point_id in selected])
+    hard_counts = np.asarray([count_by_id.get(int(point_id), 0.0) for point_id in selected])
+    hard_ids = selected[hard_counts >= 2]
     state = ObjectState(
         object_id=seed.candidate_id,
         parent_candidate_ids=seed.parent_candidate_ids,
@@ -417,18 +657,55 @@ def refine_candidate_local(
     return LocalRefinementResult(
         state,
         roi,
-        edges,
-        too_large,
-        no_hard,
+        workset.graph_edges,
+        oversized_components > 0,
+        False,
         int(trimmed),
         {
+            **dict(workset.diagnostics),
+            "profile": profile.name,
             "roi_points": int(len(roi)),
-            "edge_count": int(len(edges)),
+            "active_graph_points": int(processed_nodes),
+            "edge_count": int(len(workset.graph_edges)),
+            "active_graph_edges": int(processed_edges),
             "hard_positive_points": int(np.count_nonzero(hp)),
             "hard_negative_points": int(np.count_nonzero(hn)),
+            "processed_components": int(processed_components),
+            "anchor_only_components": int(anchor_only_components),
+            "skipped_components": int(skipped_components),
+            "oversized_components": int(oversized_components),
+            "maxflow_seconds": float(maxflow_seconds),
+            "size_trim_seconds": float(trim_seconds),
             "selected_points": int(len(selected)),
             "prior_conflict": not _within_extent_limit(xyz[selected], prior.extents_q95_m),
+            "total_profile_seconds": time.perf_counter() - started,
         },
+    )
+
+
+def refine_candidate_local(
+    *,
+    seed: CandidateSeed,
+    evidence: GaussianEvidence,
+    xyz_m: Any,
+    affinity: Any,
+    b0_labels: Any,
+    prior: SizePrior,
+    profile: RefinementProfile,
+    round_index: int,
+    review_class: str | None,
+    reliable_review_class: bool,
+    config: RefinementConfig = RefinementConfig(),
+    scene_tree: cKDTree | None = None,
+) -> LocalRefinementResult:
+    workset = build_local_graph_workset(
+        seed=seed, evidence=evidence, xyz_m=xyz_m, affinity=affinity,
+        b0_labels=b0_labels, prior=prior, config=config, scene_tree=scene_tree,
+    )
+    return refine_candidate_from_workset(
+        seed=seed, workset=workset, xyz_m=xyz_m, prior=prior, profile=profile,
+        round_index=round_index, review_class=review_class,
+        reliable_review_class=reliable_review_class, config=config,
     )
 
 
@@ -576,13 +853,17 @@ def fuse_objects_with_b0(
 
 __all__ = [
     "FusionResult",
+    "LocalGraphWorkset",
     "LocalRefinementResult",
     "SizePrior",
     "binary_graph_cut",
+    "build_local_graph_workset",
     "fuse_objects_with_b0",
     "local_roi_point_ids",
     "mutual_local_edges",
+    "mutual_local_topology",
     "object_components",
+    "refine_candidate_from_workset",
     "refine_candidate_local",
     "size_prior_from_payload",
     "trim_oversize_additions",

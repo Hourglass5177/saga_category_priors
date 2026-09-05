@@ -100,6 +100,10 @@ def build_parser() -> argparse.ArgumentParser:
     refine.add_argument("--alpha-backend", choices=("fused", "gradient-reference"), default="fused")
     refine.add_argument("--alpha-cache-dir")
     refine.add_argument("--alpha-cache-mode", choices=("readwrite", "readonly", "off"), default="readwrite")
+    refine.add_argument("--refinement-cache-dir")
+    refine.add_argument(
+        "--refinement-cache-mode", choices=("readwrite", "readonly", "off"), default="readwrite",
+    )
     refine.add_argument("--review-cache-source", help="read-only prior DINO/SAM cache root")
     refine.set_defaults(func=_refine)
 

@@ -18,6 +18,7 @@ from .contracts import (
     ObjectState,
     SCHEMA,
 )
+from .local_refine import LocalGraphWorkset, LocalRefinementResult
 
 
 def load_cameras(args: Any) -> list[Any]:
@@ -86,6 +87,111 @@ def file_sha256(path: str | Path) -> str:
     return digest.hexdigest()
 
 
+def refinement_identity(payload: Mapping[str, Any], arrays: Sequence[np.ndarray]) -> str:
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    for value in arrays:
+        array = np.ascontiguousarray(value)
+        digest.update(str(array.dtype).encode("ascii"))
+        digest.update(str(array.shape).encode("ascii"))
+        digest.update(array.view(np.uint8))
+    return digest.hexdigest()
+
+
+def save_local_workset(path: str | Path, identity: str, row: LocalGraphWorkset) -> None:
+    root = Path(path)
+    root.mkdir(parents=True, exist_ok=True)
+    archive = root / "workset.npz"
+    npz_atomic(
+        archive,
+        roi=row.roi_point_ids, edges=row.graph_edges, base_weights=row.base_edge_weights,
+        components=row.component_labels, base_positive=row.base_positive,
+        alpha_soft=row.alpha_soft_support, negative=row.negative,
+        hard_positive=row.hard_positive, hard_negative=row.hard_negative,
+        hard_count=row.hard_count, outside_support=row.outside_support_ids,
+    )
+    json_atomic(root / "workset.json", {
+        "schema": "saga-local-graph-workset-v1", "identity": identity,
+        "npz_sha256": file_sha256(archive), "diagnostics": dict(row.diagnostics),
+    })
+
+
+def load_local_workset(path: str | Path, identity: str) -> LocalGraphWorkset | None:
+    root = Path(path)
+    try:
+        metadata = json.loads((root / "workset.json").read_text(encoding="utf-8"))
+        archive_path = root / "workset.npz"
+        if metadata.get("schema") != "saga-local-graph-workset-v1" or metadata.get("identity") != identity:
+            return None
+        if file_sha256(archive_path) != metadata.get("npz_sha256"):
+            return None
+        with np.load(archive_path, allow_pickle=False) as archive:
+            row = LocalGraphWorkset(
+                archive["roi"], archive["edges"], archive["base_weights"], archive["components"],
+                archive["base_positive"], archive["alpha_soft"], archive["negative"],
+                archive["hard_positive"], archive["hard_negative"], archive["hard_count"],
+                archive["outside_support"], metadata.get("diagnostics", {}),
+            )
+        if len(row.graph_edges) != len(row.base_edge_weights):
+            return None
+        if not all(len(value) == len(row.roi_point_ids) for value in (
+            row.component_labels, row.base_positive, row.alpha_soft_support, row.negative,
+            row.hard_positive, row.hard_negative, row.hard_count,
+        )):
+            return None
+        return row
+    except (OSError, ValueError, KeyError, json.JSONDecodeError):
+        return None
+
+
+def save_local_result(path: str | Path, identity: str, row: LocalRefinementResult) -> None:
+    root = Path(path)
+    root.mkdir(parents=True, exist_ok=True)
+    archive = root / "result.npz"
+    state = row.state
+    npz_atomic(
+        archive, points=state.point_ids, anchors=state.anchor_ids,
+        hard=state.hard_positive_ids, hard_counts=state.hard_positive_counts,
+        margin=state.evidence_margin,
+    )
+    json_atomic(root / "result.json", {
+        "schema": "saga-local-refinement-result-v1", "identity": identity,
+        "npz_sha256": file_sha256(archive),
+        "state": {
+            "object_id": state.object_id, "parent_candidate_ids": list(state.parent_candidate_ids),
+            "review_class": state.review_class, "reliable_review_class": state.reliable_review_class,
+            "round_index": state.round_index, "changed": state.changed,
+        },
+        "graph_too_large": row.graph_too_large, "no_hard_evidence": row.no_hard_evidence,
+        "size_trimmed_count": row.size_trimmed_count, "diagnostics": dict(row.diagnostics),
+    })
+
+
+def load_local_result(path: str | Path, identity: str) -> LocalRefinementResult | None:
+    root = Path(path)
+    try:
+        metadata = json.loads((root / "result.json").read_text(encoding="utf-8"))
+        archive_path = root / "result.npz"
+        if metadata.get("schema") != "saga-local-refinement-result-v1" or metadata.get("identity") != identity:
+            return None
+        if file_sha256(archive_path) != metadata.get("npz_sha256"):
+            return None
+        with np.load(archive_path, allow_pickle=False) as archive:
+            node = metadata["state"]
+            state = ObjectState(
+                int(node["object_id"]), tuple(int(value) for value in node["parent_candidate_ids"]),
+                archive["points"], archive["anchors"], archive["hard"], archive["hard_counts"],
+                archive["margin"], node.get("review_class"), bool(node["reliable_review_class"]),
+                int(node["round_index"]), bool(node["changed"]),
+            )
+        return LocalRefinementResult(
+            state, np.empty(0, np.int64), np.empty((0, 2), np.int64),
+            bool(metadata["graph_too_large"]), bool(metadata["no_hard_evidence"]),
+            int(metadata["size_trimmed_count"]), metadata.get("diagnostics", {}) | {"result_cache_hit": True},
+        )
+    except (OSError, ValueError, KeyError, json.JSONDecodeError):
+        return None
+
+
 def save_scene_cache(
     output_dir: str | Path,
     *,
@@ -152,4 +258,6 @@ def save_scene_cache(
 __all__ = [
     "camera_center", "camera_rgb", "file_sha256", "focal_geometric_mean",
     "json_atomic", "load_cameras", "npz_atomic", "save_scene_cache",
+    "refinement_identity", "save_local_workset", "load_local_workset",
+    "save_local_result", "load_local_result",
 ]
