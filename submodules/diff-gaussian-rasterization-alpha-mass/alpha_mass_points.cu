@@ -74,25 +74,54 @@ accumulate_kernel(
         }
         block.sync();
 
-        for (int j = 0; !done && j < min(BLOCK_SIZE, remaining); ++j) {
+        for (int j = 0; j < min(BLOCK_SIZE, remaining); ++j) {
             --contributor;
-            if (contributor >= last) continue;
-            const float2 delta = {positions[j].x - pixel.x, positions[j].y - pixel.y};
-            const float4 conic = conics[j];
-            const float power = -0.5f * (conic.x * delta.x * delta.x + conic.z * delta.y * delta.y)
-                              - conic.y * delta.x * delta.y;
-            if (power > 0.0f) continue;
-            const float alpha = min(0.99f, conic.w * expf(power));
-            if (alpha < 1.0f / 255.0f) continue;
-            transmittance = transmittance / (1.0f - alpha);
-            const float normalized = alpha * transmittance * inverse_opacity;
+            float normalized = 0.0f;
+            bool contributes = !done && contributor < last;
+            if (contributes) {
+                const float2 delta = {positions[j].x - pixel.x, positions[j].y - pixel.y};
+                const float4 conic = conics[j];
+                const float power = -0.5f * (conic.x * delta.x * delta.x + conic.z * delta.y * delta.y)
+                                  - conic.y * delta.x * delta.y;
+                contributes = power <= 0.0f;
+                if (contributes) {
+                    const float alpha = min(0.99f, conic.w * expf(power));
+                    contributes = alpha >= 1.0f / 255.0f;
+                    if (contributes) {
+                        transmittance = transmittance / (1.0f - alpha);
+                        normalized = alpha * transmittance * inverse_opacity;
+                    }
+                }
+            }
             const int id = gaussian_ids[j];
-            atomicAdd(&visible[id], normalized);
-            uint32_t active = pixel_bits;
-            while (active) {
-                const int mask = __ffs(active) - 1;
-                atomicAdd(&inside[mask * point_count + id], normalized);
-                active &= active - 1;
+
+            // Every lane in a warp visits the same tile Gaussian at a given j.
+            // Reduce equal-target updates within the warp before touching global
+            // memory. This preserves float32 accumulation semantics while
+            // replacing up to 32 contended atomics by one.
+            const unsigned warp = __activemask();
+            const unsigned contributing_lanes = __ballot_sync(warp, contributes);
+            const int lane = static_cast<int>(block.thread_rank() & 31);
+            if (contributes) {
+                const float total = __reduce_add_sync(contributing_lanes, normalized);
+                if (lane == __ffs(contributing_lanes) - 1) atomicAdd(&visible[id], total);
+            }
+
+            uint32_t active = contributes ? pixel_bits : 0u;
+            while (__any_sync(warp, active != 0u)) {
+                const unsigned nonempty = __ballot_sync(warp, active != 0u);
+                const int source_lane = __ffs(nonempty) - 1;
+                const int mask = __shfl_sync(warp, __ffs(active) - 1, source_lane);
+                const uint32_t bit = 1u << mask;
+                const bool member = (active & bit) != 0u;
+                const unsigned members = __ballot_sync(warp, member);
+                if (member) {
+                    const float total = __reduce_add_sync(members, normalized);
+                    if (lane == __ffs(members) - 1) {
+                        atomicAdd(&inside[mask * point_count + id], total);
+                    }
+                    active &= ~bit;
+                }
             }
         }
     }
