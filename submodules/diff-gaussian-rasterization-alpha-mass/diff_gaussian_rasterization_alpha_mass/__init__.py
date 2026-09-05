@@ -6,7 +6,7 @@ max-contributor rasterizers so a stale binary cannot be imported by accident.
 
 from . import _C
 
-KERNEL_VERSION = "alpha-mass-fused-v10-deterministic-fixed64"
+KERNEL_VERSION = "alpha-mass-fused-v11-reference-float32"
 
 
 def accumulate_alpha_mass(*args):

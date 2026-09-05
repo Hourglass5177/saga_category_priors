@@ -14,12 +14,6 @@ namespace cg = cooperative_groups;
 
 namespace {
 
-// Integer accumulation makes the reduction independent of CUDA block
-// scheduling.  A scale of 1e8 keeps per-contribution quantisation well below
-// the registered 5e-5 tolerance while leaving ample int64 headroom for a full
-// ScanNet scene.
-constexpr double kFixedPointScale = 100000000.0;
-
 std::function<char*(size_t)> resize_tensor(torch::Tensor& tensor) {
     return [&tensor](size_t bytes) {
         tensor.resize_({static_cast<long long>(bytes)});
@@ -41,8 +35,8 @@ accumulate_kernel(
     int mask_count,
     float min_opacity,
     int point_count,
-    int64_t* __restrict__ visible,
-    int64_t* __restrict__ inside,
+    float* __restrict__ visible,
+    float* __restrict__ inside,
     int* __restrict__ valid_pixels) {
     auto block = cg::this_thread_block();
     const uint32_t horizontal_blocks = (width + BLOCK_X - 1) / BLOCK_X;
@@ -93,14 +87,11 @@ accumulate_kernel(
             transmittance = transmittance / (1.0f - alpha);
             const float normalized = alpha * transmittance * inverse_opacity;
             const int id = gaussian_ids[j];
-            const int64_t fixed = static_cast<int64_t>(llrint(static_cast<double>(normalized) * kFixedPointScale));
-            atomicAdd(reinterpret_cast<unsigned long long*>(&visible[id]), static_cast<unsigned long long>(fixed));
+            atomicAdd(&visible[id], normalized);
             uint32_t active = pixel_bits;
             while (active) {
                 const int mask = __ffs(active) - 1;
-                atomicAdd(
-                    reinterpret_cast<unsigned long long*>(&inside[mask * point_count + id]),
-                    static_cast<unsigned long long>(fixed));
+                atomicAdd(&inside[mask * point_count + id], normalized);
                 active &= active - 1;
             }
         }
@@ -112,7 +103,7 @@ void launch_accumulation(
     int width, int height, const float2* means2d, const float4* conic_opacity,
     const float* final_transmittance, const uint32_t* last_contributor,
     const uint32_t* mask_bits, int mask_count, float min_opacity, int point_count,
-    int64_t* visible, int64_t* inside, int* valid_pixels) {
+    float* visible, float* inside, int* valid_pixels) {
     accumulate_kernel<<<grid, block>>>(
         ranges, point_list, width, height, means2d, conic_opacity,
         final_transmittance, last_contributor, mask_bits, mask_count,
@@ -177,11 +168,10 @@ AccumulateAlphaMassCUDA(
         projmatrix.contiguous().data_ptr<float>(), campos.contiguous().data_ptr<float>(),
         tan_fovx, tan_fovy, prefiltered, output.data_ptr<float>(), radii.data_ptr<int>(), debug);
 
-    // Fixed-point integer atomics are deterministic across CUDA schedules.
-    // Convert once after the reduction; the public API remains float32.
-    auto longs = means3D.options().dtype(torch::kInt64);
-    auto visible_fixed = torch::zeros({point_count}, longs);
-    auto inside_fixed = torch::zeros({mask_count, point_count}, longs);
+    // Match the registered gradient reference, which also uses float32
+    // atomics. Read-only cache replay provides byte determinism downstream.
+    auto visible = torch::zeros({point_count}, floats);
+    auto inside = torch::zeros({mask_count, point_count}, floats);
     auto valid_pixels = torch::zeros({}, ints);
     if (point_count && rendered) {
         char* geometry_ptr = reinterpret_cast<char*>(geometry_buffer.data_ptr());
@@ -198,10 +188,8 @@ AccumulateAlphaMassCUDA(
             geometry_state.conic_opacity, image_state.accum_alpha,
             image_state.n_contrib,
             reinterpret_cast<uint32_t*>(packed_masks.contiguous().data_ptr<int>()),
-            mask_count, min_opacity, point_count, visible_fixed.data_ptr<int64_t>(),
-            inside_fixed.data_ptr<int64_t>(), valid_pixels.data_ptr<int>());
+            mask_count, min_opacity, point_count, visible.data_ptr<float>(),
+            inside.data_ptr<float>(), valid_pixels.data_ptr<int>());
     }
-    auto visible = visible_fixed.to(torch::kFloat64).div_(kFixedPointScale).to(torch::kFloat32);
-    auto inside = inside_fixed.to(torch::kFloat64).div_(kFixedPointScale).to(torch::kFloat32);
     return std::make_tuple(visible, inside, valid_pixels);
 }
