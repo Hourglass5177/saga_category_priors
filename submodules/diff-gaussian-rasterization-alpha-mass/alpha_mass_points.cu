@@ -6,6 +6,7 @@
 #include <stdexcept>
 
 #include "cuda_rasterizer/config.h"
+#include "cuda_rasterizer/auxiliary.h"
 #include "cuda_rasterizer/rasterizer.h"
 #include "cuda_rasterizer/rasterizer_impl.h"
 
