@@ -20,7 +20,7 @@ from .runtime_io import json_atomic
 
 FORMULA_VERSION = "normalized-alpha-t-prev-v1"
 CACHE_SCHEMA = "saga-alpha-evidence-v1"
-KERNEL_VERSION = "alpha-mass-fused-v4-sparse-float"
+KERNEL_VERSION = "alpha-mass-fused-v7-sparse-transfer"
 
 
 def _update_array(digest: Any, value: Any) -> None:
@@ -135,8 +135,19 @@ def render_fused(
         int(camera.image_height), int(camera.image_width), camera.camera_center,
         packed, len(mask_array), float(config.alpha_opacity_min), False, bool(pipeline.debug),
     )
+    # A camera mask normally touches only a small fraction of the scene's
+    # million-plus Gaussians. Moving the full MxN float tensor to the CPU was a
+    # larger cost than the fused kernel itself. Compact nonzero coordinates on
+    # the GPU, transfer only those values, then reconstruct the required dense
+    # reference contract in host memory.
+    nonzero = torch.nonzero(inside, as_tuple=False)
+    dense_inside = np.zeros(tuple(inside.shape), dtype=np.float64)
+    if nonzero.numel():
+        values = inside[nonzero[:, 0], nonzero[:, 1]]
+        coordinates = nonzero.detach().cpu().numpy()
+        dense_inside[coordinates[:, 0], coordinates[:, 1]] = values.detach().cpu().numpy()
     return AlphaMass(
-        inside.detach().cpu().numpy().astype(np.float64),
+        dense_inside,
         visible.detach().cpu().numpy().astype(np.float64), int(valid.item()),
     )
 
