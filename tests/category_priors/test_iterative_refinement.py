@@ -12,6 +12,7 @@ from category_priors.iterative_refinement.contracts import (
     MaskHypothesis,
     ObjectState,
     RefinementConfig,
+    RefinementProfile,
     ViewObservation,
 )
 from category_priors.iterative_refinement.evidence import (
@@ -24,6 +25,7 @@ from category_priors.iterative_refinement.local_refine import (
     binary_graph_cut,
     fuse_objects_with_b0,
     local_roi_point_ids,
+    refine_candidate_local,
     trim_oversize_additions,
 )
 from category_priors.iterative_refinement.objects import combine_states, merge_objects_once
@@ -172,6 +174,29 @@ def test_shared_scene_tree_preserves_local_roi_exactly() -> None:
     direct = local_roi_point_ids(xyz, seed, evidence, prior)
     shared = local_roi_point_ids(xyz, seed, evidence, prior, scene_tree=cKDTree(xyz))
     assert np.array_equal(shared, direct)
+
+
+def test_no_hard_evidence_skips_local_graph(monkeypatch) -> None:
+    seed = CandidateSeed(0, (0,), "chair", np.array([0, 1]), np.array([0]), "post_filter", .5)
+    evidence = GaussianEvidence(
+        0, np.array([0, 1]), np.array([1., 0.]), np.zeros(2),
+        np.ones(2), 1, 0, ("h0",),
+    )
+    monkeypatch.setattr(
+        "category_priors.iterative_refinement.local_refine.local_roi_point_ids",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("ROI must not be built")),
+    )
+    result = refine_candidate_local(
+        seed=seed, evidence=evidence,
+        xyz_m=np.zeros((4, 3)), affinity=np.ones((4, 2)),
+        b0_labels=np.full(4, -1), prior=SizePrior(1., (2., 2., 2.), "global"),
+        profile=RefinementProfile("test", 1., 1.), round_index=1,
+        review_class=None, reliable_review_class=False,
+    )
+    assert result.no_hard_evidence
+    assert not result.state.changed
+    assert np.array_equal(result.state.point_ids, seed.seed_support)
+    assert result.diagnostics["reason"] == "no_two_view_hard_support"
 
 
 def test_frozen_membership_can_be_reused_in_next_round() -> None:

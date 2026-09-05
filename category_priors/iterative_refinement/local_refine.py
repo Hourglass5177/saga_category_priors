@@ -322,6 +322,36 @@ def refine_candidate_local(
 ) -> LocalRefinementResult:
     xyz = np.asarray(xyz_m, dtype=np.float64)
     b0 = np.asarray(b0_labels, dtype=np.int64)
+    # A candidate cannot change without at least one Gaussian supported by two
+    # independent views.  Previously we discovered this only after building a
+    # potentially 100k-node ROI and local k-NN graph.  The graph is unused on
+    # this path, so skip that mathematically dead work before any spatial
+    # query.  The predicate is profile-independent and identical to the hard
+    # foreground predicate produced by _evidence_on_roi below.
+    if not bool(np.any(np.asarray(evidence.hard_positive_views) >= 2)):
+        points = seed.seed_support.copy()
+        state = ObjectState(
+            object_id=seed.candidate_id,
+            parent_candidate_ids=seed.parent_candidate_ids,
+            point_ids=points,
+            anchor_ids=np.intersect1d(seed.seed_anchor, points, assume_unique=True),
+            hard_positive_ids=np.empty(0, dtype=np.int64),
+            hard_positive_counts=np.zeros(len(points), dtype=np.float64),
+            evidence_margin=np.zeros(len(points), dtype=np.float64),
+            review_class=review_class,
+            reliable_review_class=reliable_review_class,
+            round_index=int(round_index),
+            changed=False,
+        )
+        return LocalRefinementResult(
+            state,
+            np.empty(0, dtype=np.int64),
+            np.empty((0, 2), dtype=np.int64),
+            False,
+            True,
+            0,
+            {"reason": "no_two_view_hard_support", "roi_points": 0, "edge_count": 0},
+        )
     roi = local_roi_point_ids(xyz, seed, evidence, prior, config, scene_tree=scene_tree)
     too_large = len(roi) > config.graph_node_limit
     if too_large:
