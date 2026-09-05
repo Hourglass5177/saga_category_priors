@@ -9,7 +9,8 @@ from typing import Any, Sequence
 import numpy as np
 
 from .contracts import RefinementConfig
-from .evidence import AlphaMass, alpha_mass_from_gradients, build_alpha_objective, iter_three_channel_masks
+from .alpha_backend import AlphaEvidenceCache
+from .evidence import AlphaMass
 
 
 def expected_max_contributor_package() -> Path:
@@ -64,39 +65,18 @@ def render_alpha_mass(
     masks: Sequence[np.ndarray],
     *,
     config: RefinementConfig = RefinementConfig(),
+    backend: str = "gradient-reference",
+    cache: AlphaEvidenceCache | None = None,
+    camera_index: int = -1,
 ) -> AlphaMass:
-    """Accumulate per-Gaussian normalized alpha mass, max three masks/render."""
-
-    import torch
-    from gaussian_renderer import render_mask
-
-    mask_array = np.asarray(masks, dtype=np.float32)
-    shape = (int(camera.image_height), int(camera.image_width))
-    if mask_array.ndim != 3 or mask_array.shape[1:] != shape:
-        raise ValueError("alpha masks must share the camera image shape")
-    point_count = int(model.get_xyz.shape[0])
-    visible_gradient: np.ndarray | None = None
-    inside_batches: list[tuple[Sequence[int], np.ndarray]] = []
-    valid_count = 0
-    zero_background = torch.zeros_like(background)
-    for batch_number, (indices, targets) in enumerate(iter_three_channel_masks(mask_array)):
-        probe = torch.ones((point_count, 3), dtype=model.get_xyz.dtype, device=model.get_xyz.device, requires_grad=True)
-        image = render_mask(camera, model, pipeline, zero_background, precomputed_mask=probe)["mask"]
-        opacity = image.detach()[0].float().cpu().numpy()
-        objective = build_alpha_objective(indices, targets, opacity, min_opacity=config.alpha_opacity_min)
-        coefficients = torch.as_tensor(objective.inside_coefficients, dtype=image.dtype, device=image.device)
-        if batch_number == 0:
-            visible_coeff = torch.as_tensor(objective.visible_coefficient, dtype=image.dtype, device=image.device)
-            visible = torch.sum(image[0] * visible_coeff)
-            visible_gradient = torch.autograd.grad(visible, probe, retain_graph=bool(indices))[0].detach().cpu().numpy()
-            valid_count = int(np.count_nonzero(objective.valid_pixels))
-        if indices:
-            inside = torch.sum(image * coefficients)
-            gradient = torch.autograd.grad(inside, probe, retain_graph=False)[0].detach().cpu().numpy()
-            inside_batches.append((indices, gradient))
-    if visible_gradient is None:
-        raise RuntimeError("alpha mass rendering requires at least one mask")
-    return alpha_mass_from_gradients(visible_gradient, inside_batches, len(mask_array), valid_count)
+    """Accumulate normalized all-contributor mass through an explicit backend."""
+    from .alpha_backend import _render_backend
+    if cache is not None:
+        return cache.get(
+            camera_index, camera, model, pipeline, background, masks,
+            backend=backend, config=config,
+        )
+    return _render_backend(backend, camera, model, pipeline, background, masks, config)
 
 
 __all__ = [

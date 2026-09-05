@@ -31,6 +31,12 @@ from category_priors.iterative_refinement.reviewer import (
     rank_detection_proposals,
 )
 from category_priors.iterative_refinement.rendering import expected_max_contributor_package
+from category_priors.iterative_refinement.alpha_backend import (
+    AlphaEvidenceCache,
+    expected_fused_package,
+    mask_sha256,
+    pack_mask_bits,
+)
 from category_priors.iterative_refinement.runtime_io import save_scene_cache
 from category_priors.iterative_refinement.views import (
     CropSpec,
@@ -226,3 +232,38 @@ def test_review_round_builds_seed_index_before_class_prior_lookup() -> None:
     assignment = source.index("seed_by_id =")
     lookup = source.index("seed_by_id[row.candidate_id]")
     assert assignment < lookup
+
+
+def test_mask_bit_packing_supports_32_and_deterministic_33_chunk_boundary() -> None:
+    masks = np.zeros((33, 2, 2), dtype=bool)
+    for index in range(33):
+        masks[index, index % 2, (index // 2) % 2] = True
+    first = pack_mask_bits(masks[:32])
+    second = pack_mask_bits(masks[32:])
+    assert first.dtype == np.int32
+    assert first.view(np.uint32)[0, 0] & np.uint32(1)
+    assert second.view(np.uint32)[0, 0] == 1
+
+
+def test_mask_hash_is_content_and_shape_sensitive() -> None:
+    a = np.array([[True, False], [False, True]])
+    b = a.reshape(1, 4)
+    assert mask_sha256(a) == mask_sha256(a.copy())
+    assert mask_sha256(a) != mask_sha256(b)
+
+
+def test_sparse_alpha_cache_rejects_corruption_and_wrong_identity(tmp_path) -> None:
+    path = tmp_path / "mass.npz"
+    values = np.array([0.0, 1.25, 0.0, 2.5])
+    AlphaEvidenceCache._save_sparse(path, values, "right")
+    loaded = AlphaEvidenceCache._load_sparse(path, 4, "right")
+    assert loaded is not None and np.allclose(loaded, values)
+    assert AlphaEvidenceCache._load_sparse(path, 4, "wrong") is None
+    path.write_bytes(b"not an npz")
+    assert AlphaEvidenceCache._load_sparse(path, 4, "right") is None
+
+
+def test_fused_backend_producer_can_be_pinned(tmp_path, monkeypatch) -> None:
+    producer = tmp_path / "producer" / "diff_gaussian_rasterization_alpha_mass"
+    monkeypatch.setenv("SAGA_ALPHA_MASS_PACKAGE_ROOT", str(producer))
+    assert expected_fused_package() == producer.resolve()

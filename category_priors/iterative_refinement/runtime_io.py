@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import uuid
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -63,7 +64,7 @@ def focal_geometric_mean(camera: Any) -> float:
 def json_atomic(path: str | Path, payload: Any) -> None:
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(destination.name + ".part")
+    temporary = destination.with_name(destination.name + f".{uuid.uuid4().hex}.part")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(temporary, destination)
 
@@ -71,7 +72,7 @@ def json_atomic(path: str | Path, payload: Any) -> None:
 def npz_atomic(path: str | Path, **arrays: Any) -> None:
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(destination.name + ".part")
+    temporary = destination.with_name(destination.name + f".{uuid.uuid4().hex}.part")
     with temporary.open("wb") as handle:
         np.savez_compressed(handle, **arrays)
     os.replace(temporary, destination)

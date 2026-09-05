@@ -41,6 +41,7 @@ from .evidence import (
 )
 from .local_refine import fuse_objects_with_b0, refine_candidate_local, size_prior_from_payload
 from .objects import merge_objects_once, split_disconnected_objects
+from .alpha_backend import AlphaEvidenceCache, gaussian_render_sha256
 from .rendering import render_alpha_mass, render_camera_maps
 from .reviewer import GroundedSamFullImageReviewer
 from .runtime_io import camera_center, camera_rgb, file_sha256, focal_geometric_mean, json_atomic, load_cameras, npz_atomic, save_scene_cache
@@ -341,6 +342,9 @@ def _review_round(
     classes: Sequence[str],
     config: RefinementConfig,
     cache_root: Path,
+    review_cache_source: Path | None,
+    alpha_cache: AlphaEvidenceCache,
+    alpha_backend: str,
     gaussian_sha: str,
 ) -> tuple[tuple[MaskHypothesis, ...], dict[int, GaussianEvidence], dict[int, tuple[MaskHypothesis, ...]]]:
     seed_by_id = {seed.candidate_id: seed for seed in seeds}
@@ -363,6 +367,11 @@ def _review_round(
             )
             cache_path = _review_cache_path(cache_root, round_index, camera_index, seed.candidate_id)
             loaded = _load_review_cache(cache_path, identity)
+            if loaded is None and review_cache_source is not None:
+                loaded = _load_review_cache(
+                    _review_cache_path(review_cache_source, round_index, camera_index, seed.candidate_id),
+                    identity,
+                )
             if loaded is not None:
                 cached_rows[seed.candidate_id] = loaded
             else:
@@ -414,7 +423,18 @@ def _review_round(
         alpha_mass = render_alpha_mass(
             cameras[camera_index], model, args, background,
             [row.unpack_mask() for row in rows], config=config,
+            backend=alpha_backend, cache=alpha_cache, camera_index=camera_index,
         )
+        json_atomic(cache_root / "alpha_progress.json", {
+            "round": round_index,
+            "total_cameras": len(by_camera),
+            "completed_cameras": alpha_cache.stats.completed_cameras,
+            "camera_cache_hits": alpha_cache.stats.camera_hits,
+            "mask_cache_hits": alpha_cache.stats.mask_hits,
+            "kernel_calls": alpha_cache.stats.kernel_calls,
+            "current_camera": camera_index,
+            "current_mask_count": len(rows),
+        })
         ids, weights, opacity = camera_maps[camera_index]
         for mask_index, row in enumerate(rows):
             per_hypothesis[row.hypothesis_id] = hypothesis_gaussian_evidence(
@@ -572,6 +592,13 @@ def run_scene(args: Any) -> dict[str, Any]:
     cameras = load_cameras(args)
     semantic_assets = summarize_mask_label_assets(args, cameras)
     background = torch.tensor([1., 1., 1.] if args.white_background else [0., 0., 0.], dtype=torch.float32, device="cuda")
+    alpha_cache_root = Path(args.alpha_cache_dir) if args.alpha_cache_dir else output / "alpha_evidence"
+    alpha_cache = AlphaEvidenceCache(
+        alpha_cache_root,
+        mode=args.alpha_cache_mode,
+        gaussian_identity=gaussian_render_sha256(rgb),
+    )
+    review_cache_source = Path(args.review_cache_source) if args.review_cache_source else None
     camera_maps = {
         index: _get_camera_maps(
             output, index, camera, rgb, args, background,
@@ -597,7 +624,9 @@ def run_scene(args: Any) -> dict[str, Any]:
         camera_maps=camera_maps, b0_labels=b0, model=rgb, args=args,
         background=background, priors=priors, condition=args.condition,
         reviewer=reviewer, classes=bank.class_names, xyz=xyz, config=config,
-        cache_root=output, gaussian_sha=bank.gaussian_xyz_sha256,
+        cache_root=output, review_cache_source=review_cache_source,
+        alpha_cache=alpha_cache, alpha_backend=args.alpha_backend,
+        gaussian_sha=bank.gaussian_xyz_sha256,
     )
     states1, profile_lineage = _refine_profiles(
         seeds=seeds, evidence=evidence1, selected=selected1, xyz=xyz,
@@ -658,7 +687,9 @@ def run_scene(args: Any) -> dict[str, Any]:
             cameras=cameras, camera_maps=camera_maps, b0_labels=b0, model=rgb,
             args=args, background=background, priors=priors,
             condition=args.condition, reviewer=reviewer, classes=bank.class_names, xyz=xyz, config=config,
-            cache_root=output, gaussian_sha=bank.gaussian_xyz_sha256,
+            cache_root=output, review_cache_source=review_cache_source,
+            alpha_cache=alpha_cache, alpha_backend=args.alpha_backend,
+            gaussian_sha=bank.gaussian_xyz_sha256,
         )
     combined_evidence: dict[int, GaussianEvidence] = {}
     combined_selected: dict[int, tuple[MaskHypothesis, ...]] = {}
@@ -814,6 +845,11 @@ def run_scene(args: Any) -> dict[str, Any]:
         "candidate_count": len(seeds),
         "camera_count": len(cameras),
         "sam_encoding_count": reviewer.sam_encoding_count,
+        "alpha_backend": args.alpha_backend,
+        "alpha_cache_dir": str(alpha_cache_root.resolve()),
+        "alpha_cache_mode": args.alpha_cache_mode,
+        "alpha_cache_stats": asdict(alpha_cache.stats),
+        "review_cache_source": None if review_cache_source is None else str(review_cache_source.resolve()),
         "gaussian_xyz_sha256": bank.gaussian_xyz_sha256,
         "assets": {
             "rgb_gaussian": {"path": str(Path(args.point_cloud_path).resolve()), "sha256": file_sha256(args.point_cloud_path)},

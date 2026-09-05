@@ -64,6 +64,12 @@ def _evaluate(args: argparse.Namespace) -> None:
     )
 
 
+def _validate_alpha(args: argparse.Namespace) -> None:
+    from .alpha_validation import validate_alpha_backend
+    result = validate_alpha_backend(args)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="run-iterative-refinement")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -91,6 +97,10 @@ def build_parser() -> argparse.ArgumentParser:
     refine.add_argument("--label-threshold", type=float, default=.3)
     refine.add_argument("--scale-threshold", type=float, default=.8)
     refine.add_argument("--opcity-threshold", type=float, default=.005)
+    refine.add_argument("--alpha-backend", choices=("fused", "gradient-reference"), default="fused")
+    refine.add_argument("--alpha-cache-dir")
+    refine.add_argument("--alpha-cache-mode", choices=("readwrite", "readonly", "off"), default="readwrite")
+    refine.add_argument("--review-cache-source", help="read-only prior DINO/SAM cache root")
     refine.set_defaults(func=_refine)
 
     replay = commands.add_parser("replay", help="validate/reuse cached profile outputs")
@@ -105,6 +115,14 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--radius-m", type=float, default=.05)
     evaluate.add_argument("--min-region-size", type=int, default=100)
     evaluate.set_defaults(func=_evaluate)
+
+    validate = commands.add_parser("validate-alpha", help="validate fused alpha mass against the frozen gradient reference")
+    ModelParams(validate)
+    PipelineParams(validate)
+    validate.add_argument("--review-cache-source", required=True)
+    validate.add_argument("--alpha-cache-dir", required=True)
+    validate.add_argument("--output-dir", required=True)
+    validate.set_defaults(func=_validate_alpha)
     return parser
 
 
