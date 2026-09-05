@@ -300,7 +300,9 @@ renderCUDA(
 	float T = 1.0f;
 	uint32_t contributor = 0;
 	uint32_t last_contributor = 0;
+#ifndef ALPHA_MASS_NO_COLOR
 	float C[CHANNELS] = { 0 };
+#endif
 
 	// Iterate over batches until all done or range is complete
 	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
@@ -351,8 +353,10 @@ renderCUDA(
 			}
 
 			// Eq. (3) from 3D Gaussian splatting paper.
+#ifndef ALPHA_MASS_NO_COLOR
 			for (int ch = 0; ch < CHANNELS; ch++)
 				C[ch] += features[collected_id[j] * CHANNELS + ch] * alpha * T;
+#endif
 
 			T = test_T;
 
@@ -368,8 +372,10 @@ renderCUDA(
 	{
 		final_T[pix_id] = T;
 		n_contrib[pix_id] = last_contributor;
+#ifndef ALPHA_MASS_NO_COLOR
 		for (int ch = 0; ch < CHANNELS; ch++)
 			out_color[ch * H * W + pix_id] = C[ch] + T * bg_color[ch];
+#endif
 	}
 }
 
