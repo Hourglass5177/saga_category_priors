@@ -21,6 +21,13 @@ std::function<char*(size_t)> resize_tensor(torch::Tensor& tensor) {
     };
 }
 
+__device__ __forceinline__ float warp_sum(unsigned warp, float value) {
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        value += __shfl_down_sync(warp, value, offset);
+    }
+    return value;
+}
+
 __global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
 accumulate_kernel(
     const uint2* __restrict__ ranges,
@@ -100,12 +107,9 @@ accumulate_kernel(
             // memory. This preserves float32 accumulation semantics while
             // replacing up to 32 contended atomics by one.
             const unsigned warp = __activemask();
-            const unsigned contributing_lanes = __ballot_sync(warp, contributes);
             const int lane = static_cast<int>(block.thread_rank() & 31);
-            if (contributes) {
-                const float total = __reduce_add_sync(contributing_lanes, normalized);
-                if (lane == __ffs(contributing_lanes) - 1) atomicAdd(&visible[id], total);
-            }
+            const float visible_total = warp_sum(warp, contributes ? normalized : 0.0f);
+            if (lane == 0 && visible_total != 0.0f) atomicAdd(&visible[id], visible_total);
 
             uint32_t active = contributes ? pixel_bits : 0u;
             while (__any_sync(warp, active != 0u)) {
@@ -114,14 +118,9 @@ accumulate_kernel(
                 const int mask = __shfl_sync(warp, __ffs(active) - 1, source_lane);
                 const uint32_t bit = 1u << mask;
                 const bool member = (active & bit) != 0u;
-                const unsigned members = __ballot_sync(warp, member);
-                if (member) {
-                    const float total = __reduce_add_sync(members, normalized);
-                    if (lane == __ffs(members) - 1) {
-                        atomicAdd(&inside[mask * point_count + id], total);
-                    }
-                    active &= ~bit;
-                }
+                const float total = warp_sum(warp, member ? normalized : 0.0f);
+                if (lane == 0 && total != 0.0f) atomicAdd(&inside[mask * point_count + id], total);
+                if (member) active &= ~bit;
             }
         }
     }
