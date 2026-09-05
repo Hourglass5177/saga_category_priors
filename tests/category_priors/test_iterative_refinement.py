@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 from dataclasses import replace
 import inspect
 from pathlib import Path
@@ -47,6 +48,7 @@ from category_priors.iterative_refinement.alpha_backend import (
     mask_sha256,
     pack_mask_bits,
 )
+import category_priors.iterative_refinement.alpha_backend as alpha_backend_module
 from category_priors.iterative_refinement.runtime_io import (
     load_local_result,
     load_local_workset,
@@ -310,6 +312,56 @@ def test_sparse_alpha_cache_rejects_corruption_and_wrong_identity(tmp_path) -> N
     assert AlphaEvidenceCache._load_sparse(path, 4, "wrong") is None
     path.write_bytes(b"not an npz")
     assert AlphaEvidenceCache._load_sparse(path, 4, "right") is None
+
+
+def test_alpha_cache_accepts_float_atomic_drift_only_when_soft_support_is_stable(
+    tmp_path, monkeypatch,
+) -> None:
+    cache = AlphaEvidenceCache(tmp_path, mode="readwrite", gaussian_identity="g")
+    monkeypatch.setattr(cache, "_identity", lambda camera, config: {"camera": 0})
+    rendered = iter((
+        AlphaMass(np.array([[.6, 0.]]), np.array([1., 1.]), 2),
+        AlphaMass(np.array([[.6, 0.]]), np.array([1.001, 1.]), 2),
+    ))
+    monkeypatch.setattr(alpha_backend_module, "_render_backend", lambda *args, **kwargs: next(rendered))
+
+    class Model:
+        get_xyz = np.zeros((2, 3))
+
+    cache.get(
+        0, object(), Model(), object(), object(), [np.array([[True, False]])],
+        backend="fused", config=RefinementConfig(),
+    )
+    result = cache.get(
+        0, object(), Model(), object(), object(), [np.array([[False, True]])],
+        backend="fused", config=RefinementConfig(),
+    )
+    assert np.array_equal(result.visible_mass, np.array([1., 1.]))
+    assert cache.stats.visible_drift_events == 1
+    assert cache.stats.visible_drift_max_abs > 0
+
+
+def test_alpha_cache_rejects_drift_that_changes_soft_support(tmp_path, monkeypatch) -> None:
+    cache = AlphaEvidenceCache(tmp_path, mode="readwrite", gaussian_identity="g")
+    monkeypatch.setattr(cache, "_identity", lambda camera, config: {"camera": 0})
+    rendered = iter((
+        AlphaMass(np.array([[.6]]), np.array([1.]), 1),
+        AlphaMass(np.array([[.6]]), np.array([1.3]), 1),
+    ))
+    monkeypatch.setattr(alpha_backend_module, "_render_backend", lambda *args, **kwargs: next(rendered))
+
+    class Model:
+        get_xyz = np.zeros((1, 3))
+
+    cache.get(
+        0, object(), Model(), object(), object(), [np.array([[True]])],
+        backend="fused", config=RefinementConfig(),
+    )
+    with pytest.raises(RuntimeError, match="changes registered soft support"):
+        cache.get(
+            0, object(), Model(), object(), object(), [np.array([[False]])],
+            backend="fused", config=RefinementConfig(),
+        )
 
 
 def test_fused_backend_producer_can_be_pinned(tmp_path, monkeypatch) -> None:

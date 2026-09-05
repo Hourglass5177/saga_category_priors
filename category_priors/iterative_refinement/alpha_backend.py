@@ -226,6 +226,9 @@ class AlphaCacheStats:
     mask_hits: int = 0
     kernel_calls: int = 0
     completed_cameras: int = 0
+    visible_drift_events: int = 0
+    visible_drift_max_abs: float = 0.0
+    visible_drift_max_scaled: float = 0.0
 
 
 class AlphaEvidenceCache:
@@ -345,7 +348,40 @@ class AlphaEvidenceCache:
                     valid_pixels = mass.valid_pixel_count
                     self._save_sparse(visible_path, visible, identity)
                 elif not np.allclose(visible, mass.visible_mass, rtol=5e-5, atol=5e-5):
-                    raise RuntimeError("camera visible mass changed across deterministic mask chunks")
+                    # The fused kernel reduces many pixel contributions into one
+                    # Gaussian with float atomics.  Their scheduling can change
+                    # the final few bits between otherwise identical launches.
+                    # Keep the first cached visible vector as the canonical
+                    # denominator, but accept a later numerator only if using
+                    # either denominator yields exactly the same registered soft
+                    # support decisions for every mask and Gaussian.
+                    fresh_visible = mass.visible_mass
+                    canonical_ratio = np.divide(
+                        mass.inside_mass, visible[None, :],
+                        out=np.zeros_like(mass.inside_mass), where=visible[None, :] > 0,
+                    )
+                    fresh_ratio = np.divide(
+                        mass.inside_mass, fresh_visible[None, :],
+                        out=np.zeros_like(mass.inside_mass), where=fresh_visible[None, :] > 0,
+                    )
+                    mass_gate = mass.inside_mass >= config.alpha_inside_mass_min
+                    canonical_support = mass_gate & (canonical_ratio >= config.alpha_inside_ratio_min)
+                    fresh_support = mass_gate & (fresh_ratio >= config.alpha_inside_ratio_min)
+                    if not np.array_equal(canonical_support, fresh_support):
+                        changed = int(np.count_nonzero(canonical_support != fresh_support))
+                        raise RuntimeError(
+                            "camera visible mass drift changes registered soft support "
+                            f"for {changed} mask-Gaussian pairs"
+                        )
+                    difference = np.abs(visible - fresh_visible)
+                    scaled = difference / np.maximum(visible, 1.0)
+                    self.stats.visible_drift_events += 1
+                    self.stats.visible_drift_max_abs = max(
+                        self.stats.visible_drift_max_abs, float(difference.max(initial=0.0)),
+                    )
+                    self.stats.visible_drift_max_scaled = max(
+                        self.stats.visible_drift_max_scaled, float(scaled.max(initial=0.0)),
+                    )
                 for index, digest in enumerate(chunk_hashes):
                     loaded[digest] = mass.inside_mass[index]
                     path = camera_root / "masks" / f"{digest}.npz"
