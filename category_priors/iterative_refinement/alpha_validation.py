@@ -21,10 +21,14 @@ from .contracts import RefinementConfig
 from .runtime_io import json_atomic, load_cameras
 
 
-def _review_masks(root: Path) -> dict[int, list[np.ndarray]]:
-    result: dict[int, dict[str, np.ndarray]] = {}
+def _review_workloads(root: Path) -> dict[tuple[int, int], dict[str, Any]]:
+    result: dict[tuple[int, int], dict[str, Any]] = {}
     for path in sorted(root.glob("review_cache/round*/camera*/candidate*.npz")):
+        round_index = int(path.parent.parent.name.removeprefix("round"))
         camera_index = int(path.parent.name.removeprefix("camera"))
+        key = (round_index, camera_index)
+        workload = result.setdefault(key, {"unique": {}, "candidate_groups": []})
+        group: list[np.ndarray] = []
         with np.load(path, allow_pickle=False) as archive:
             metadata = json.loads(str(archive["metadata"].item()))
             for row in metadata:
@@ -32,24 +36,32 @@ def _review_masks(root: Path) -> dict[int, list[np.ndarray]]:
                 shape = tuple(row["mask_shape"])
                 mask = np.unpackbits(packed)[: int(np.prod(shape))].reshape(shape).astype(bool)
                 digest = __import__("hashlib").sha256(np.packbits(mask, bitorder="little").tobytes()).hexdigest()
-                result.setdefault(camera_index, {})[digest] = mask
-    return {index: list(rows.values()) for index, rows in result.items() if rows}
+                workload["unique"][digest] = mask
+                group.append(mask)
+        if group:
+            workload["candidate_groups"].append(group)
+    return {
+        key: {"masks": list(row["unique"].values()), "candidate_groups": row["candidate_groups"]}
+        for key, row in result.items() if row["unique"]
+    }
 
 
-def _stratified_cameras(masks: dict[int, list[np.ndarray]], limit: int = 12) -> list[int]:
-    rows = sorted((len(values), index) for index, values in masks.items())
-    selected: list[int] = []
+def _stratified_workloads(
+    workloads: dict[tuple[int, int], dict[str, Any]], limit: int = 12,
+) -> list[tuple[int, int]]:
+    rows = sorted((len(values["masks"]), key) for key, values in workloads.items())
+    selected: list[tuple[int, int]] = []
     for target in (2, 4, 14, 22):
         if rows:
-            _, index = min(rows, key=lambda row: (abs(row[0] - target), row[1]))
-            if index not in selected:
-                selected.append(index)
+            _, key = min(rows, key=lambda row: (abs(row[0] - target), row[1]))
+            if key not in selected:
+                selected.append(key)
     if len(selected) < min(limit, len(rows)):
         # The production bottleneck is cameras with many masks. Keep the four
         # registered scale anchors, then benchmark the heaviest remaining work.
-        for _, index in reversed(rows):
-            if index not in selected:
-                selected.append(index)
+        for _, key in reversed(rows):
+            if key not in selected:
+                selected.append(key)
             if len(selected) == limit:
                 break
     return selected
@@ -91,8 +103,8 @@ def validate_alpha_backend(args: Any) -> dict[str, Any]:
     model = GaussianModel(args.sh_degree)
     model.load_ply(args.point_cloud_path)
     cameras = load_cameras(args)
-    masks = _review_masks(Path(args.review_cache_source))
-    selected = _stratified_cameras(masks, 12)
+    workloads = _review_workloads(Path(args.review_cache_source))
+    selected = _stratified_workloads(workloads, 12)
     if not selected:
         raise RuntimeError("no cached review masks found")
     background = torch.zeros(3, dtype=torch.float32, device="cuda")
@@ -103,8 +115,9 @@ def validate_alpha_backend(args: Any) -> dict[str, Any]:
         gaussian_identity=gaussian_render_sha256(model),
     )
     torch.cuda.reset_peak_memory_stats()
-    for camera_index in selected:
-        camera_masks = masks[camera_index]
+    for round_index, camera_index in selected:
+        workload = workloads[(round_index, camera_index)]
+        camera_masks = workload["masks"]
         if len(camera_masks) > 32:
             camera_masks = camera_masks[:32]
         camera = cameras[camera_index]
@@ -127,7 +140,9 @@ def validate_alpha_backend(args: Any) -> dict[str, Any]:
             >= config.alpha_inside_ratio_min
         )
         parity_rows.append({
-            "camera_index": camera_index, "mask_count": len(camera_masks),
+            "round_index": round_index, "camera_index": camera_index,
+            "mask_count": len(camera_masks),
+            "historical_candidate_calls": len(workload["candidate_groups"]),
             "visible_max_abs": float(visible_error.max(initial=0)),
             "inside_max_abs": float(inside_error.max(initial=0)),
             "within_tolerance": bool(np.all(visible_error <= tolerance_visible) and np.all(inside_error <= tolerance_inside)),
@@ -142,9 +157,12 @@ def validate_alpha_backend(args: Any) -> dict[str, Any]:
                 ))
             )),
         })
-        _, original_seconds = _timed(lambda: render_gradient_original(
-            camera, model, args, background, camera_masks, config=config,
-        ))
+        original_seconds = 0.0
+        for group in workload["candidate_groups"]:
+            _, seconds = _timed(lambda group=group: render_gradient_original(
+                camera, model, args, background, group, config=config,
+            ))
+            original_seconds += seconds
         _, cold_seconds = _timed(lambda: cache.get(
             camera_index, camera, model, args, background, camera_masks,
             backend="fused", config=config,
@@ -159,7 +177,9 @@ def validate_alpha_backend(args: Any) -> dict[str, Any]:
         ).inside_mass):
             raise RuntimeError("warm cache replay is not byte deterministic")
         benchmark_rows.append({
-            "camera_index": camera_index, "mask_count": len(camera_masks),
+            "round_index": round_index, "camera_index": camera_index,
+            "mask_count": len(camera_masks),
+            "historical_candidate_calls": len(workload["candidate_groups"]),
             "original_seconds": original_seconds,
             "reference_seconds": reference_seconds,
             "fused_cold_seconds": fused_seconds,
@@ -167,7 +187,8 @@ def validate_alpha_backend(args: Any) -> dict[str, Any]:
             "warm_seconds": warm_seconds,
         })
     parity = {
-        "schema": "saga-alpha-backend-parity-v1", "camera_indices": selected,
+        "schema": "saga-alpha-backend-parity-v2",
+        "workloads": [{"round_index": row[0], "camera_index": row[1]} for row in selected],
         "rows": parity_rows,
         "passed": all(row["within_tolerance"] and row["soft_support_exact"] for row in parity_rows),
     }
@@ -177,9 +198,9 @@ def validate_alpha_backend(args: Any) -> dict[str, Any]:
     resources = _resource_snapshot(Path(args.alpha_cache_dir))
     cold_speedup = original / max(fused, 1e-12)
     warm_speedup = original / max(warm, 1e-12)
-    projected_scene_hours = (fused / max(len(benchmark_rows), 1)) * len(cameras) / 3600.0
+    projected_scene_hours = (fused / max(len(benchmark_rows), 1)) * len(workloads) / 3600.0
     benchmark = {
-        "schema": "saga-alpha-backend-benchmark-v1", "rows": benchmark_rows,
+        "schema": "saga-alpha-backend-benchmark-v2", "rows": benchmark_rows,
         "cold_speedup": cold_speedup,
         "warm_speedup": warm_speedup,
         "projected_scene_hours": projected_scene_hours,
@@ -197,7 +218,8 @@ def validate_alpha_backend(args: Any) -> dict[str, Any]:
     json_atomic(output / "alpha_backend_benchmark.json", benchmark)
     json_atomic(output / "alpha_cache_manifest.json", {
         "schema": "saga-alpha-cache-summary-v1", "root": str(Path(args.alpha_cache_dir).resolve()),
-        "stats": cache.stats.__dict__, "camera_indices": selected,
+        "stats": cache.stats.__dict__,
+        "workloads": [{"round_index": row[0], "camera_index": row[1]} for row in selected],
     })
     if not parity["passed"]:
         raise RuntimeError("fused alpha backend failed numerical parity")
