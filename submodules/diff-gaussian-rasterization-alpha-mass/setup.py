@@ -21,7 +21,6 @@ setup(
                 str(HERE / "ext.cpp"),
             ],
             include_dirs=[str(BASE), str(BASE / "third_party" / "glm")],
-            extra_compile_args={"cxx": ["-O3"], "nvcc": ["-O3"]},
         )
     ],
     cmdclass={"build_ext": BuildExtension},

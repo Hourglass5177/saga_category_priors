@@ -20,7 +20,7 @@ from .runtime_io import json_atomic
 
 FORMULA_VERSION = "normalized-alpha-t-prev-v1"
 CACHE_SCHEMA = "saga-alpha-evidence-v1"
-KERNEL_VERSION = "alpha-mass-fused-v9-o3-linear-sparse"
+KERNEL_VERSION = "alpha-mass-fused-v8-linear-sparse-transfer"
 
 
 def _update_array(digest: Any, value: Any) -> None:
