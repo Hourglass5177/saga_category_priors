@@ -35,8 +35,8 @@ accumulate_kernel(
     int mask_count,
     float min_opacity,
     int point_count,
-    float* __restrict__ visible,
-    float* __restrict__ inside,
+    double* __restrict__ visible,
+    double* __restrict__ inside,
     int* __restrict__ valid_pixels) {
     auto block = cg::this_thread_block();
     const uint32_t horizontal_blocks = (width + BLOCK_X - 1) / BLOCK_X;
@@ -56,7 +56,7 @@ accumulate_kernel(
     bool done = !in_image || !isfinite(opacity) || opacity < min_opacity;
     if (in_image && !done) atomicAdd(valid_pixels, 1);
     const float inverse_opacity = done ? 0.0f : 1.0f / opacity;
-    const uint32_t bits = done ? 0u : mask_bits[pixel_id];
+    const uint32_t pixel_bits = done ? 0u : mask_bits[pixel_id];
     const uint32_t last = done ? 0u : last_contributor[pixel_id];
     const float2 pixel = {static_cast<float>(pix.x), static_cast<float>(pix.y)};
     float transmittance = in_image ? final_transmittance[pixel_id] : 0.0f;
@@ -85,11 +85,14 @@ accumulate_kernel(
             const float alpha = min(0.99f, conic.w * expf(power));
             if (alpha < 1.0f / 255.0f) continue;
             transmittance = transmittance / (1.0f - alpha);
-            const float normalized = alpha * transmittance * inverse_opacity;
+            const double normalized = static_cast<double>(alpha * transmittance * inverse_opacity);
             const int id = gaussian_ids[j];
             atomicAdd(&visible[id], normalized);
-            for (int mask = 0; mask < mask_count; ++mask) {
-                if (bits & (1u << mask)) atomicAdd(&inside[mask * point_count + id], normalized);
+            uint32_t active = pixel_bits;
+            while (active) {
+                const int mask = __ffs(active) - 1;
+                atomicAdd(&inside[mask * point_count + id], normalized);
+                active &= active - 1;
             }
         }
     }
@@ -100,7 +103,7 @@ void launch_accumulation(
     int width, int height, const float2* means2d, const float4* conic_opacity,
     const float* final_transmittance, const uint32_t* last_contributor,
     const uint32_t* mask_bits, int mask_count, float min_opacity, int point_count,
-    float* visible, float* inside, int* valid_pixels) {
+    double* visible, double* inside, int* valid_pixels) {
     accumulate_kernel<<<grid, block>>>(
         ranges, point_list, width, height, means2d, conic_opacity,
         final_transmittance, last_contributor, mask_bits, mask_count,
@@ -165,8 +168,9 @@ AccumulateAlphaMassCUDA(
         projmatrix.contiguous().data_ptr<float>(), campos.contiguous().data_ptr<float>(),
         tan_fovx, tan_fovy, prefiltered, output.data_ptr<float>(), radii.data_ptr<int>(), debug);
 
-    auto visible = torch::zeros({point_count}, floats);
-    auto inside = torch::zeros({mask_count, point_count}, floats);
+    auto doubles = means3D.options().dtype(torch::kFloat64);
+    auto visible = torch::zeros({point_count}, doubles);
+    auto inside = torch::zeros({mask_count, point_count}, doubles);
     auto valid_pixels = torch::zeros({}, ints);
     if (point_count && rendered) {
         char* geometry_ptr = reinterpret_cast<char*>(geometry_buffer.data_ptr());
@@ -183,8 +187,8 @@ AccumulateAlphaMassCUDA(
             geometry_state.conic_opacity, image_state.accum_alpha,
             image_state.n_contrib,
             reinterpret_cast<uint32_t*>(packed_masks.contiguous().data_ptr<int>()),
-            mask_count, min_opacity, point_count, visible.data_ptr<float>(),
-            inside.data_ptr<float>(), valid_pixels.data_ptr<int>());
+            mask_count, min_opacity, point_count, visible.data_ptr<double>(),
+            inside.data_ptr<double>(), valid_pixels.data_ptr<int>());
     }
     return std::make_tuple(visible, inside, valid_pixels);
 }

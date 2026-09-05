@@ -20,7 +20,7 @@ from .runtime_io import json_atomic
 
 FORMULA_VERSION = "normalized-alpha-t-prev-v1"
 CACHE_SCHEMA = "saga-alpha-evidence-v1"
-KERNEL_VERSION = "alpha-mass-fused-v2-reverse"
+KERNEL_VERSION = "alpha-mass-fused-v3-sparse-double"
 
 
 def _update_array(digest: Any, value: Any) -> None:
@@ -259,7 +259,7 @@ class AlphaEvidenceCache:
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_name(path.name + f".{uuid.uuid4().hex}.part")
         with temporary.open("wb") as handle:
-            np.savez(handle, identity=np.asarray(identity), ids=ids, mass=np.asarray(values[ids], dtype=np.float32))
+            np.savez(handle, identity=np.asarray(identity), ids=ids, mass=np.asarray(values[ids], dtype=np.float64))
         os.replace(temporary, path)
 
     def _cached_sparse(self, path: Path, point_count: int, identity: str) -> np.ndarray | None:
