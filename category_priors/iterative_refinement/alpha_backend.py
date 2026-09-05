@@ -20,7 +20,7 @@ from .runtime_io import json_atomic
 
 FORMULA_VERSION = "normalized-alpha-t-prev-v1"
 CACHE_SCHEMA = "saga-alpha-evidence-v1"
-KERNEL_VERSION = "alpha-mass-fused-v7-sparse-transfer"
+KERNEL_VERSION = "alpha-mass-fused-v8-linear-sparse-transfer"
 
 
 def _update_array(digest: Any, value: Any) -> None:
@@ -140,12 +140,18 @@ def render_fused(
     # larger cost than the fused kernel itself. Compact nonzero coordinates on
     # the GPU, transfer only those values, then reconstruct the required dense
     # reference contract in host memory.
-    nonzero = torch.nonzero(inside, as_tuple=False)
+    flat_inside = inside.reshape(-1)
+    if flat_inside.numel() > np.iinfo(np.int32).max:
+        raise RuntimeError("fused alpha output exceeds registered int32 sparse index range")
+    nonzero = torch.nonzero(flat_inside, as_tuple=False).reshape(-1)
     dense_inside = np.zeros(tuple(inside.shape), dtype=np.float64)
     if nonzero.numel():
-        values = inside[nonzero[:, 0], nonzero[:, 1]]
-        coordinates = nonzero.detach().cpu().numpy()
-        dense_inside[coordinates[:, 0], coordinates[:, 1]] = values.detach().cpu().numpy()
+        values = flat_inside[nonzero]
+        # M*N is safely below int32 for the registered <=32-mask batches.
+        # A linear int32 coordinate costs 4 bytes instead of two int64
+        # coordinates (16 bytes) per nonzero contribution.
+        linear = nonzero.to(dtype=torch.int32).detach().cpu().numpy()
+        dense_inside.reshape(-1)[linear] = values.detach().cpu().numpy()
     return AlphaMass(
         dense_inside,
         visible.detach().cpu().numpy().astype(np.float64), int(valid.item()),
