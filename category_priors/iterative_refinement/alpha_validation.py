@@ -3,6 +3,7 @@ from __future__ import annotations
 """Cloud-side numerical and performance validation for the fused backend."""
 
 import json
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -63,6 +64,25 @@ def _timed(function: Any) -> tuple[Any, float]:
     return value, time.perf_counter() - start
 
 
+def _resource_snapshot(path: Path) -> dict[str, Any]:
+    import torch
+
+    result: dict[str, Any] = {
+        "cuda_peak_allocated_bytes": int(torch.cuda.max_memory_allocated()),
+        "cuda_peak_reserved_bytes": int(torch.cuda.max_memory_reserved()),
+    }
+    usage = shutil.disk_usage(path)
+    result["disk_free_bytes"] = int(usage.free)
+    for name in ("memory.current", "memory.max", "memory.events"):
+        source = Path("/sys/fs/cgroup") / name
+        try:
+            text = source.read_text(encoding="utf-8").strip()
+            result[name.replace(".", "_")] = int(text) if "\n" not in text else text
+        except (OSError, ValueError):
+            result[name.replace(".", "_")] = None
+    return result
+
+
 def validate_alpha_backend(args: Any) -> dict[str, Any]:
     import torch
     from scene import GaussianModel
@@ -82,6 +102,7 @@ def validate_alpha_backend(args: Any) -> dict[str, Any]:
         args.alpha_cache_dir, mode="readwrite",
         gaussian_identity=gaussian_render_sha256(model),
     )
+    torch.cuda.reset_peak_memory_stats()
     for camera_index in selected:
         camera_masks = masks[camera_index]
         if len(camera_masks) > 32:
@@ -111,6 +132,15 @@ def validate_alpha_backend(args: Any) -> dict[str, Any]:
             "inside_max_abs": float(inside_error.max(initial=0)),
             "within_tolerance": bool(np.all(visible_error <= tolerance_visible) and np.all(inside_error <= tolerance_inside)),
             "soft_support_exact": bool(np.array_equal(reference_soft, fused_soft)),
+            "near_threshold_fraction": float(np.mean(
+                (np.abs(fused.inside_mass - config.alpha_inside_mass_min) <= 5e-5)
+                | ((fused.visible_mass[None, :] > 0) & (
+                    np.abs(np.divide(
+                        fused.inside_mass, fused.visible_mass[None],
+                        out=np.zeros_like(fused.inside_mass), where=fused.visible_mass[None] > 0,
+                    ) - config.alpha_inside_ratio_min) <= 5e-5
+                ))
+            )),
         })
         _, original_seconds = _timed(lambda: render_gradient_original(
             camera, model, args, background, camera_masks, config=config,
@@ -144,11 +174,23 @@ def validate_alpha_backend(args: Any) -> dict[str, Any]:
     original = sum(row["original_seconds"] for row in benchmark_rows)
     fused = sum(row["fused_cold_seconds"] for row in benchmark_rows)
     warm = sum(row["warm_seconds"] for row in benchmark_rows)
+    resources = _resource_snapshot(Path(args.alpha_cache_dir))
+    cold_speedup = original / max(fused, 1e-12)
+    warm_speedup = original / max(warm, 1e-12)
+    projected_scene_hours = (fused / max(len(benchmark_rows), 1)) * len(cameras) / 3600.0
     benchmark = {
         "schema": "saga-alpha-backend-benchmark-v1", "rows": benchmark_rows,
-        "cold_speedup": original / max(fused, 1e-12),
-        "warm_speedup": original / max(warm, 1e-12),
-        "passed": original / max(fused, 1e-12) >= 3 and original / max(warm, 1e-12) >= 20,
+        "cold_speedup": cold_speedup,
+        "warm_speedup": warm_speedup,
+        "projected_scene_hours": projected_scene_hours,
+        "resources": resources,
+        "passed": (
+            cold_speedup >= 3 and warm_speedup >= 20
+            and projected_scene_hours <= 4
+            and resources["cuda_peak_reserved_bytes"] < 28 * 1024**3
+            and (resources["memory_current"] is None or resources["memory_current"] < 80 * 1024**3)
+            and resources["disk_free_bytes"] >= 80 * 1024**3
+        ),
     }
     output = Path(args.output_dir)
     json_atomic(output / "alpha_backend_parity.json", parity)

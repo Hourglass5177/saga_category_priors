@@ -219,7 +219,6 @@ class AlphaEvidenceCache:
         self.mode = mode
         self.gaussian_identity = gaussian_identity
         self.stats = AlphaCacheStats()
-        self._memory: dict[tuple[str, int, str], np.ndarray] = {}
         self._last_result_key: tuple[int, str, tuple[str, ...]] | None = None
         self._last_result: AlphaMass | None = None
 
@@ -263,16 +262,11 @@ class AlphaEvidenceCache:
         os.replace(temporary, path)
 
     def _cached_sparse(self, path: Path, point_count: int, identity: str) -> np.ndarray | None:
-        key = (str(path), point_count, identity)
-        if key in self._memory:
-            return self._memory[key]
-        value = self._load_sparse(path, point_count, identity)
-        if value is not None:
-            self._memory[key] = value
-        return value
-
-    def _remember_sparse(self, path: Path, point_count: int, identity: str, value: np.ndarray) -> None:
-        self._memory[(str(path), point_count, identity)] = value
+        # Never retain per-mask dense arrays across cameras. A ScanNet scene can
+        # contain thousands of masks over more than a million Gaussians; keeping
+        # those reconstructed arrays in a process-wide dictionary defeats the
+        # sparse on-disk representation and can exceed the 90 GiB cgroup.
+        return self._load_sparse(path, point_count, identity)
 
     def get(
         self, camera_index: int, camera: Any, model: Any, pipeline: Any,
@@ -295,6 +289,14 @@ class AlphaEvidenceCache:
         unique_hashes = list(dict.fromkeys(mask_hashes))
         valid_pixels = -1
         visible_path = camera_root / "visible.npz"
+        manifest_path = camera_root / "manifest.json"
+        old_manifest: dict[str, Any] = {}
+        try:
+            old_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if old_manifest.get("identity") != identity:
+                old_manifest = {}
+        except (OSError, ValueError, TypeError):
+            old_manifest = {}
         visible = self._cached_sparse(visible_path, point_count, identity)
         loaded: dict[str, np.ndarray] = {}
         for digest in unique_hashes:
@@ -305,6 +307,7 @@ class AlphaEvidenceCache:
                 self.stats.mask_hits += 1
         if visible is not None:
             self.stats.camera_hits += 1
+            valid_pixels = int(old_manifest.get("valid_pixel_count", -1))
         missing = [digest for digest in unique_hashes if digest not in loaded]
         if visible is None or missing:
             if self.mode == "readonly":
@@ -324,20 +327,18 @@ class AlphaEvidenceCache:
                     visible = mass.visible_mass
                     valid_pixels = mass.valid_pixel_count
                     self._save_sparse(visible_path, visible, identity)
-                    self._remember_sparse(visible_path, point_count, identity, visible)
                 elif not np.allclose(visible, mass.visible_mass, rtol=5e-5, atol=5e-5):
                     raise RuntimeError("camera visible mass changed across deterministic mask chunks")
                 for index, digest in enumerate(chunk_hashes):
                     loaded[digest] = mass.inside_mass[index]
                     path = camera_root / "masks" / f"{digest}.npz"
                     self._save_sparse(path, loaded[digest], identity + ":" + digest)
-                    self._remember_sparse(path, point_count, identity + ":" + digest, loaded[digest])
-            json_atomic(camera_root / "manifest.json", identity_payload | {
-                "identity": identity, "mask_hashes": sorted(set(unique_hashes)),
+            json_atomic(manifest_path, identity_payload | {
+                "identity": identity,
+                "mask_hashes": sorted(set(old_manifest.get("mask_hashes", ())) | set(unique_hashes)),
                 "point_count": point_count,
+                "valid_pixel_count": int(valid_pixels),
             })
-        else:
-            valid_pixels = -1
         assert visible is not None
         inside = np.stack([loaded[digest] for digest in mask_hashes]) if mask_hashes else np.zeros((0, point_count))
         tolerance = 5e-5 * np.maximum(visible[None, :], 1.0)
