@@ -10,11 +10,13 @@ import json
 import math
 import hashlib
 import subprocess
+import time
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import numpy as np
+from scipy.spatial import cKDTree
 
 from ..candidate_bank import gaussian_xyz_sha256, load_candidate_bank
 from ..geometry import pca_sorted_extents_m
@@ -478,6 +480,7 @@ def _refine_profiles(
     selected: Mapping[int, Sequence[MaskHypothesis]], xyz: np.ndarray,
     affinity: np.ndarray, b0: np.ndarray, priors: Mapping[str, Any],
     condition: str, round_index: int, config: RefinementConfig,
+    scene_tree: Any | None = None,
 ) -> tuple[dict[str, tuple[ObjectState, ...]], list[LineageRecord]]:
     states_by_profile: dict[str, tuple[ObjectState, ...]] = {}
     lineage: list[LineageRecord] = []
@@ -495,7 +498,7 @@ def _refine_profiles(
                 seed=seed, evidence=evidence[seed.candidate_id], xyz_m=xyz,
                 affinity=affinity, b0_labels=b0, prior=prior, profile=profile,
                 round_index=round_index, review_class=review_class,
-                reliable_review_class=reliable, config=config,
+                reliable_review_class=reliable, config=config, scene_tree=scene_tree,
             )
             states.append(result.state)
             lineage.append(LineageRecord(
@@ -515,7 +518,7 @@ def _refine_second_round_profiles(
     *, original_seeds: Sequence[CandidateSeed], states1: Mapping[str, Sequence[ObjectState]],
     evidence: Mapping[int, GaussianEvidence], selected: Mapping[int, Sequence[MaskHypothesis]],
     xyz: np.ndarray, affinity: np.ndarray, b0: np.ndarray, priors: Mapping[str, Any],
-    condition: str, config: RefinementConfig,
+    condition: str, config: RefinementConfig, scene_tree: Any | None = None,
 ) -> tuple[dict[str, tuple[ObjectState, ...]], list[LineageRecord]]:
     output: dict[str, tuple[ObjectState, ...]] = {}
     lineage: list[LineageRecord] = []
@@ -533,7 +536,7 @@ def _refine_second_round_profiles(
                 seed=seed, evidence=evidence[seed.candidate_id], xyz_m=xyz,
                 affinity=affinity, b0_labels=b0, prior=prior, profile=profile,
                 round_index=2, review_class=review_class,
-                reliable_review_class=reliable, config=config,
+                reliable_review_class=reliable, config=config, scene_tree=scene_tree,
             )
             states.append(result.state)
             lineage.append(LineageRecord(
@@ -578,6 +581,20 @@ def run_scene(args: Any) -> dict[str, Any]:
         raise ValueError("condition must be global or class")
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
+    stage_started = time.perf_counter()
+    last_stage = stage_started
+    stage_seconds: dict[str, float] = {}
+
+    def mark_stage(name: str) -> None:
+        nonlocal last_stage
+        now = time.perf_counter()
+        stage_seconds[name] = now - last_stage
+        last_stage = now
+        json_atomic(output / "stage_progress.json", {
+            "state": "running", "latest_complete_stage": name,
+            "stage_seconds": stage_seconds,
+            "elapsed_seconds": now - stage_started,
+        })
     seeds, b0, reservoir_metadata = load_reservoir(args.reservoir)
     bank = load_candidate_bank(args.candidate_bank)
     if args.classes is None:
@@ -588,6 +605,12 @@ def run_scene(args: Any) -> dict[str, Any]:
     if len(xyz_scene) != len(b0) or bank.gaussian_xyz_sha256 != gaussian_xyz_sha256(xyz_scene):
         raise ValueError("reservoir/bank/Gaussian identity mismatch")
     xyz = xyz_scene * float(bank.scene_scale_m_per_unit)
+    # The former runtime rebuilt the same 1.5M-point tree once per candidate,
+    # profile, and round. That was mathematically redundant and explains the
+    # multi-hour gap between cached review rounds. One immutable scene tree is
+    # shared by every local radius query; candidate-local trees remain local.
+    scene_tree = cKDTree(xyz)
+    mark_stage("models_and_scene_tree")
     priors = json.loads(Path(args.priors).read_text(encoding="utf-8"))
     cameras = load_cameras(args)
     semantic_assets = summarize_mask_label_assets(args, cameras)
@@ -598,6 +621,7 @@ def run_scene(args: Any) -> dict[str, Any]:
         mode=args.alpha_cache_mode,
         gaussian_identity=gaussian_render_sha256(rgb),
     )
+    mark_stage("cameras_and_assets")
     review_cache_source = Path(args.review_cache_source) if args.review_cache_source else None
     camera_maps = {
         index: _get_camera_maps(
@@ -606,6 +630,7 @@ def run_scene(args: Any) -> dict[str, Any]:
         )
         for index, camera in enumerate(cameras)
     }
+    mark_stage("camera_maps")
     observations = _candidate_observations(
         seeds=seeds, cameras=cameras, camera_maps=camera_maps, xyz=xyz,
         scene_scale_m_per_unit=bank.scene_scale_m_per_unit, config=config,
@@ -628,11 +653,13 @@ def run_scene(args: Any) -> dict[str, Any]:
         alpha_cache=alpha_cache, alpha_backend=args.alpha_backend,
         gaussian_sha=bank.gaussian_xyz_sha256,
     )
+    mark_stage("round1_review_and_alpha")
     states1, profile_lineage = _refine_profiles(
         seeds=seeds, evidence=evidence1, selected=selected1, xyz=xyz,
         affinity=affinity, b0=b0, priors=priors, condition=args.condition,
-        round_index=1, config=config,
+        round_index=1, config=config, scene_tree=scene_tree,
     )
+    mark_stage("round1_local_refinement")
     lineage = [
         LineageRecord(
             node_id=f"seed:{seed.candidate_id}", parent_node_ids=(),
@@ -691,6 +718,7 @@ def run_scene(args: Any) -> dict[str, Any]:
             alpha_cache=alpha_cache, alpha_backend=args.alpha_backend,
             gaussian_sha=bank.gaussian_xyz_sha256,
         )
+    mark_stage("round2_review_and_alpha")
     combined_evidence: dict[int, GaussianEvidence] = {}
     combined_selected: dict[int, tuple[MaskHypothesis, ...]] = {}
     for seed in seeds:
@@ -720,8 +748,9 @@ def run_scene(args: Any) -> dict[str, Any]:
         original_seeds=seeds, states1=states1,
         evidence=combined_evidence, selected=combined_selected,
         xyz=xyz, affinity=affinity, b0=b0, priors=priors,
-        condition=args.condition, config=config,
+        condition=args.condition, config=config, scene_tree=scene_tree,
     )
+    mark_stage("round2_local_refinement")
     lineage.extend(lineage2)
     independent_pairs = {}
     pair_votes: dict[tuple[int, int], list[bool]] = {}
@@ -751,6 +780,7 @@ def run_scene(args: Any) -> dict[str, Any]:
         final_states[profile_name] = split
         lineage.extend(merge_lineage)
         lineage.extend(split_lineage)
+    mark_stage("merge_and_split")
 
     outputs = {}
     for profile_name, states in final_states.items():
@@ -835,6 +865,7 @@ def run_scene(args: Any) -> dict[str, Any]:
                 for state in states
             },
         }
+    mark_stage("voting_and_export")
     provenance = {
         "commit": subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parents[2], text=True
@@ -849,6 +880,7 @@ def run_scene(args: Any) -> dict[str, Any]:
         "alpha_cache_dir": str(alpha_cache_root.resolve()),
         "alpha_cache_mode": args.alpha_cache_mode,
         "alpha_cache_stats": asdict(alpha_cache.stats),
+        "stage_seconds": stage_seconds,
         "review_cache_source": None if review_cache_source is None else str(review_cache_source.resolve()),
         "gaussian_xyz_sha256": bank.gaussian_xyz_sha256,
         "assets": {
@@ -872,6 +904,11 @@ def run_scene(args: Any) -> dict[str, Any]:
     )
     result = {"schema": "saga-iterative-refinement-scene-v1", "provenance": provenance, "outputs": outputs}
     json_atomic(output / "iterative_refinement.json", result)
+    json_atomic(output / "stage_progress.json", {
+        "state": "complete", "latest_complete_stage": "scene_complete",
+        "stage_seconds": stage_seconds,
+        "elapsed_seconds": time.perf_counter() - stage_started,
+    })
     return result
 
 

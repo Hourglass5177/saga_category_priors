@@ -82,6 +82,8 @@ def local_roi_point_ids(
     evidence: GaussianEvidence,
     prior: SizePrior,
     config: RefinementConfig = RefinementConfig(),
+    *,
+    scene_tree: cKDTree | None = None,
 ) -> np.ndarray:
     xyz = np.asarray(xyz_m, dtype=np.float64)
     if xyz.ndim != 2 or xyz.shape[1] != 3 or not np.isfinite(xyz).all():
@@ -98,7 +100,9 @@ def local_roi_point_ids(
             config.graph_radius_max_m,
         )
     )
-    tree = cKDTree(xyz)
+    tree = scene_tree if scene_tree is not None else cKDTree(xyz)
+    if int(tree.n) != len(xyz):
+        raise ValueError("scene_tree is not aligned with xyz_m")
     discovered: set[int] = set(int(value) for value in base)
     # Chunked queries avoid one giant Python list for large candidate supports.
     for start in range(0, len(base), 4096):
@@ -314,10 +318,11 @@ def refine_candidate_local(
     review_class: str | None,
     reliable_review_class: bool,
     config: RefinementConfig = RefinementConfig(),
+    scene_tree: cKDTree | None = None,
 ) -> LocalRefinementResult:
     xyz = np.asarray(xyz_m, dtype=np.float64)
     b0 = np.asarray(b0_labels, dtype=np.int64)
-    roi = local_roi_point_ids(xyz, seed, evidence, prior, config)
+    roi = local_roi_point_ids(xyz, seed, evidence, prior, config, scene_tree=scene_tree)
     too_large = len(roi) > config.graph_node_limit
     if too_large:
         points = seed.seed_support

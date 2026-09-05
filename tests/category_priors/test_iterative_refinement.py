@@ -4,6 +4,7 @@ import numpy as np
 from dataclasses import replace
 import inspect
 from pathlib import Path
+from scipy.spatial import cKDTree
 
 from category_priors.iterative_refinement.contracts import (
     CandidateSeed,
@@ -22,6 +23,7 @@ from category_priors.iterative_refinement.local_refine import (
     SizePrior,
     binary_graph_cut,
     fuse_objects_with_b0,
+    local_roi_point_ids,
     trim_oversize_additions,
 )
 from category_priors.iterative_refinement.objects import combine_states, merge_objects_once
@@ -160,6 +162,16 @@ def test_empty_refinement_is_exact_b0_identity() -> None:
     result = fuse_objects_with_b0(b0, (), xyz)
     assert np.array_equal(result.labels, b0)
     assert result.accepted_object_ids == ()
+
+
+def test_shared_scene_tree_preserves_local_roi_exactly() -> None:
+    xyz = np.array([[0., 0., 0.], [.01, 0., 0.], [.20, 0., 0.]])
+    seed = CandidateSeed(0, (0,), "chair", np.array([0]), np.array([0]), "post_filter", .5)
+    evidence = GaussianEvidence(0, np.array([1]), np.array([2.]), np.array([0.]), np.array([1.]), 2, 0, ())
+    prior = SizePrior(.2, (1., 1., 1.), "global")
+    direct = local_roi_point_ids(xyz, seed, evidence, prior)
+    shared = local_roi_point_ids(xyz, seed, evidence, prior, scene_tree=cKDTree(xyz))
+    assert np.array_equal(shared, direct)
 
 
 def test_frozen_membership_can_be_reused_in_next_round() -> None:
