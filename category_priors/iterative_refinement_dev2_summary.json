@@ -1,0 +1,65 @@
+{
+  "schema": "saga-iterative-refinement-dev2-closeout-v1",
+  "date": "2026-09-06",
+  "code_commit": "987cc02e5feabeb9ae52f761a60b76b954dc2fa5",
+  "decision": "stop_before_dev8",
+  "scientific_scope": {
+    "tested": "D-class full iterative refinement versus B0-fixed on DEV2",
+    "not_tested": "D-class versus U-global category-size-prior effect"
+  },
+  "scenes": ["scene0645_00", "scene0025_01"],
+  "combined_metrics": {
+    "b0_fixed": {"ap25": 0.2222222222222222, "ap50": 0.18333333333333332, "official_map_50_90": 0.06049382716049382},
+    "refined_all_profiles": {"ap25": 0.175, "ap50": 0.15, "official_map_50_90": 0.04567901234567901},
+    "rescue": {
+      "stable_traceable_predictions": 59,
+      "balanced_traceable_predictions": 58,
+      "coverage_traceable_predictions": 57,
+      "true_positive_iou_025": 0,
+      "true_positive_iou_050": 0,
+      "b0_missed_gt_iou_025": 29,
+      "b0_missed_gt_iou_050": 31
+    }
+  },
+  "scene0645_00": {
+    "b0": {"instances": 16, "foreground_gaussians": 303907, "ap25": 0.34848484848484845, "ap50": 0.28787878787878785, "official_map_50_90": 0.10606060606060604},
+    "refined": {
+      "instances_by_profile": {"stable": 77, "balanced": 75, "coverage": 77},
+      "ap25": 0.2929292929292929,
+      "ap50": 0.25757575757575757,
+      "official_map_50_90": 0.08754208754208753,
+      "traceable_predictions": 22,
+      "rescued_iou_025": 0,
+      "rescued_iou_050": 0,
+      "b0_foreground_to_background": {"stable": 11157, "balanced": 11147, "coverage": 11147},
+      "b0_background_to_foreground": {"stable": 361, "balanced": 362, "coverage": 365}
+    },
+    "mapped_fraction_5cm": 0.9684234716024024,
+    "readonly_replays_byte_identical": true
+  },
+  "scene0025_01": {
+    "b0": {"instances": 13, "foreground_gaussians": 358167},
+    "refined": {
+      "instances_by_profile": {"stable": 112, "balanced": 113, "coverage": 111},
+      "traceable_predictions_by_profile": {"stable": 37, "balanced": 36, "coverage": 35},
+      "rescued_iou_025": 0,
+      "rescued_iou_050": 0,
+      "b0_foreground_to_background": {"stable": 131330, "balanced": 131642, "coverage": 82147},
+      "b0_background_to_foreground": {"stable": 747, "balanced": 641, "coverage": 649}
+    },
+    "mapped_fraction_5cm": 0.993615737388366
+  },
+  "contracts": {
+    "orphan_gaussians": 0,
+    "negative_instance_metadata": 0,
+    "duplicate_ownership": 0,
+    "alpha_fused_cold_speedup": 2.48,
+    "alpha_fused_cold_gate": 3.0,
+    "alpha_performance_gate_passed": false
+  },
+  "remote_artifacts": {
+    "workspace": "/root/autodl-tmp/saga/workspace/iterative-refinement-987cc02",
+    "evaluation": "/root/autodl-tmp/saga/artifacts/iterative-refinement-987cc02/dev2_evaluation.json",
+    "scene0645_evaluation": "/root/autodl-tmp/saga/artifacts/iterative-refinement-987cc02/scene0645_evaluation.json"
+  }
+}

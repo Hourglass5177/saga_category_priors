@@ -2,7 +2,7 @@
 
 这个目录只保留当前研究需要的公共数据合同、候选库、旧后处理重放和评价工具。过去的 V3–V10、ObjectBank、提示尺度、HDBSCAN 修复和三维尺寸恢复实验已经退出活跃代码；如需追溯，请查看 Git 历史，而不是把旧状态机重新接回运行路径。
 
-当前研究问题是：老师兼容自动流程产生全 SAGA20 分支候选后，能否通过最多两轮的多视角二维重新识别、完整 SAM 掩码回写、局部图精修和受约束 B0 融合，真正补全或清理三维实例；在完整闭环健康后，逐类别尺寸是否比全局尺寸提供额外收益。
+最近完成的 DEV2 结果表明，这套两轮闭环没有救回任何 B0 漏检对象，反而降低了 AP 并把 B0 前景切成大量碎片，因此已在扩展 DEV8 前停止。完整结论、数值和失败链见 [ITERATIVE_REFINEMENT_DEV2_CLOSEOUT.md](ITERATIVE_REFINEMENT_DEV2_CLOSEOUT.md)。该结果只否定当前闭环组合，没有检验 `D-class - U-global`，不能写成类别尺寸先验无效。
 
 在开始实现或运行前，必须完整阅读 [ITERATIVE_REFINEMENT_EXPERIMENT_STANDARD.md](ITERATIVE_REFINEMENT_EXPERIMENT_STANDARD.md)。旧的 [INSTANCE_RECHECK_BASELINE_STANDARD.md](INSTANCE_RECHECK_BASELINE_STANDARD.md) 只记录已经结案的一次布尔复核。
 
@@ -23,7 +23,7 @@
 
 ## 当前阶段
 
-活动实现位于 `iterative_refinement/`，以冻结 CandidateBank 和 B0 为输入。旧 `instance_recheck.py` 及其 `B0/raw/global/class` 结果只作静态对照；新系统不会把精修结果重新送进旧全场 KNN/filter10。
+`iterative_refinement/` 已完成 DEV2 结案，保留用于复核，不再扩场景。旧 `instance_recheck.py` 及其 `B0/raw/global/class` 结果只作静态对照。
 
 ## 基础命令
 

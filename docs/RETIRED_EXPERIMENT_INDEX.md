@@ -1,9 +1,10 @@
 # 已退出主线的实验索引
 
-更新日期：2026 年 9 月 3 日
+更新日期：2026 年 9 月 6 日
 
-这是一张导航表，不是旧代码的兼容层。当前运行标准只认
-[`category_priors/INSTANCE_RECHECK_BASELINE_STANDARD.md`](../category_priors/INSTANCE_RECHECK_BASELINE_STANDARD.md)。
+这是一张导航表，不是旧代码的兼容层。最近一轮实验已经结案，预注册标准与负结果分别见
+[`category_priors/ITERATIVE_REFINEMENT_EXPERIMENT_STANDARD.md`](../category_priors/ITERATIVE_REFINEMENT_EXPERIMENT_STANDARD.md) 和
+[`category_priors/ITERATIVE_REFINEMENT_DEV2_CLOSEOUT.md`](../category_priors/ITERATIVE_REFINEMENT_DEV2_CLOSEOUT.md)。
 旧实现继续保存在 Git 历史和只读实验产物中，不应重新接入当前主线。
 
 | 路线 | 代表性末端提交 | 仍可保留的结论 | 为什么退出主线 / 产物位置 |
@@ -18,6 +19,7 @@
 | 全类别降噪与候选形成 / HDBSCAN 修复 | `ccb5677` | 中心重分配、候选扩张和后处理会改变小簇；原始候选中真候选很少 | 继续换聚类或修候选会把问题扩成主干重构 |
 | clean alpha-mask baseline 与 late-filter | `64505e0` | 掩码支持、歧义和检测比例过滤都会造成阶段损失 | 路线逐渐取代老师基线，不能直接回答类别裁图是否有用 |
 | KNN 前完整实例三维尺寸排序 | `b41533e` | 能更干净地看尺寸排序，但仍停留在三维打分和恢复 | 老师最新建议要求把候选回到二维图像重新确认 |
+| 两轮二维至三维闭环精修 | `987cc02` | 融合 alpha 后端、候选级局部图断点和确定性重放均通过；工程优化有效 | DEV2 两场 57 至 59 个可追踪精修预测没有救回任何 B0 漏检对象，AP 下降且实例严重碎片化；未进入 DEV8，也未检验 `D-class - U-global` |
 
 三个历史锚点：
 

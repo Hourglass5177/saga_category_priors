@@ -2,6 +2,8 @@
 
 更新日期：2026 年 9 月 5 日
 
+> 结案状态（2026 年 9 月 6 日）：DEV2 两场正式评价为零救回，且 AP 低于 B0。实验已在 DEV8 前停止。详见 [ITERATIVE_REFINEMENT_DEV2_CLOSEOUT.md](ITERATIVE_REFINEMENT_DEV2_CLOSEOUT.md)。以下内容保留为本轮预注册标准和实现依据，不再表示实验仍在运行。
+
 ## 研究问题
 
 本研究先检验一条完整的局部闭环能否救回老师兼容自动流程 `B0-fixed`
