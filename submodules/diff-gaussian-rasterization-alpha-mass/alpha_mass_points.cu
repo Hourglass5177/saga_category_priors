@@ -59,15 +59,15 @@ accumulate_kernel(
     const uint32_t bits = done ? 0u : mask_bits[pixel_id];
     const uint32_t last = done ? 0u : last_contributor[pixel_id];
     const float2 pixel = {static_cast<float>(pix.x), static_cast<float>(pix.y)};
-    float transmittance = 1.0f;
-    uint32_t contributor = 0;
+    float transmittance = in_image ? final_transmittance[pixel_id] : 0.0f;
+    uint32_t contributor = range.y - range.x;
 
     for (int round = 0; round < rounds; ++round, remaining -= BLOCK_SIZE) {
         const int all_done = __syncthreads_count(done);
         if (all_done == BLOCK_SIZE) break;
         const int progress = round * BLOCK_SIZE + block.thread_rank();
         if (range.x + progress < range.y) {
-            const int id = point_list[range.x + progress];
+            const int id = point_list[range.y - progress - 1];
             gaussian_ids[block.thread_rank()] = id;
             positions[block.thread_rank()] = means2d[id];
             conics[block.thread_rank()] = conic_opacity[id];
@@ -75,11 +75,8 @@ accumulate_kernel(
         block.sync();
 
         for (int j = 0; !done && j < min(BLOCK_SIZE, remaining); ++j) {
-            ++contributor;
-            if (contributor > last) {
-                done = true;
-                break;
-            }
+            --contributor;
+            if (contributor >= last) continue;
             const float2 delta = {positions[j].x - pixel.x, positions[j].y - pixel.y};
             const float4 conic = conics[j];
             const float power = -0.5f * (conic.x * delta.x * delta.x + conic.z * delta.y * delta.y)
@@ -87,18 +84,13 @@ accumulate_kernel(
             if (power > 0.0f) continue;
             const float alpha = min(0.99f, conic.w * expf(power));
             if (alpha < 1.0f / 255.0f) continue;
-            const float next = transmittance * (1.0f - alpha);
-            if (next < 0.0001f) {
-                done = true;
-                continue;
-            }
+            transmittance = transmittance / (1.0f - alpha);
             const float normalized = alpha * transmittance * inverse_opacity;
             const int id = gaussian_ids[j];
             atomicAdd(&visible[id], normalized);
             for (int mask = 0; mask < mask_count; ++mask) {
                 if (bits & (1u << mask)) atomicAdd(&inside[mask * point_count + id], normalized);
             }
-            transmittance = next;
         }
     }
 }

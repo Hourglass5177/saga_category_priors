@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import os
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -14,7 +15,7 @@ import numpy as np
 
 from .contracts import RefinementConfig
 from .evidence import AlphaMass, alpha_mass_from_gradients, build_alpha_objective, iter_three_channel_masks
-from .runtime_io import json_atomic, npz_atomic
+from .runtime_io import json_atomic
 
 
 FORMULA_VERSION = "normalized-alpha-t-prev-v1"
@@ -215,6 +216,7 @@ class AlphaEvidenceCache:
         self.mode = mode
         self.gaussian_identity = gaussian_identity
         self.stats = AlphaCacheStats()
+        self._memory: dict[tuple[str, int, str], np.ndarray] = {}
 
     def _identity(self, camera: Any, config: RefinementConfig) -> Mapping[str, Any]:
         return {
@@ -249,7 +251,23 @@ class AlphaEvidenceCache:
     @staticmethod
     def _save_sparse(path: Path, values: np.ndarray, identity: str) -> None:
         ids = np.flatnonzero(values > 0).astype(np.int64)
-        npz_atomic(path, identity=np.asarray(identity), ids=ids, mass=np.asarray(values[ids], dtype=np.float32))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(path.name + f".{uuid.uuid4().hex}.part")
+        with temporary.open("wb") as handle:
+            np.savez(handle, identity=np.asarray(identity), ids=ids, mass=np.asarray(values[ids], dtype=np.float32))
+        os.replace(temporary, path)
+
+    def _cached_sparse(self, path: Path, point_count: int, identity: str) -> np.ndarray | None:
+        key = (str(path), point_count, identity)
+        if key in self._memory:
+            return self._memory[key]
+        value = self._load_sparse(path, point_count, identity)
+        if value is not None:
+            self._memory[key] = value
+        return value
+
+    def _remember_sparse(self, path: Path, point_count: int, identity: str, value: np.ndarray) -> None:
+        self._memory[(str(path), point_count, identity)] = value
 
     def get(
         self, camera_index: int, camera: Any, model: Any, pipeline: Any,
@@ -266,10 +284,12 @@ class AlphaEvidenceCache:
         mask_hashes = [mask_sha256(mask) for mask in masks]
         unique_hashes = list(dict.fromkeys(mask_hashes))
         valid_pixels = -1
-        visible = self._load_sparse(camera_root / "visible.npz", point_count, identity)
+        visible_path = camera_root / "visible.npz"
+        visible = self._cached_sparse(visible_path, point_count, identity)
         loaded: dict[str, np.ndarray] = {}
         for digest in unique_hashes:
-            value = self._load_sparse(camera_root / "masks" / f"{digest}.npz", point_count, identity + ":" + digest)
+            path = camera_root / "masks" / f"{digest}.npz"
+            value = self._cached_sparse(path, point_count, identity + ":" + digest)
             if value is not None:
                 loaded[digest] = value
                 self.stats.mask_hits += 1
@@ -293,12 +313,15 @@ class AlphaEvidenceCache:
                 if visible is None:
                     visible = mass.visible_mass
                     valid_pixels = mass.valid_pixel_count
-                    self._save_sparse(camera_root / "visible.npz", visible, identity)
+                    self._save_sparse(visible_path, visible, identity)
+                    self._remember_sparse(visible_path, point_count, identity, visible)
                 elif not np.allclose(visible, mass.visible_mass, rtol=5e-5, atol=5e-5):
                     raise RuntimeError("camera visible mass changed across deterministic mask chunks")
                 for index, digest in enumerate(chunk_hashes):
                     loaded[digest] = mass.inside_mass[index]
-                    self._save_sparse(camera_root / "masks" / f"{digest}.npz", loaded[digest], identity + ":" + digest)
+                    path = camera_root / "masks" / f"{digest}.npz"
+                    self._save_sparse(path, loaded[digest], identity + ":" + digest)
+                    self._remember_sparse(path, point_count, identity + ":" + digest, loaded[digest])
             json_atomic(camera_root / "manifest.json", identity_payload | {
                 "identity": identity, "mask_hashes": sorted(set(unique_hashes)),
                 "point_count": point_count,

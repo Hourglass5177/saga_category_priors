@@ -119,8 +119,7 @@ def validate_alpha_backend(args: Any) -> dict[str, Any]:
             camera_index, camera, model, args, background, camera_masks,
             backend="fused", config=config,
         ))
-        readonly = AlphaEvidenceCache(args.alpha_cache_dir, mode="readonly", gaussian_identity=cache.gaussian_identity)
-        warm, warm_seconds = _timed(lambda: readonly.get(
+        warm, warm_seconds = _timed(lambda: cache.get(
             camera_index, camera, model, args, background, camera_masks,
             backend="fused", config=config,
         ))
