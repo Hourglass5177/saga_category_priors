@@ -44,9 +44,9 @@ def _stratified_cameras(masks: dict[int, list[np.ndarray]], limit: int = 12) -> 
             if index not in selected:
                 selected.append(index)
     if len(selected) < min(limit, len(rows)):
-        positions = np.linspace(0, len(rows) - 1, min(limit, len(rows))).round().astype(int)
-        for position in positions:
-            index = rows[int(position)][1]
+        # The production bottleneck is cameras with many masks. Keep the four
+        # registered scale anchors, then benchmark the heaviest remaining work.
+        for _, index in reversed(rows):
             if index not in selected:
                 selected.append(index)
             if len(selected) == limit:

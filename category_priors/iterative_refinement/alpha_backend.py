@@ -220,6 +220,8 @@ class AlphaEvidenceCache:
         self.gaussian_identity = gaussian_identity
         self.stats = AlphaCacheStats()
         self._memory: dict[tuple[str, int, str], np.ndarray] = {}
+        self._last_result_key: tuple[int, str, tuple[str, ...]] | None = None
+        self._last_result: AlphaMass | None = None
 
     def _identity(self, camera: Any, config: RefinementConfig) -> Mapping[str, Any]:
         return {
@@ -285,6 +287,11 @@ class AlphaEvidenceCache:
         identity_payload = self._identity(camera, config)
         identity = hashlib.sha256(json.dumps(identity_payload, sort_keys=True).encode()).hexdigest()
         mask_hashes = [mask_sha256(mask) for mask in masks]
+        result_key = (camera_index, identity, tuple(mask_hashes))
+        if result_key == self._last_result_key and self._last_result is not None:
+            self.stats.camera_hits += 1
+            self.stats.mask_hits += len(mask_hashes)
+            return self._last_result
         unique_hashes = list(dict.fromkeys(mask_hashes))
         valid_pixels = -1
         visible_path = camera_root / "visible.npz"
@@ -337,7 +344,12 @@ class AlphaEvidenceCache:
         if inside.size and np.any(inside - visible[None, :] > tolerance):
             raise RuntimeError("cached inside mass exceeds visible mass")
         self.stats.completed_cameras += 1
-        return AlphaMass(inside, visible, valid_pixels)
+        result = AlphaMass(inside, visible, valid_pixels)
+        # Keep only the latest dense batch. Retaining every camera would defeat
+        # the sparse disk cache on million-Gaussian scenes.
+        self._last_result_key = result_key
+        self._last_result = result
+        return result
 
 
 def _render_backend(backend: str, camera: Any, model: Any, pipeline: Any, background: Any, masks: Sequence[np.ndarray], config: RefinementConfig) -> AlphaMass:
