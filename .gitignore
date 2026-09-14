@@ -28,3 +28,4 @@ tmp/
 .ruff_cache/
 *.tar
 *.tar.gz
+*.bundle

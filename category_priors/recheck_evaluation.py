@@ -8,6 +8,7 @@ candidate builder, 2D reviewer, or replay runtime.
 """
 
 import argparse
+import hashlib
 import json
 import math
 from collections.abc import Hashable, Mapping, Sequence
@@ -47,6 +48,10 @@ class BranchPrediction:
     score: float
     mask: np.ndarray
     source_candidate_id: int | None = None
+    source_candidate_ids: tuple[int, ...] = ()
+    # Exact Gaussian-domain membership, rather than the lossy GT projection.
+    # Pure unit callers without a separate domain may leave this unset.
+    member_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -65,6 +70,38 @@ class OneToOneMatchResult:
 
 def _stable_key(value: Hashable) -> tuple[str, str]:
     return type(value).__name__, repr(value)
+
+
+def mask_content_sha256(mask: np.ndarray) -> str:
+    value = _validated_mask(mask, owner="content identity")
+    digest = hashlib.sha256()
+    digest.update(int(len(value)).to_bytes(8, "little"))
+    digest.update(np.packbits(value, bitorder="little").tobytes())
+    return digest.hexdigest()
+
+
+def _content_key(row: BranchPrediction | GroundTruthObject) -> tuple[str, str, str]:
+    return (
+        row.class_name,
+        mask_content_sha256(row.mask),
+        str(getattr(row, "member_sha256", None) or ""),
+    )
+
+
+def _member_key(row: BranchPrediction) -> tuple[str, str]:
+    return row.class_name, row.member_sha256 or mask_content_sha256(row.mask)
+
+
+def _nonnegative_id(value: Any) -> int:
+    if isinstance(value, bool) or not (
+        isinstance(value, (int, np.integer))
+        or isinstance(value, str) and value.isascii() and value.isdigit()
+    ):
+        raise ValueError(f"instance and candidate IDs must be nonnegative integers: {value!r}")
+    result = int(value)
+    if result < 0:
+        raise ValueError("instance and candidate IDs must be nonnegative integers")
+    return result
 
 
 def _validated_mask(value: Any, *, owner: str) -> np.ndarray:
@@ -88,16 +125,19 @@ def match_one_to_one(
     """Maximum-cardinality, then maximum-total-IoU same-class matching.
 
     The strict ``>`` comparison intentionally follows the repository's ScanNet
-    evaluator.  Stable identifiers make exact ties deterministic.
+    evaluator. Content ordering makes exact ties invariant to label renumbering.
+    Exact duplicate masks are interchangeable; IDs break only those residual ties.
     """
 
     threshold = float(iou_threshold)
     if not 0.0 <= threshold <= 1.0:
         raise ValueError("IoU threshold must be in [0, 1]")
     ordered_predictions = sorted(
-        predictions, key=lambda row: _stable_key(row.prediction_id)
+        predictions, key=lambda row: (_content_key(row), _stable_key(row.prediction_id))
     )
-    ordered_gt = sorted(ground_truth, key=lambda row: _stable_key(row.gt_id))
+    ordered_gt = sorted(
+        ground_truth, key=lambda row: (_content_key(row), _stable_key(row.gt_id))
+    )
     prediction_ids = [row.prediction_id for row in ordered_predictions]
     gt_ids = [row.gt_id for row in ordered_gt]
     if len(set(prediction_ids)) != len(prediction_ids):
@@ -140,11 +180,9 @@ def match_one_to_one(
             ious[prediction_index, gt_index] = iou
             if iou > threshold:
                 valid[prediction_index, gt_index] = True
-                # The perturbation is far below any reported precision and is
-                # used solely to resolve mathematically exact assignment ties.
-                pair_rank = prediction_index * n_gt + gt_index
-                tie = 1.0e-12 / float(pair_rank + 1)
-                profit[prediction_index, gt_index] = cardinality_bonus + iou + tie
+                # Do not perturb IoU: an epsilon can change a non-tied optimum.
+                # The solver receives a deterministic content-ordered matrix.
+                profit[prediction_index, gt_index] = cardinality_bonus + iou
 
     try:
         from scipy.optimize import linear_sum_assignment
@@ -198,7 +236,9 @@ def _metric_values(tp: int, fp: int, fn: int) -> dict[str, float | None]:
     recall = float(tp / (tp + fn)) if tp + fn else None
     denominator = 2 * tp + fp + fn
     f1 = float(2 * tp / denominator) if denominator else None
-    return {"precision": precision, "recall": recall, "f1": f1}
+    f05_denominator = 1.25 * tp + fp + 0.25 * fn
+    f05 = float(1.25 * tp / f05_denominator) if f05_denominator else None
+    return {"precision": precision, "recall": recall, "f1": f1, "f0_5": f05}
 
 
 def _evaluate_stratum(
@@ -292,11 +332,11 @@ def evaluate_rescue_scene(
 ) -> dict[str, Any]:
     """Evaluate one scene and one IoU threshold under four frozen strata."""
 
-    source_ids = [row.source_candidate_id for row in branch_predictions]
-    if any(value is None for value in source_ids):
+    if any(
+        not row.source_candidate_ids and row.source_candidate_id is None
+        for row in branch_predictions
+    ):
         raise ValueError("every branch prediction must have a source candidate id")
-    if len(set(source_ids)) != len(source_ids):
-        raise ValueError("branch source candidate ids must be unique")
 
     b0_match = match_one_to_one(b0_predictions, ground_truth, iou_threshold)
     b0_hit_ids = {row.gt_id for row in b0_match.matches}
@@ -369,7 +409,7 @@ def aggregate_rescue_scenes(
         pooled_metrics = _metric_values(pooled["tp"], pooled["fp"], pooled["fn"])
         scene_equal = {}
         defined_scene_count = {}
-        for key in ("precision", "recall", "f1"):
+        for key in ("precision", "recall", "f1", "f0_5"):
             values = [float(row[key]) for row in rows if row[key] is not None]
             scene_equal[key] = float(np.mean(values)) if values else None
             defined_scene_count[key] = len(values)
@@ -415,19 +455,190 @@ def ground_truth_objects(
     return tuple(result)
 
 
+def evaluate_scene_reconciliation(
+    *,
+    scene_id: str,
+    b0_predictions: Sequence[BranchPrediction],
+    final_predictions: Sequence[BranchPrediction],
+    ground_truth: Sequence[GroundTruthObject],
+    strata: EvaluationStrata,
+    iou_threshold: float,
+    min_region_size: int = 100,
+) -> dict[str, Any]:
+    """Account for every final prediction independently of candidate lineage.
+
+    This is an object readout, not a replacement for the ScanNet AP evaluator.
+    Small exported fragments remain present and are counted separately. Final
+    ownership is matched to all GT once, then sliced into frozen strata; a
+    correct replacement of a B0 hit is retained, never a duplicate merely
+    because its candidate source is new.
+    """
+    b0_match = match_one_to_one(b0_predictions, ground_truth, iou_threshold)
+    final_match = match_one_to_one(final_predictions, ground_truth, iou_threshold)
+    b0_hit = {row.gt_id for row in b0_match.matches}
+    final_hit = {row.gt_id for row in final_match.matches}
+    b0_hit_prediction = {row.prediction_id for row in b0_match.matches}
+    final_by_id = {row.prediction_id: row for row in final_predictions}
+    gt_by_id = {row.gt_id: row for row in ground_truth}
+
+    # Match exact unchanged geometry one-to-one, not by export ID or GT-domain
+    # projection. One unchanged mask cannot exempt several duplicate outputs.
+    available_b0: dict[tuple[str, str], list[BranchPrediction]] = {}
+    for row in sorted(b0_predictions, key=lambda row: _stable_key(row.prediction_id)):
+        available_b0.setdefault(_member_key(row), []).append(row)
+    unchanged: dict[Hashable, Hashable] = {}
+    for row in sorted(final_predictions, key=lambda row: (_content_key(row), _stable_key(row.prediction_id))):
+        group = available_b0.get(_member_key(row), [])
+        if group:
+            unchanged[row.prediction_id] = group.pop(0).prediction_id
+
+    unmatched = set(final_match.unmatched_prediction_ids)
+    inherited = {
+        value for value in unmatched
+        if value in unchanged and unchanged[value] not in b0_hit_prediction
+    }
+    displaced_unchanged = {
+        value for value in unmatched
+        if value in unchanged and unchanged[value] in b0_hit_prediction
+    }
+    new_fp = unmatched - set(unchanged)
+    hit_gt = [gt_by_id[value] for value in final_hit]
+    duplicates = {
+        value for value in unmatched
+        if _has_match(final_by_id[value], hit_gt, iou_threshold)
+    }
+    rescued = final_hit - b0_hit
+    retained = final_hit & b0_hit
+    lost = b0_hit - final_hit
+    missed = set(gt_by_id) - b0_hit
+
+    gt_predicates = {
+        "overall": lambda row: True,
+        "small": lambda row: strata.is_small(row.bbox_diagonal_m),
+        "tail": lambda row: strata.is_tail(row.class_name),
+        "small_tail": lambda row: strata.is_small(row.bbox_diagonal_m) and strata.is_tail(row.class_name),
+    }
+    readouts: dict[str, Any] = {}
+    for name, include_gt in gt_predicates.items():
+        target = {row.gt_id for row in ground_truth if include_gt(row)}
+        # Size is a GT property. Never exclude an FP by its predicted geometry.
+        # Tail remains class-restricted; all-FP counts are reported alongside.
+        include_prediction = (
+            (lambda row: strata.is_tail(row.class_name))
+            if name in {"tail", "small_tail"} else (lambda row: True)
+        )
+        eligible = {row.prediction_id for row in final_predictions if include_prediction(row)}
+        count_rescue = len(rescued & target)
+        count_fp = len(new_fp & eligible)
+        count_fn = len((missed - rescued) & target)
+        readouts[name] = {
+            "rescued": count_rescue,
+            "retained": len(retained & target),
+            "lost": len(lost & target),
+            "b0_hit_gt": len(b0_hit & target),
+            "b0_missed_gt": len(missed & target),
+            "final_hit_gt": len(final_hit & target),
+            "gt_count": len(target),
+            "new_false_positives": count_fp,
+            "all_new_false_positives": len(new_fp),
+            "inherited_false_positives": len(inherited & eligible),
+            "unchanged_b0_displaced_predictions": len(displaced_unchanged & eligible),
+            "duplicate_predictions": len(duplicates & eligible),
+            "new_duplicate_predictions": len(duplicates & new_fp & eligible),
+            "final_false_positives": len(unmatched & eligible),
+            "all_final_false_positives": len(unmatched),
+            "final_prediction_count": len(eligible),
+            "all_final_prediction_count": len(final_predictions),
+            "below_ap_min_region_predictions": sum(
+                int(np.count_nonzero(row.mask)) < int(min_region_size)
+                for row in final_predictions if include_prediction(row)
+            ),
+            "tp": count_rescue,
+            "fp": count_fp,
+            "fn": count_fn,
+            **_metric_values(count_rescue, count_fp, count_fn),
+        }
+    return {
+        "scene_id": str(scene_id),
+        "iou_threshold": float(iou_threshold),
+        "prediction_coverage": "all_final_exports",
+        "unchanged_identity_domain": (
+            "gaussian" if all(row.member_sha256 is not None for row in (*b0_predictions, *final_predictions))
+            else "provided_mask_domain"
+        ),
+        "matching": "same_class_max_cardinality_then_total_iou_strict_threshold_content_ties",
+        "min_region_size_for_ap_only": int(min_region_size),
+        "b0_matches": [asdict(row) for row in b0_match.matches],
+        "final_matches": [asdict(row) for row in final_match.matches],
+        "rescued_gt_ids": sorted(rescued, key=_stable_key),
+        "retained_gt_ids": sorted(retained, key=_stable_key),
+        "lost_gt_ids": sorted(lost, key=_stable_key),
+        "new_false_positive_ids": sorted(new_fp, key=_stable_key),
+        "inherited_false_positive_ids": sorted(inherited, key=_stable_key),
+        "unchanged_b0_displaced_prediction_ids": sorted(displaced_unchanged, key=_stable_key),
+        "duplicate_prediction_ids": sorted(duplicates, key=_stable_key),
+        "unchanged_prediction_pairs": [
+            {"final_export_id": value, "b0_export_id": unchanged[value]}
+            for value in sorted(unchanged, key=_stable_key)
+        ],
+        "strata": readouts,
+    }
+
+
+def aggregate_reconciliation_scenes(
+    scene_results: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    if not scene_results:
+        raise ValueError("at least one scene result is required")
+    thresholds = {float(row["iou_threshold"]) for row in scene_results}
+    scene_ids = [str(row["scene_id"]) for row in scene_results]
+    if len(thresholds) != 1 or len(set(scene_ids)) != len(scene_ids):
+        raise ValueError("reconciliation requires unique scenes at one IoU threshold")
+    result: dict[str, Any] = {
+        "iou_threshold": next(iter(thresholds)), "scene_count": len(scene_results), "strata": {},
+    }
+    metric_names = ("precision", "recall", "f1", "f0_5")
+    for name in ("overall", "small", "tail", "small_tail"):
+        rows = [scene["strata"][name] for scene in scene_results]
+        counts = {
+            key: sum(int(row[key]) for row in rows)
+            for key in rows[0] if key not in metric_names
+        }
+        values = {key: [float(row[key]) for row in rows if row[key] is not None] for key in metric_names}
+        result["strata"][name] = {
+            "pooled_counts": counts,
+            "pooled_metrics": _metric_values(counts["tp"], counts["fp"], counts["fn"]),
+            "scene_equal_mean": {key: float(np.mean(items)) if items else None for key, items in values.items()},
+            "defined_scene_count": {key: len(items) for key, items in values.items()},
+        }
+    return result
+
+
 def _branch_rows(
     predictions: Sequence[PredictedInstance],
     candidate_export_ids: Mapping[str, Any],
     class_names: Sequence[str],
+    *,
+    candidate_export_lineage: Mapping[str, Any] | None = None,
 ) -> tuple[BranchPrediction, ...]:
-    export_to_candidate: dict[int, int] = {}
-    for candidate_id, export_id in candidate_export_ids.items():
-        export = int(export_id)
-        if export in export_to_candidate:
-            raise ValueError("multiple candidate ids point to one exported prediction")
-        export_to_candidate[export] = int(candidate_id)
+    """Build legacy rescue rows from complete export-indexed lineage only."""
+    if candidate_export_lineage is None:
+        raise ValueError("incomplete lineage: legacy parent-to-export map cannot prove split coverage")
+    export_to_parents: dict[int, tuple[int, ...]] = {}
+    for raw_export, raw_parents in candidate_export_lineage.items():
+        export = _nonnegative_id(raw_export)
+        if export < 0 or export in export_to_parents:
+            raise ValueError("lineage export IDs must be unique nonnegative integers")
+        if not isinstance(raw_parents, (list, tuple)) or not raw_parents:
+            raise ValueError(f"export {export}: lineage requires a nonempty parent list")
+        parents = tuple(sorted({_nonnegative_id(value) for value in raw_parents}))
+        if min(parents) < 0:
+            raise ValueError("candidate IDs must be nonnegative")
+        export_to_parents[export] = parents
     by_export = {int(row.instance_id): row for row in predictions}
-    missing = sorted(set(export_to_candidate) - set(by_export))
+    if len(by_export) != len(predictions):
+        raise ValueError("prediction export IDs must be unique")
+    missing = sorted(set(export_to_parents) - set(by_export))
     if missing:
         raise ValueError(
             f"candidate source chain references missing exports: {missing}"
@@ -438,15 +649,17 @@ def _branch_rows(
             class_name=str(class_names[row.class_id]),
             score=float(row.score),
             mask=np.asarray(row.mask, dtype=bool),
-            source_candidate_id=int(export_to_candidate[export_id]),
+            source_candidate_id=export_to_parents[export_id][0],
+            source_candidate_ids=export_to_parents[export_id],
         )
         for export_id, row in sorted(by_export.items())
-        if export_id in export_to_candidate
+        if export_id in export_to_parents
     )
 
 
 def _prediction_rows(
-    predictions: Sequence[PredictedInstance], class_names: Sequence[str]
+    predictions: Sequence[PredictedInstance], class_names: Sequence[str],
+    *, gaussian_labels: np.ndarray | None = None,
 ) -> tuple[BranchPrediction, ...]:
     return tuple(
         BranchPrediction(
@@ -454,9 +667,81 @@ def _prediction_rows(
             class_name=str(class_names[row.class_id]),
             score=float(row.score),
             mask=np.asarray(row.mask, dtype=bool),
+            member_sha256=(
+                mask_content_sha256(np.asarray(gaussian_labels) == int(row.instance_id))
+                if gaussian_labels is not None else None
+            ),
         )
         for row in predictions
     )
+
+
+def audit_export_lineage(
+    predictions: Sequence[PredictedInstance],
+    output_payload: Mapping[str, Any],
+    class_names: Sequence[str],
+) -> tuple[tuple[BranchPrediction, ...], dict[str, Any]]:
+    """Recover historical full lineage; suppress rescue if provenance is partial.
+
+    Historical refinement already saved lossless ``candidate_export_lineage``.
+    Its lossy canonical-parent map is checked as a subset only. New v2 outputs
+    additionally prove explicit export inventory and complete inverse coverage.
+    """
+    lineage = output_payload.get("candidate_export_lineage")
+    inverse = output_payload.get("candidate_export_ids", {})
+    schema = output_payload.get("candidate_export_contract_schema")
+    declared = output_payload.get("refined_export_ids")
+    audit: dict[str, Any] = {
+        "status": "incomplete", "complete": False,
+        "source": "full_export_lineage" if lineage is not None else "legacy_single_value_map",
+        "explicit_refined_inventory": declared is not None,
+        "final_prediction_count": len(predictions),
+        "traceable_prediction_count": None,
+        "reason": None,
+    }
+    try:
+        if schema not in (None, "saga-candidate-export-lineage-v2"):
+            raise ValueError(f"unsupported candidate lineage schema {schema!r}")
+        if lineage is not None and not isinstance(lineage, Mapping):
+            raise ValueError("export lineage must be a mapping")
+        if not isinstance(inverse, Mapping):
+            raise ValueError("candidate export inverse must be a mapping")
+        rows = _branch_rows(predictions, inverse, class_names, candidate_export_lineage=lineage)
+        parents_by_export = {int(row.prediction_id): set(row.source_candidate_ids) for row in rows}
+        if schema is not None and declared is None:
+            raise ValueError("v2 lineage requires refined_export_ids")
+        if declared is not None:
+            if not isinstance(declared, (list, tuple)):
+                raise ValueError("refined_export_ids must be a list")
+            inventory = [_nonnegative_id(value) for value in declared]
+            if len(set(inventory)) != len(inventory) or set(inventory) != set(parents_by_export):
+                raise ValueError("refined export inventory differs from full lineage")
+        inverse_pairs = set()
+        for parent, exports in inverse.items():
+            if schema is not None and not isinstance(exports, (list, tuple)):
+                raise ValueError("v2 candidate inverse values must be export lists")
+            exports = exports if isinstance(exports, (list, tuple)) else [exports]
+            for export in exports:
+                pair = _nonnegative_id(parent), _nonnegative_id(export)
+                if pair[0] not in parents_by_export.get(pair[1], set()):
+                    raise ValueError("candidate inverse contradicts full export lineage")
+                inverse_pairs.add(pair)
+        full_pairs = {(parent, export) for export, parents in parents_by_export.items() for parent in parents}
+        if schema is not None and inverse_pairs != full_pairs:
+            raise ValueError("v2 inverse does not cover all parent/export relationships")
+    except (ValueError, TypeError, OverflowError) as exc:
+        audit["reason"] = str(exc)
+        return (), audit
+    audit.update({
+        "status": "complete", "complete": True,
+        "traceable_prediction_count": len(rows),
+        "refined_export_ids": sorted(parents_by_export),
+        "export_sources": {
+            str(export): sorted(parents_by_export[export]) for export in sorted(parents_by_export)
+        },
+        "coverage_basis": "explicit_v2_inventory" if schema is not None else "historical_lossless_export_field",
+    })
+    return rows, audit
 
 
 def _resolve(base: Path, value: str | Path) -> Path:
@@ -477,15 +762,35 @@ def evaluate_recheck_manifest(
 
     manifest_source = Path(manifest_path)
     manifest = load_json(manifest_source)
-    if manifest.get("schema") != "saga-instance-recheck-evaluation-manifest-v1":
+    if manifest.get("schema") not in (
+        "saga-instance-recheck-evaluation-manifest-v1",
+        "saga-instance-recheck-evaluation-manifest-v2",
+    ):
         raise ValueError("unsupported recheck evaluation manifest schema")
     base = manifest_source.parent
     condition_names = tuple(str(value) for value in manifest["conditions"])
     if not condition_names:
         raise ValueError("manifest must declare at least one condition")
+    if len(set(condition_names)) != len(condition_names):
+        raise ValueError("condition names must be unique")
+    scene_ids = [str(item["scene_id"]) for item in manifest["scenes"]]
+    if not scene_ids or len(set(scene_ids)) != len(scene_ids):
+        raise ValueError("manifest must contain unique scenes")
+    source_files = {manifest_source.resolve()}
+    for item in manifest["scenes"]:
+        source_files.update(_resolve(base, item[key]).resolve() for key in ("gt_npz", "gaussian_ply", "b0_output_json"))
+        for spec in item["condition_outputs"].values():
+            source_files.add(_resolve(base, spec["output_json"] if isinstance(spec, dict) else spec).resolve())
+    if Path(output_path).resolve() in source_files:
+        raise ValueError("evaluation output must not overwrite any input artifact")
+    input_hashes = {str(path): sha256_file(path) for path in sorted(source_files)}
     per_condition_scene: dict[str, list[dict[str, Any]]] = {
         name: [] for name in condition_names
     }
+    per_condition_reconciliation: dict[str, list[dict[str, Any]]] = {
+        name: [] for name in condition_names
+    }
+    incomplete_scenes: dict[str, list[str]] = {name: [] for name in condition_names}
     gt_scenes: list[GroundTruthScene] = []
     predictions_by_condition: dict[str, list[PredictedInstance]] = {
         name: [] for name in condition_names
@@ -520,7 +825,15 @@ def evaluate_recheck_manifest(
         ):
             raise ValueError(f"{scene_id}: coordinate alignment gate failed")
         all_b0_predictions.extend(b0_predictions)
-        b0_rows = _prediction_rows(b0_predictions, taxonomy.canonical_classes)
+        b0_payload = load_json(_resolve(base, scene_item["b0_output_json"]))
+        b0_declared = {_nonnegative_id(value) for value in b0_payload["instances"]}
+        if b0_declared != {row.instance_id for row in b0_predictions}:
+            raise ValueError(f"{scene_id}: B0 has declared exports outside the evaluation taxonomy")
+        b0_labels = np.asarray(b0_payload["point_labels"], dtype=np.int64)
+        b0_rows = _prediction_rows(
+            b0_predictions, taxonomy.canonical_classes,
+            gaussian_labels=b0_labels,
+        )
         diagnostics[scene_id] = {"b0": b0_diagnostics, "conditions": {}}
         condition_specs = scene_item["condition_outputs"]
         for condition in condition_names:
@@ -539,32 +852,51 @@ def evaluate_recheck_manifest(
                 require_scores=True,
             )
             output_payload = load_json(output_path_value)
-            branch = _branch_rows(
-                predictions,
-                output_payload.get("candidate_export_ids", {}),
-                taxonomy.canonical_classes,
+            declared = {_nonnegative_id(value) for value in output_payload["instances"]}
+            if declared != {row.instance_id for row in predictions}:
+                raise ValueError(f"{scene_id}/{condition}: declared exports were omitted by the AP input adapter")
+            final_labels = np.asarray(output_payload["point_labels"], dtype=np.int64)
+            if final_labels.shape != b0_labels.shape:
+                raise ValueError(f"{scene_id}/{condition}: B0 and final Gaussian domains differ")
+            final_rows = _prediction_rows(
+                predictions, taxonomy.canonical_classes,
+                gaussian_labels=final_labels,
             )
+            branch, lineage_audit = audit_export_lineage(
+                predictions, output_payload, taxonomy.canonical_classes,
+            )
+            if not lineage_audit["complete"]:
+                incomplete_scenes[condition].append(scene_id)
             predictions_by_condition[condition].extend(predictions)
             diagnostics[scene_id]["conditions"][condition] = {
                 **condition_diagnostics,
-                "traceable_branch_predictions": len(branch),
+                "traceable_branch_predictions": lineage_audit["traceable_prediction_count"],
+                "lineage": lineage_audit,
+                "below_ap_min_region_predictions": sum(
+                    int(np.count_nonzero(row.mask)) < int(min_region_size) for row in predictions
+                ),
+                "mapping_direction": "GT_points_to_nearest_Gaussian_within_radius",
             }
             for threshold in (0.25, 0.50):
-                per_condition_scene[condition].append(
-                    evaluate_rescue_scene(
+                if lineage_audit["complete"]:
+                    per_condition_scene[condition].append(evaluate_rescue_scene(
                         scene_id=scene_id,
                         b0_predictions=b0_rows,
                         branch_predictions=branch,
                         ground_truth=objects,
                         strata=strata,
                         iou_threshold=threshold,
-                    )
-                )
+                    ))
+                per_condition_reconciliation[condition].append(evaluate_scene_reconciliation(
+                    scene_id=scene_id, b0_predictions=b0_rows,
+                    final_predictions=final_rows, ground_truth=objects, strata=strata,
+                    iou_threshold=threshold, min_region_size=min_region_size,
+                ))
 
     conditions: dict[str, Any] = {}
     for condition in condition_names:
         rows = per_condition_scene[condition]
-        rescue = {
+        rescue = None if incomplete_scenes[condition] else {
             f"iou_{threshold:.2f}": {
                 "aggregate": aggregate_rescue_scenes(
                     [
@@ -595,6 +927,20 @@ def evaluate_recheck_manifest(
         )
         conditions[condition] = {
             "rescue": rescue,
+            "rescue_status": "incomplete" if incomplete_scenes[condition] else "complete",
+            "incomplete_lineage_scene_ids": incomplete_scenes[condition],
+            "reconciliation": {
+                f"iou_{threshold:.2f}": {
+                    "aggregate": aggregate_reconciliation_scenes([
+                        row for row in per_condition_reconciliation[condition]
+                        if math.isclose(row["iou_threshold"], threshold)
+                    ]),
+                    "per_scene": [
+                        row for row in per_condition_reconciliation[condition]
+                        if math.isclose(row["iou_threshold"], threshold)
+                    ],
+                } for threshold in (0.25, 0.50)
+            },
             "official_9": official,
             "historical_10": historical,
         }
@@ -614,7 +960,7 @@ def evaluate_recheck_manifest(
         min_region_size=min_region_size,
     )
     result: dict[str, Any] = {
-        "schema": "saga-instance-recheck-evaluation-v1",
+        "schema": "saga-instance-recheck-evaluation-v2",
         "b0": {
             "official_9": b0_official,
             "historical_10": b0_historical,
@@ -630,8 +976,11 @@ def evaluate_recheck_manifest(
             "taxonomy_sha256": taxonomy.content_hash,
             "radius_m": float(radius_m),
             "min_region_size": int(min_region_size),
+            "input_sha256": input_hashes,
         },
     }
+    if any(sha256_file(path) != digest for path, digest in input_hashes.items()):
+        raise ValueError("evaluation input changed while reading; no result was written")
     result["content_sha256"] = hash_json(result)
     write_json(output_path, result)
     return result
@@ -682,8 +1031,16 @@ __all__ = [
     "IoUMatch",
     "OneToOneMatchResult",
     "aggregate_rescue_scenes",
+    "aggregate_reconciliation_scenes",
+    "audit_export_lineage",
     "evaluate_recheck_manifest",
     "evaluate_rescue_scene",
+    "evaluate_scene_reconciliation",
     "ground_truth_objects",
     "match_one_to_one",
+    "mask_content_sha256",
 ]
+
+
+if __name__ == "__main__":
+    main()

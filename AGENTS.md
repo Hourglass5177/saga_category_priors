@@ -1,20 +1,15 @@
-# Repository agent instructions
+# Repository instructions
 
-For work on the active SAGA category-prior study:
-
-1. Read `category_priors/ITERATIVE_REFINEMENT_EXPERIMENT_STANDARD.md` and
-   `category_priors/ITERATIVE_REFINEMENT_DEV2_CLOSEOUT.md` before editing code,
-   starting a run, or interpreting results.
-2. Treat those documents as the source of truth for the baseline identity, controlled
-   variables, evaluation protocol, data-leakage boundary, and prohibited workflows.
-3. The two-round local 2D--3D refinement is closed after a negative DEV2 result.
-   Do not expand it to DEV8 or resume the retired V3--V10, ObjectBank,
-   clean-baseline, prompt-scale, HDBSCAN-repair, full-instance-size, or Boolean-only
-   recheck workflows without a new user-approved experiment plan.
-4. Git history is the archive for retired experimental code. Do not add compatibility
-   adapters or restore old state machines to the active runtime.
-5. Ground truth may enter evaluation and post-hoc viewer selection only. It must not
-   enter candidate construction, projection, crop generation, model inference, or
-   replay decisions.
-
-This file is only a discovery pointer; do not duplicate the baseline standard here.
+- Preserve the teacher's original files from `source/a800` (`8c5e167`), including
+  `README.md`, `CLAUDE.md`, `command.txt`, third-party documentation and licenses.
+- Current research entry points and data locations are in `category_priors/README.md`.
+  Keep documentation short. Do not recreate audit reports, review ladders or
+  abandoned experiment controllers. Git history contains earlier tracked work.
+- Preserve original annotations, frozen B0/C0 inputs, evaluation denominators,
+  negative results and the cumulative GPU ledger. Ground truth and human answers
+  belong in evaluation, never in automatic model decisions.
+- Use focused tests for the changed behavior. GPU experiments require the existing
+  budget accounting; the authorized DEV2 budget is cumulative, not reset per run.
+  DEV8 execution remains outside the authorized experiment scope.
+- Do not commit datasets, model weights, generated reports, deployment bundles,
+  source checkpoints or runtime artifacts.
