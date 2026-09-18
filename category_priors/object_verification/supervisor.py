@@ -123,6 +123,12 @@ def _linux_members(child, token):
             except (FileNotFoundError, ProcessLookupError):
                 continue
             if ("SAGA_OBJECT_LEASE_TOKEN=" + token).encode() not in environment:
+                # SIGKILL can clear environ after the preceding stat read still
+                # reported a live task. Recheck kernel state before calling that
+                # exit race an unowned orphan; live/reused PIDs still fail closed.
+                latest = process_identity(row['pid'])
+                if latest is None or (same_process(row, latest) and latest['state'] in {'Z', 'X'}):
+                    continue
                 raise RecoveryBlocked("orphan group member lacks inherited lease token")
         members.append(row)
     return members

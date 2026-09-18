@@ -16,6 +16,30 @@ from category_priors.object_verification.study import StudyLedger
 from category_priors.object_verification import supervisor as sup
 
 
+@pytest.mark.parametrize('latest_state', ['Z', 'R'])
+def test_orphan_empty_environment_rechecks_exit_without_trusting_live_unknown(tmp_path, monkeypatch, latest_state):
+    proc = tmp_path/'proc'; (proc/'301').mkdir(parents=True)
+    (proc/'301'/'environ').write_bytes(b'')
+    boot = tmp_path/'boot'; boot.write_text('test-boot')
+    real_path = Path
+    monkeypatch.setattr(sup, 'Path', lambda p: proc if str(p)=='/proc' else boot
+                        if str(p)=='/proc/sys/kernel/random/boot_id' else real_path(p))
+    monkeypatch.setattr(sup.socket, 'gethostname', lambda: 'fixture')
+    child = dict(pid=300,host='fixture',scheme='linux-proc-v1',boot_id='test-boot',
+                 start_ticks=10,pgid=300,sid=300,state='Z')
+    calls=[]
+    def identity(pid):
+        if pid==300: return child
+        calls.append(pid)
+        return child | dict(pid=301,start_ticks=11,state='R' if len(calls)==1 else latest_state)
+    monkeypatch.setattr(sup, 'process_identity', identity)
+    if latest_state=='Z':
+        assert sup._linux_members(child,'private-token')==[]
+    else:
+        with pytest.raises(sup.RecoveryBlocked,match='lacks inherited'):
+            sup._linux_members(child,'private-token')
+
+
 def setup(tmp_path, code, *, kind="cpu", clock=time.time):
     ledger = StudyLedger(tmp_path / "ledger.jsonl", EXPERIMENT_VERSION, clock=clock)
     ledger.initialize(historical_gpu_seconds=24823.804896831512)

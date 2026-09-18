@@ -147,7 +147,7 @@ class Runtime:
             else:
                 with np.load(ref['path'], allow_pickle=False) as z:
                     ids = z['contributor_ids'] if 'contributor_ids' in z else z['ids']
-                    maximum = z['max_contribution'] if 'max_contribution' in z else z['weights']
+                    maximum = z['maximum'] if 'maximum' in z else z['max_contribution'] if 'max_contribution' in z else z['weights']
                     opacity = z['opacity']
         else:
             began = time.monotonic()
@@ -226,7 +226,7 @@ class Runtime:
             return None
         return CameraView(uid, tuple(ray), tuple(camera.center_m), float(np.linalg.norm(ray)))
 
-    def observe(self, uid, members, anchors, dest, *, reuse=None, source_state='original'):
+    def observe(self, uid, members, anchors, dest, *, reuse=None, source_state='original', scale_prior=None):
         np = self.np
         from category_priors.object_verification.model_adapter import prior_crop, reliable_prompt_point
         if (dest / 'observation.json').exists():
@@ -264,6 +264,25 @@ class Runtime:
             max_contribution=d['maximum'], opacity=d['opacity'], valid_pixels=valid)
         point_image = None if point is None else list(point['point_image_xy'])
         box_crop = list(crop.image_to_crop_box(box, clip=True))
+        if scale_prior is not None:
+            from category_priors.object_verification.model_adapter import point_prior_crop
+            row['scale_prior'] = scale_prior
+            if point is None:
+                row['status'] = 'no_reliable_point'
+                save(dest / 'observation.json', row)
+                return str(dest)
+            depth = float(camera.optical_z_m(self.assets.xyz_scene[[point['gaussian_id']]])[0])
+            if depth <= 0:
+                row['status'] = 'no_positive_optical_depth'
+                save(dest / 'observation.json', row)
+                return str(dest)
+            d50 = scale_prior['diagonal_m']
+            crop = point_prior_crop(image_shape=pixels.shape, point_xy=point_image,
+                focal_geometric_mean=math.sqrt(camera.fx * camera.fy),
+                prior_diagonal_m=d50, positive_optical_z=depth)
+            encoded, crop_valid = crop.extract(d['rgb'])
+            valid = crop.mask_to_image(crop_valid)
+            box_crop = None
         actual_input = dict(crop=asdict(crop), box_crop=box_crop, point_image=point_image)
         # requested_side is bookkeeping: the encoder sees integer crop dimensions and the prompts.
         comparison_input = dict(crop={k: v for k, v in actual_input['crop'].items() if k != 'requested_side'},
@@ -284,12 +303,14 @@ class Runtime:
         chosen = int(np.argmax(qualities))
         masks = np.stack([m.mask_image for m in alternatives])
         selected = masks[chosen]
-        measured = self.renderer.alpha(camera, selected[None], np.ones(selected.shape, bool))
+        observed_pixels = valid if scale_prior is not None else np.ones(selected.shape, bool)
+        measured = self.renderer.alpha(camera, selected[None], observed_pixels)
         hard = np.unique(d['ids'][d['reliable'] & selected])
-        negative = np.unique(d['ids'][d['reliable'] & ~selected])
+        negative = np.unique(d['ids'][d['reliable'] & observed_pixels & ~selected])
         dest.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(dest / 'prediction.npz', sam=selected, alternatives=masks, qualities=qualities,
                             encoded_rgb=encoded, source=pixels, source_members=members,
+                            observed_pixels=observed_pixels,
                             hard_ids=hard, negative_ids=negative, alpha_ids=np.asarray(measured.qualified(0), np.int64))
         np.savez_compressed(dest / 'alpha.npz', inside=measured.inside_mass[0], visible=measured.visible_mass)
         semantic = self.classify(uid, selected)
@@ -693,6 +714,12 @@ def evaluation_manifest(out):
 
 
 def main():
+    if '--experiment' in sys.argv and sys.argv[sys.argv.index('--experiment') + 1] == 'multiview-repair':
+        from category_priors.multiview_repair_experiment import main as multiview_main
+        return multiview_main()
+    if '--experiment' in sys.argv and sys.argv[sys.argv.index('--experiment') + 1] == 'category-scale':
+        from category_priors.category_scale_experiment import main as scale_main
+        return scale_main()
     p = argparse.ArgumentParser()
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--stage', choices=['local', 'scene', 'all'], default='all')

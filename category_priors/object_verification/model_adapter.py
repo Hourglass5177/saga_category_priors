@@ -123,6 +123,20 @@ def prior_crop(*, image_shape, bbox_xyxy, focal_geometric_mean: float,
                          int(center[1]) - side // 2, side, side, requested)
 
 
+def point_prior_crop(*, image_shape, point_xy, focal_geometric_mean: float,
+                     prior_diagonal_m: float, positive_optical_z: float) -> CropTransform:
+    """A metric-scale observation centered on a measured point, independent of the old box."""
+    point = np.asarray(point_xy, dtype=np.float64)
+    values = (focal_geometric_mean, prior_diagonal_m, positive_optical_z)
+    if point.shape != (2,) or not np.isfinite(point).all() or any(not np.isfinite(v) or v <= 0 for v in values):
+        raise ValueError("point crop needs a finite point and positive focal/size/optical depth")
+    requested = 1.5 * focal_geometric_mean * prior_diagonal_m / positive_optical_z
+    side = min(max(math.ceil(requested), 64), max(image_shape))
+    center = np.floor(point + .5).astype(int)
+    return CropTransform(tuple(image_shape), int(center[0]) - side // 2,
+                         int(center[1]) - side // 2, side, side, requested)
+
+
 @dataclass(frozen=True)
 class FrozenLocator:
     bbox_xyxy: tuple[float, float, float, float]
@@ -308,10 +322,14 @@ class InjectedModelAdapter:
 
     def _sam_masks(self, *, image, crop, box_crop, point_crop, uid):
         self.sam.set_image(image)
-        kwargs = dict(box=np.asarray(box_crop, dtype=np.float32), multimask_output=True)
+        kwargs = dict(box=None if box_crop is None else np.asarray(box_crop, dtype=np.float32),
+                      multimask_output=True)
         if point_crop is not None:
-            kwargs.update(point_coords=np.asarray(point_crop, dtype=np.float32).reshape(1, 2),
-                          point_labels=np.ones(1, dtype=np.int64))
+            points = np.asarray(point_crop, dtype=np.float32).reshape(-1, 2)
+            if not len(points) or not np.isfinite(points).all():
+                raise ValueError("SAM positive points must be finite and nonempty")
+            kwargs.update(point_coords=points,
+                          point_labels=np.ones(len(points), dtype=np.int64))
         else:
             kwargs.update(point_coords=None, point_labels=None)
         masks, quality, _ = self.sam.predict(**kwargs)

@@ -22,6 +22,7 @@ import math
 from pathlib import Path
 import sys
 from typing import Any
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -104,6 +105,41 @@ def overlap_details(predictions, objects):
     return matrix
 
 
+def geometry_rows_from_export(path, gt_to_gaussian, gaussian_count):
+    """Posthoc geometry includes unknown classes; official AP still uses the export."""
+    payload = read_json(path)
+    if 'geometry_source' not in payload:
+        return None
+    geometry = read_json(resolve(Path(path).parent, payload['geometry_source']))
+    projection = project_declared_instances(geometry['point_labels'], geometry['instances'])
+    labels = projection.point_labels
+    if labels.shape != (gaussian_count,):
+        raise ValueError('geometry changes the frozen Gaussian domain')
+    mapped = np.full(len(gt_to_gaussian), -1, np.int64)
+    valid = gt_to_gaussian >= 0
+    mapped[valid] = labels[gt_to_gaussian[valid]]
+    return [SimpleNamespace(prediction_id=int(k), class_name=m['class'], score=m['score'],
+                            mask=mapped == int(k)) for k,m in geometry['instances'].items()]
+
+
+def object_iou_assignment(overlaps, predictions, objects, *, class_aware=True):
+    """Maximum total IoU, one-to-one, with a fixed GT denominator and zeros for misses."""
+    from scipy.optimize import linear_sum_assignment
+    scores = np.asarray(overlaps, dtype=np.float64).copy()
+    if class_aware:
+        for p, prediction in enumerate(predictions):
+            for g, obj in enumerate(objects):
+                if prediction.class_name != obj.class_name:
+                    scores[p, g] = 0.
+    assigned = {}
+    if scores.size:
+        pp, gg = linear_sum_assignment(-scores)
+        assigned = {int(g): (int(p), float(scores[p, g])) for p, g in zip(pp, gg) if scores[p, g] > 0}
+    return [dict(gt_id=obj.gt_id, **{'class': obj.class_name},
+                 prediction_id=predictions[assigned[g][0]].prediction_id if g in assigned else None,
+                 iou=assigned[g][1] if g in assigned else 0.) for g, obj in enumerate(objects)]
+
+
 def outcome_rows(condition, scene, final_rows, gaussian_counts, reconciliation, overlaps, strata, min_region_size):
     objects = scene["objects"]
     b0_matches = {row["gt_id"]: row for row in reconciliation["b0_matches"]}
@@ -164,9 +200,9 @@ def outcome_rows(condition, scene, final_rows, gaussian_counts, reconciliation, 
     return gt_rows, prediction_rows
 
 
-def write_csv(path, rows):
+def write_csv(path, rows, *, encoding='utf-8-sig'):
     keys = list(dict.fromkeys(key for row in rows for key in row))
-    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+    with path.open("w", encoding=encoding, newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=keys)
         writer.writeheader()
         writer.writerows(rows)
@@ -217,7 +253,7 @@ def evaluate(manifest_path, output_dir, taxonomy, strata):
             "b0_counts": b0_counts, "b0_diagnostics": b0_diagnostics,
         })
         print(f"Loaded {scene_id}: {len(scenes[-1]['objects'])} GT objects, {len(b0)} B0 exports", flush=True)
-    result_files = [output_dir / name for name in ("evaluation.json", "metrics.csv", "gt_outcomes.csv", "prediction_outcomes.csv")]
+    result_files = [output_dir / name for name in ("evaluation.json", "metrics.csv", "gt_outcomes.csv", "prediction_outcomes.csv", "object_iou.csv")]
     if any(path.resolve() in input_paths for path in result_files):
         raise ValueError("evaluation outputs must not overwrite inputs")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -229,6 +265,7 @@ def evaluate(manifest_path, output_dir, taxonomy, strata):
         "protocol": {
             "radius_m": radius, "min_region_size": minimum, "matching_thresholds": list(THRESHOLDS),
             "matching": "same-class maximum-cardinality then total-IoU, strict > threshold",
+            "object_mean_iou_matching": "maximum total IoU one-to-one; unmatched GT zero; class-aware and class-agnostic reported separately",
             "ap": "original ScanNet official 9 thresholds .50 through .90, AP25 separate",
             "ap_scope": "all evaluation classes; subgroup results are paired object counts, not a new subgroup AP protocol",
             "denominator": "unique scene and GT instance; all final exports; manual diagnostic cohorts not added",
@@ -242,7 +279,7 @@ def evaluate(manifest_path, output_dir, taxonomy, strata):
                                "gaussian_to_gt_transform": scene["transform"],
                                "mapping": scene["mapping_diagnostics"]} for scene in scenes]},
     }
-    all_gt_rows, all_prediction_rows, metric_rows = [], [], []
+    all_gt_rows, all_prediction_rows, metric_rows, object_iou_rows = [], [], [], []
     for condition in ("B0", *conditions):
         all_predictions, per_scene, reconciliations = [], {}, []
         for scene in scenes:
@@ -257,6 +294,19 @@ def evaluate(manifest_path, output_dir, taxonomy, strata):
                                           overlaps=SCANNET_OFFICIAL_OVERLAPS, min_region_size=minimum)
             per_scene[scene["scene_id"]] = {"official_9": official, "diagnostics": diagnostics}
             overlaps = overlap_details(rows, scene["objects"])
+            for aware in (True, False):
+                geometry_rows = (geometry_rows_from_export(scene['outputs'][condition],
+                    scene['mapping'], scene['gaussian_count']) if not aware and condition != 'B0' else None)
+                scoring_rows = rows if geometry_rows is None else geometry_rows
+                scoring_overlaps = overlaps if geometry_rows is None else overlap_details(geometry_rows, scene['objects'])
+                if geometry_rows is not None:
+                    diagnostics['geometry_instance_count'] = len(geometry_rows)
+                    diagnostics['geometry_out_of_eval_vocabulary_count'] = sum(
+                        r.class_name not in taxonomy.canonical_classes for r in geometry_rows)
+                    diagnostics['geometry_unknown_count'] = sum(r.class_name == 'unknown' for r in geometry_rows)
+                assignments = object_iou_assignment(scoring_overlaps, scoring_rows, scene['objects'], class_aware=aware)
+                object_iou_rows.extend(dict(condition=condition, scene_id=scene['scene_id'],
+                    matching='class_aware' if aware else 'class_agnostic', **item) for item in assignments)
             for threshold in THRESHOLDS:
                 reconciliation = evaluate_scene_reconciliation(
                     scene_id=scene["scene_id"], b0_predictions=scene["b0_rows"], final_predictions=rows,
@@ -267,6 +317,9 @@ def evaluate(manifest_path, output_dir, taxonomy, strata):
                 all_gt_rows.extend(gt_rows)
                 all_prediction_rows.extend(prediction_rows)
         entry = {
+            "object_mean_iou": {kind: float(np.mean([r['iou'] for r in object_iou_rows
+                if r['condition'] == condition and r['matching'] == kind]))
+                for kind in ('class_aware', 'class_agnostic')},
             "official_9": evaluate_instances([scene["gt"] for scene in scenes], all_predictions,
                                              taxonomy.canonical_classes, overlaps=SCANNET_OFFICIAL_OVERLAPS, min_region_size=minimum),
             "per_scene": per_scene,
@@ -305,6 +358,7 @@ def evaluate(manifest_path, output_dir, taxonomy, strata):
     write_csv(output_dir / "metrics.csv", metric_rows)
     write_csv(output_dir / "gt_outcomes.csv", all_gt_rows)
     write_csv(output_dir / "prediction_outcomes.csv", all_prediction_rows)
+    write_csv(output_dir / "object_iou.csv", object_iou_rows, encoding='utf-8')
     write_json(output_dir / "evaluation.json", result)
     return result
 
