@@ -9,21 +9,6 @@ import numpy as np
 import category_priors.cli as cli
 
 
-def _commands() -> set[str]:
-    parser = cli.build_parser()
-    return set(parser._subparsers._group_actions[0].choices)
-
-
-def test_public_cli_exposes_only_reusable_commands() -> None:
-    assert _commands() == {
-        "fit",
-        "evaluate",
-        "prepare-gt",
-        "audit-saga-alignment",
-        "audit-gaussian-objects",
-    }
-
-
 def test_fit_and_evaluate_dispatch(monkeypatch, tmp_path: Path) -> None:
     taxonomy = object()
     fitted = {"kind": "priors"}

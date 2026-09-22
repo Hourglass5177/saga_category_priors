@@ -13,6 +13,53 @@ from scipy.sparse.csgraph import connected_components
 VERSION='decision-query-v1'
 
 
+def choose_decision_question(winner, challenger, actual_members, views, pairs, simulate, *, contextual_simulation=False):
+    """Ask only about a difference whose possible answers change this decision.
+
+    simulate(region, answer) returns the actual selector/ownership decision key,
+    not a GT score. Answers are hypothetical until the saved masks arrive.
+    The A prompt uses the current materialized object, never a historical seed.
+    """
+    w=np.unique(winner);c=np.unique(challenger);actual=np.unique(actual_members)
+    delta=np.setxor1d(w,c)
+    if not len(actual) or not len(delta):return None,{'reason':'no_actual_core_or_competitor_difference'}
+    options=[]
+    for a,b in sorted({tuple(sorted(p)) for p in pairs}):
+        if a not in views or b not in views:continue
+        vs=[views[a],views[b]]
+        common=np.intersect1d(*[np.unique(v['ids'][v['allowed']]) for v in vs])
+        support=np.intersect1d(actual,common)
+        if not len(support):continue
+        regions=contrast_regions([w,c],[w],delta,
+            [np.where(v['allowed'],v['ids'],-1) for v in vs])
+        for region in regions:
+            anchors=np.setdiff1d(support,region)
+            pa=best_shared_point([positions(v['ids'],v['allowed'],anchors) for v in vs],anchors)
+            pb=best_shared_point([positions(v['ids'],v['allowed'],region) for v in vs],region)
+            if pa is None or pb is None:continue
+            context=dict(views=[a,b],a_xy=pa['xy'],b_xy=pb['xy'])
+            answers={name:(simulate(region,name,context) if contextual_simulation else simulate(region,name))
+                     for name in ('supports_winner','supports_challenger')}
+            if any(v is None for v in answers.values()):continue
+            def material_decision(value):
+                if isinstance(value,dict) and 'selected_members' in value:
+                    # A different core/support diagnostic is not itself a new
+                    # object identity or ownership decision. Do not spend GPU
+                    # merely to change a confidence description.
+                    return (value['selected_members'],value.get('actual_members'),value.get('identity_decision'))
+                return value
+            if material_decision(answers['supports_winner'])==material_decision(answers['supports_challenger']):continue
+            coverage=min(int((v['allowed']&np.isin(v['ids'],region)).sum()) for v in vs)
+            row=dict(version='object-explanation-query-v1',views=[a,b],a_id=pa['id'],b_id=pb['id'],
+                a_xy=pa['xy'],b_xy=pb['xy'],region_ids=region.tolist(),
+                anchor_status='actual_writeback_support',actual_members_key=content_id(actual),
+                winner_key=content_id(w),challenger_key=content_id(c),counterfactual_decisions=answers,
+                common_visible_pixels=coverage,independent_identity_certified=False,
+                question='Which whole-object interpretation explains the current object and the competing region?')
+            options.append(((-coverage,-min(pa['clearance'],pb['clearance']),a,b,content_id(region)),row))
+    return (min(options,key=lambda x:x[0])[1] if options else None),{'reason':None if options else 'no_decision_changing_query'}
+
+
 def canonical_candidates(member_sets):
     unique={np.unique(np.asarray(m,np.int64)).astype('<i8').tobytes() for m in member_sets}
     return [np.frombuffer(k,dtype='<i8').copy() for k in sorted(unique) if k]

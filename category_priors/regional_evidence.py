@@ -8,6 +8,338 @@ from .common_geometry_selector import TOL, geometry_quality, pixel_evidence
 from .multiview_repair import independent_support
 
 VERSION = 'regional-evidence-v2'
+OBJECT_VERSION = 'object-explanation-v1'
+
+
+def semantic_vector(observation):
+    """A full regional signature, never a winning class probability."""
+    sem = observation.get('semantics') or {}
+    values = sem.get('features', sem.get('cosines'))
+    if values is None:
+        return None
+    x = np.asarray(values, float)
+    if x.ndim != 1 or len(x) < 2 or not np.isfinite(x).all():
+        return None
+    x = x - x.mean()
+    norm = np.linalg.norm(x)
+    return x / norm if norm > TOL else None
+
+
+def identity_links(observations, pairs):
+    """Relative semantic correspondence disambiguates competing localized objects.
+
+    No label mismatch is a veto. An association is challenged only when both
+    endpoints prefer another geometrically possible, separately localized region.
+    Missing signatures leave the geometric interpretation available.
+    """
+    rejected = set(); evidence = []
+    by_camera = {}
+    for o in observations:
+        by_camera.setdefault(o['camera'], []).append(o)
+    vectors = {o['key']: semantic_vector(o) for o in observations}
+    def possible(a, b):
+        return bool(np.intersect1d(a['positive_ids'], b['positive_ids']).size)
+    def affinity(a, b):
+        x, y = vectors[a['key']], vectors[b['key']]
+        return float(x @ y) if x is not None and y is not None and x.shape == y.shape else None
+    def distinct(a, b):
+        # A different prompt alone is insufficient: both must lie in their own
+        # visible interior and outside the other explanation's foreground.
+        x = np.intersect1d(a.get('anchor_ids', []), a['positive_ids'])
+        y = np.intersect1d(b.get('anchor_ids', []), b['positive_ids'])
+        return (len(x) and len(y) and not np.intersect1d(x,b['positive_ids']).size
+                and not np.intersect1d(y,a['positive_ids']).size)
+    for ca, cb in pairs:
+        aa, bb = by_camera.get(ca, []), by_camera.get(cb, [])
+        for a in aa:
+            for b in bb:
+                ab = affinity(a,b)
+                if ab is None or not possible(a,b):
+                    continue
+                better_b = [d for d in bb if distinct(b,d) and possible(a,d)
+                            and affinity(a,d) is not None and affinity(a,d) > ab + TOL]
+                better_a = [c for c in aa if distinct(a,c) and possible(c,b)
+                            and affinity(c,b) is not None and affinity(c,b) > ab + TOL]
+                if better_a and better_b:
+                    rejected.add(frozenset((a['key'],b['key'])))
+                    evidence.append(dict(a=a['key'],b=b['key'],reason='reciprocal_regional_semantic_conflict',
+                        alternatives_a=sorted(c['key'] for c in better_a),
+                        alternatives_b=sorted(d['key'] for d in better_b)))
+    return rejected, evidence
+
+
+def aligned_observation_domains(observations):
+    """Align crops without turning alternative whole/part masks into one truth.
+
+    Each interpretation keeps its own labels on its observed domain. Outside
+    that crop it can inherit only unanimous labels from overlapping, compatible
+    raw observations. Remaining coverage holes are explicit, never background.
+    """
+    result = {}
+    for camera in sorted(set(o['camera'] for o in observations)):
+        rows = [o for o in observations if o['camera'] == camera]
+        common = np.logical_or.reduce([o['known'] for o in rows])
+        for o in rows:
+            pos = np.zeros_like(common); neg = np.zeros_like(common)
+            for other in rows:
+                shared = o['known'] & other['known']
+                if not (shared & o['mask'] & other['mask']).any():
+                    continue
+                # Disagreement on a genuinely co-observed pixel is an
+                # alternative explanation, not permission to fill this crop.
+                if (shared & (o['mask'] != other['mask'])).any():
+                    continue
+                pos |= other['known'] & other['mask']
+                neg |= other['known'] & ~other['mask']
+            extra = ~o['known'] & (pos ^ neg)
+            known = o['known'] | extra
+            mask = (o['mask'] & o['known']) | (extra & pos)
+            result[o['key']] = dict(known=known, mask=mask, common=common,
+                uncovered=int((common & ~known).sum()), common_pixels=int(common.sum()))
+    return result
+
+
+def separated_families(a, b, pairs):
+    """Reciprocal, independently localized exclusion beats a bridging mask.
+
+    Same-prompt SAM part/whole alternatives cannot establish separation.
+    Semantics may corroborate, but never substitutes for this observation test.
+    """
+    witnessed = []
+    for ca, cb in pairs:
+        valid = []
+        for camera in (ca, cb):
+            aa = [o for o in a['observations'] if o['camera'] == camera]
+            bb = [o for o in b['observations'] if o['camera'] == camera]
+            for x in aa:
+                for y in bb:
+                    ax=np.intersect1d(x.get('anchor_ids',[]),x['positive_ids'])
+                    ay=np.intersect1d(y.get('anchor_ids',[]),y['positive_ids'])
+                    if (len(ax) and len(ay) and np.intersect1d(ax,y['negative_ids']).size
+                            and np.intersect1d(ay,x['negative_ids']).size):
+                        valid.append(camera)
+        if ca in valid and cb in valid:
+            witnessed.append((ca,cb))
+    return witnessed
+
+
+def identity_partitions(families, selected):
+    """Find witnessed partitions even when the selected family is the bridge."""
+    unique={}
+    for f in families:
+        core=np.asarray(f['core_ids'],np.int64)
+        if not len(core) or not f['pairs']:continue
+        key=(core.tobytes(),np.asarray(f['negative_ids'],np.int64).tobytes(),
+             tuple(sorted((o['camera'],tuple(o.get('anchor_ids',[])),
+                           np.asarray(o['negative_ids'],np.int64).tobytes()) for o in f['observations'])))
+        if key not in unique or f['key']<unique[key]['key']:unique[key]=f
+    rows=list(unique.values());result=[]
+    for i,a in enumerate(rows):
+        for b in rows[i+1:]:
+            if np.intersect1d(a['core_ids'],b['core_ids']).size:continue
+            # Both identities must be observations of this selected source, not
+            # arbitrary neighbors anywhere in the neutral camera pool.
+            if (not np.intersect1d(a['core_ids'],selected['core_ids']).size or
+                    not np.intersect1d(b['core_ids'],selected['core_ids']).size):continue
+            witness=separated_families(a,b,sorted(set(a['pairs']+b['pairs'])))
+            if witness:result.append((a,b,witness))
+    return result
+
+
+def compose_observed_regions(baseline, proposal, observations, pairs, id_images):
+    """Decide connected difference regions; do not demand a core per Gaussian."""
+    baseline=np.unique(baseline);proposal=np.unique(proposal)
+    changes=np.setxor1d(baseline,proposal)
+    images=[np.where(o['known'],im,-1) for o,im in zip(observations,id_images)]
+    regions=member_regions({'baseline':baseline,'proposal':proposal},images)
+    add=[];remove=[];trace=[]
+    for region in regions:
+        if not np.intersect1d(region,changes).size:continue
+        adding=bool(np.intersect1d(region,proposal).size)
+        supporting=set();opposing=set();continuing=set();visible=set()
+        for o in observations:
+            pos=np.intersect1d(region,o['positive_ids']);neg=np.intersect1d(region,o['negative_ids'])
+            if len(pos) or len(neg):visible.add(o['camera'])
+            if (len(pos) if adding else len(neg)):supporting.add(o['camera'])
+            if (len(neg) if adding else len(pos)):opposing.add(o['camera'])
+            if np.intersect1d(baseline,o['positive_ids']).size:continuing.add(o['camera'])
+        supporting-=opposing
+        independent=[(a,b) for a,b in pairs if a in supporting and b in supporting]
+        linked=[(a,b) for a,b in independent if a in continuing and b in continuing]
+        accepted=bool(independent and not opposing and (not adding or linked))
+        if accepted:(add if adding else remove).extend(region.tolist())
+        trace.append(dict(members=region.tolist(),operation='add' if adding else 'remove',
+            status='supported' if accepted else 'unresolved',support_views=sorted(supporting),
+            opposing_views=sorted(opposing),visible_views=sorted(visible),independent_pairs=independent))
+    return np.setdiff1d(np.union1d(baseline,add),remove).astype(np.int64),trace
+
+
+def competing_families(observations, pairs, width=32):
+    """Bounded search of whole explanations, without a scored candidate as input.
+
+    Missing cameras are explicit. A same-camera alternative is not a negative
+    vote. Semantic signatures constrain ambiguous identity links, never boundary energy.
+    """
+    by_camera = {}
+    for o in observations:
+        by_camera.setdefault(o['camera'], {})[o['key']] = o
+    cameras = sorted(by_camera)
+    pair_set = {frozenset(p) for p in pairs}
+    relations = {}
+    rejected_links, semantic_evidence = identity_links(observations, pairs)
+
+    def relation(a, b):
+        key = tuple(sorted((a['key'], b['key'])))
+        if key not in relations:
+            common = np.intersect1d(a['known_ids'], b['known_ids'])
+            x = np.intersect1d(a['positive_ids'], common)
+            y = np.intersect1d(b['positive_ids'], common)
+            union = np.union1d(x, y)
+            overlap = np.intersect1d(x, y)
+            relations[key] = (0 if frozenset(key) in rejected_links else len(overlap),
+                              1-len(overlap)/len(union) if len(union) else None)
+        return relations[key]
+
+    def describe(group):
+        losses, linked = [], []
+        for i, a in enumerate(group):
+            for b in group[i+1:]:
+                if frozenset((a['camera'], b['camera'])) not in pair_set:
+                    continue
+                overlap, loss = relation(a, b)
+                if loss is not None:
+                    losses.append(loss)
+                if overlap:
+                    linked.append((a['camera'], b['camera']))
+        # A camera is eligible only if a raw alternative can continue this
+        # family. Other identities and absent surfaces do not count as misses.
+        eligible = set(o['camera'] for o in group)
+        for camera in cameras:
+            if any(frozenset((camera, a['camera'])) in pair_set and relation(a, b)[0]
+                   for a in group for b in by_camera[camera].values()):
+                eligible.add(camera)
+        missing = len(eligible-set(o['camera'] for o in group))/max(1, len(eligible))
+        return dict(observations=group, cross_loss=float(np.mean(losses)) if losses else None,
+                    missing_loss=missing, pairs=linked, eligible_views=sorted(eligible),
+                    key=tuple(sorted(o['key'] for o in group)))
+
+    def rank(f):
+        return (f['cross_loss'] is None,
+                (f['cross_loss'] or 0.)+f['missing_loss'], -len(f['pairs']), f['key'])
+
+    results = {}
+    # Every raw mask seeds a search; the cap applies per seed, so a large easy
+    # background family cannot evict all small-object seeds before comparison.
+    for seed in sorted(observations, key=lambda o:o['key']):
+        beam = [describe([seed])]
+        for camera in cameras:
+            if camera == seed['camera']:
+                continue
+            expanded = {}
+            for f in beam:
+                expanded[f['key']] = f
+                for other in by_camera[camera].values():
+                    if (not any(frozenset((a['key'],other['key'])) in rejected_links for a in f['observations'])
+                            and any(frozenset((camera, a['camera'])) in pair_set and relation(a, other)[0]
+                                    for a in f['observations'])):
+                        nf = describe(f['observations']+[other])
+                        expanded[nf['key']] = nf
+            beam = sorted(expanded.values(), key=rank)[:width]
+        for f in beam:
+            results[f['key']] = f
+    ordered=sorted(results.values(), key=rank)
+    domains=aligned_observation_domains(list({o['key']:o for o in observations}.values()))
+    for f in ordered:
+        f['domains']={o['key']:domains[o['key']] for o in f['observations']}
+        f['semantic_evidence']=semantic_evidence
+        f['core_ids']=independent_support(f['observations'],f['pairs'])
+        f['negative_ids']=independent_support(f['observations'],f['pairs'],'negative_ids')
+        f['core_ids'],f['negative_ids'],_=symmetric_member_evidence(f['core_ids'],f['negative_ids'])
+    return ordered
+
+
+def explanation_quality(project, families):
+    """Compare against complete frozen families; no per-camera mask cherry-pick."""
+    scored = []
+    projections = {}; count_cache={}
+    for f in families:
+        counts = []
+        for o in f['observations']:
+            camera = o['camera']
+            if camera not in projections:
+                projections[camera] = project(camera)
+            if o['key'] not in count_cache:
+                d=f['domains'][o['key']]
+                e = pixel_evidence(projections[camera], d['known'] & d['mask'],
+                                   d['known'] & ~d['mask'])
+                count_cache[o['key']]=dict(camera=camera, uncovered=d['uncovered'],
+                    common_pixels=d['common_pixels'], **e)
+            counts.append(count_cache[o['key']])
+        tp = sum(x['tp'] for x in counts); fp = sum(x['fp'] for x in counts)
+        fn = sum(x['fn'] for x in counts); denom = tp+fp+fn
+        boundary = (fp+fn)/denom if denom else None
+        # Cross-camera support is assessed from a different observation. Fits
+        # here remain in-sample diagnostics, not held-out model evaluation.
+        coverage_missing=sum(c['uncovered'] for c in counts)/max(1,sum(c['common_pixels'] for c in counts))
+        missing_loss=1-(1-f['missing_loss'])*(1-coverage_missing)
+        energy = ((boundary+f['cross_loss']+missing_loss)/3
+                  if boundary is not None and f['cross_loss'] is not None else None)
+        core=f['core_ids'];negative=f['negative_ids']
+        scored.append(dict(family=f, energy=energy, boundary_loss=boundary,
+                           counts=counts, coverage_missing=coverage_missing, missing_loss=missing_loss,
+                           core_ids=core, negative_ids=negative,
+                           tp=tp, fp=fp, fn=fn))
+    valid = [s for s in scored if s['energy'] is not None]
+    best = min(valid, key=lambda s:(s['energy'], s['family']['key'])) if valid else None
+    return best, scored
+
+
+def select_object_members(members, baseline_id, project, families):
+    """One scoring/selection path for real answers and query counterfactuals."""
+    evaluations={};rows=[];cache={}
+    for cid,m in members.items():
+        key=np.asarray(m,dtype='<i8').tobytes()
+        if key not in cache:cache[key]=explanation_quality(lambda camera:project(camera,m),families)
+        best,scores=cache[key]
+        evaluations[cid]=(best,scores)
+        rows.append(dict(id=cid,quality={'energy':best['energy'] if best else None},
+            core_ids=np.intersect1d(m,best['core_ids']) if best else np.array([],np.int64),
+            negative_ids=best['negative_ids'] if best else np.array([],np.int64)))
+    winner,trace=choose_explanation(rows,members,baseline_id)
+    return winner['id'],trace,evaluations
+
+
+def choose_explanation(rows, members, baseline_id):
+    """Observable improvement or supported whole extension, never unknown growth."""
+    base = next(r for r in rows if r['id'] == baseline_id)
+    eligible = [base]; trace = []
+    for r in rows:
+        q = r['quality']; bq = base['quality']; e = delta_evidence(r, base, members)
+        observed = e['supported_additions']+e['supported_removals'] > 0
+        informed = q.get('energy') is not None
+        strict = informed and (bq.get('energy') is None or q['energy'] < bq['energy']-TOL)
+        tied = informed and bq.get('energy') is not None and abs(q['energy']-bq['energy']) <= TOL
+        # Unknown members do not veto an observed strict improvement, but a
+        # tie must not certify 999 unknown additions through one supported point.
+        extension = (tied and e['added_count'] > 0 and not e['removed_count']
+                     and e['supported_additions'] == e['added_count']
+                     and not e['added_background'])
+        accept = len(members[r['id']]) >= 3 and observed and (strict or extension)
+        if accept and r is not base:
+            eligible.append(r)
+        trace.append(dict(candidate_id=r['id'], baseline_id=base['id'],
+                          stable=bool(accept), strict_improvement=bool(strict and accept),
+                          supported_extension=bool(extension), **e))
+    def rank(r):
+        energy = r['quality'].get('energy')
+        return (energy is None, energy if energy is not None else 1.,
+                -delta_evidence(r,base,members)['supported_additions'] if any(r is x for x in eligible) else 0,
+                r is not base, np.asarray(members[r['id']],dtype='<i8').tobytes())
+    winner = min(eligible, key=rank)
+    ordered = sorted(rows, key=rank)
+    for t in trace:
+        t['selected'] = t['candidate_id'] == winner['id']
+    return winner, sorted(trace,key=lambda t:next(i for i,r in enumerate(ordered) if r['id']==t['candidate_id']))
 
 
 def mask_key(positive, known):

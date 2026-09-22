@@ -5,6 +5,193 @@ from .common_geometry_selector import semantic_state, TOL
 from .prediction_contract import normalize_prediction
 
 
+def commit_selected(incumbent, selected):
+    """Simultaneous exact writeback, with real conflicts returned to the caller."""
+    old=np.asarray(incumbent,np.int64)
+    proposals={int(k):np.unique(np.asarray(v,np.int64)) for k,v in selected.items()}
+    claims=np.full(old.shape,-1,np.int64)
+    for label,m in proposals.items():
+        if label<0 or np.any((m<0)|(m>=len(old))):raise ValueError('invalid member or label')
+        if np.any(claims[m]>=0):raise ValueError('joint ownership required')
+        claims[m]=label
+    unchanged=(old>=0)&~np.isin(old,list(proposals))
+    if np.any(unchanged&(claims>=0)):raise ValueError('joint ownership required')
+    result=old.copy();result[np.isin(old,list(proposals))]=-1
+    result[claims>=0]=claims[claims>=0]
+    return result
+
+
+def compatible_choices(options, cost, limit=50000, width=32):
+    """One complete proposal per identity. Deterministic bounded joint search."""
+    import itertools
+    count=1
+    for opts in options:count*=len(opts)
+    def compatible(chosen):
+        used=set()
+        for r in chosen:
+            m=set(map(int,r['members']))
+            if used&m:return False
+            used.update(m)
+        return True
+    def rank(combo):
+        return (sum(cost(i,r) for i,r in enumerate(combo)),
+                sum(r.get('changed',False) for r in combo),
+                tuple(np.asarray(r['members'],dtype='<i8').tobytes() for r in combo))
+    if count<=limit:
+        best=min((c for c in itertools.product(*options) if compatible(c)),key=rank,default=None)
+        return best,dict(search='exact',combinations=count)
+    beam=[()]
+    for opts in options:
+        expanded=[c+(r,) for c in beam for r in opts if compatible(c+(r,))]
+        beam=sorted(expanded,key=rank)[:width]
+    return (min(beam,key=rank) if beam else None),dict(search='beam',combinations=count,width=width)
+
+
+def localize_conflict(proposals, resolved, region):
+    """Commit disjoint improvements; ownership fallback touches only the dispute.
+
+    The result is explicitly a composition. Callers must retain the intact
+    library selection separately rather than reporting it as pure selection.
+    """
+    result={}
+    for u,proposal in proposals.items():
+        settled=resolved[u]
+        m=np.union1d(np.setdiff1d(proposal['members'],region),
+                     np.intersect1d(settled['members'],region)).astype(np.int64)
+        changed=not np.array_equal(m,proposal['members'])
+        result[u]=dict(proposal,members=m,
+            id='ownership-composition' if changed else proposal['id'],
+            kind='ownership_composition' if changed else proposal.get('kind'),
+            intact_candidate=not changed,conflict_choice=settled['id'])
+    return result
+
+
+def assemble_selected(rt,banks,dest,*,baseline=None,excluded_views=None,include_regional=False,dry_run=False):
+    """Honor selected IDs; jointly solve only actual complete-proposal overlap."""
+    from run_effective_repair import read,save
+    from .multiview_repair_experiment import ids_file
+    from .multiview_repair import member_components
+    from .regional_evidence_runtime import score_object
+    from .common_geometry_selector import pixel_evidence
+    if not dry_run and (dest/'summary.json').exists():return read(dest/'scene.json')
+    if not dry_run:dest.mkdir(parents=True,exist_ok=True)
+    base=baseline if baseline is not None else rt.b0
+    canon=lambda u:'B0:'+str(int(u.rsplit(':',1)[1])) if ':B0:' in u else u
+    original_banks=banks;banks={canon(u):b for u,b in banks.items()}
+    if include_regional:
+        for u,b in list(banks.items()):
+            for r in b.get('identity_candidates',[])[:1]:
+                banks[u+'#identity2']=dict(b,uid=u+'#identity2',candidates=[r],selected_id=r['id'],
+                    ranked_ids=[r['id']],assembly_candidates=[],identity_candidates=[])
+    labels=np.asarray(base['point_labels'],np.int64)
+    old={canon(m.get('object_uid','B0:'+str(k))):(np.flatnonzero(labels==int(k)),dict(m))
+         for k,m in base['instances'].items()}
+    uids=sorted(set(old)|set(banks));indices={u:i for i,u in enumerate(uids)}
+    owner0=np.full(len(labels),-1,np.int64)
+    for u,(m,_) in old.items():owner0[m]=indices[u]
+    proposed={};options={};contexts={};trace=[]
+    for u in uids:
+        b=banks.get(u)
+        if b is None:
+            r=dict(id='unchanged',members=old[u][0],changed=False)
+            proposed[u]=r;options[u]=[r];continue
+        forbidden=set((excluded_views or {}).get(u,[]))
+        # Explicit exclusions identify a different (tail/full) task context.
+        # Never import the local diagnostic's heldout camera into that context.
+        # Query reuse still requires the exact evidence key and camera set.
+        if excluded_views is None:
+            for case in rt.plan.get('local_cases',[]):
+                if canon(case['candidate_uid'])==u:
+                    forbidden.update(v['camera_uid'] for v in case['views'][2:])
+        if set(b['views'])&forbidden:raise ValueError('Evaluation camera in frozen object context')
+        winner=next(r for r in b['candidates'] if r['id']==b['selected_id'])
+        if include_regional and b.get('assembly_candidates'):winner=b['assembly_candidates'][0]
+        def load(r):return dict(r,members=ids_file(r['members_file']),changed=True)
+        proposed[u]=load(winner)
+        runners=[r for cid in b.get('ranked_ids',[]) for r in b['candidates']
+                 if r['id']==cid and r['id']!=winner['id']]
+        opts=[proposed[u]]+([load(runners[0])] if runners else [])
+        opts.append(dict(id='actual-incumbent',members=old[u][0] if u in old else np.array([],np.int64),changed=False))
+        options[u]=list({r['members'].tobytes():r for r in reversed(opts)}.values())
+        contexts[u]=score_object(rt,proposed[u]['members'],b['reference_pool'],b['views'])[-1]
+    # The three actual options define ownership components. Camera exclusions
+    # are already frozen above and never change with component size.
+    comps=member_components([(u,r['members']) for u in uids for r in options[u]],len(labels))
+    chosen={};unresolved=[]
+    for component in comps:
+        if len(component)==1:
+            u=component[0];chosen[u]=proposed[u];continue
+        restricted=[]
+        outside=set(uids)-set(component)
+        outside_members=np.unique(np.concatenate([proposed[v]['members'] for v in outside])) if outside else np.array([],int)
+        for u in component:
+            restricted.append([r for r in options[u] if not np.intersect1d(r['members'],outside_members).size])
+        # Actual disputed members, including runner overlaps within this small component.
+        claims={}
+        for u,opts in zip(component,restricted):
+            union=np.unique(np.concatenate([r['members'] for r in opts])) if opts else np.array([],int)
+            for g in union:claims.setdefault(int(g),set()).add(u)
+        region=np.array([g for g,us in claims.items() if len(us)>1],np.int64)
+        costs={};observed=False
+        for i,(u,opts) in enumerate(zip(component,restricted)):
+            for r in opts:
+                tp=fp=fn=0
+                for o in contexts.get(u,[]):
+                    domain=o['known']&np.isin(rt.data(o['camera'])['ids'],region)
+                    e=pixel_evidence(rt.project(o['camera'],r['members']),domain&o['mask'],domain&~o['mask'])
+                    tp+=e['tp'];fp+=e['fp'];fn+=e['fn']
+                total=tp+fp+fn;observed|=total>0
+                costs[i,r['members'].tobytes()]=(fp+fn)/total if total else 0.
+        solution,search=compatible_choices(restricted,lambda i,r:costs[i,r['members'].tobytes()])
+        if solution is None or not observed:
+            solution=tuple(dict(id='actual-incumbent',members=old[u][0] if u in old else np.array([],np.int64),changed=False) for u in component)
+            unresolved.extend(component)
+        settled=dict(zip(component,solution))
+        if include_regional:
+            settled=localize_conflict({u:proposed[u] for u in component},settled,region)
+        for u,r in settled.items():chosen[u]=r
+        trace.append(dict(uids=component,disputed_members=len(region),observed=observed,
+                          selected={u:r['id'] for u,r in settled.items()},
+                          fallback_scope='disputed_members_only' if include_regional else 'intact_library_options',
+                          uncontested_preserved=bool(include_regional),**search))
+    # All choices are complete. The atomic writer is the only materialization.
+    owner=commit_selected(owner0,{indices[u]:r['members'] for u,r in chosen.items()})
+    metadata={};ownership=[]
+    for u,r in chosen.items():
+        m=r['members'];k=indices[u]
+        if len(m)<3:
+            owner[owner==k]=-1;continue
+        if u in old and np.array_equal(m,old[u][0]):meta=dict(old[u][1])
+        else:
+            b=banks[u];sem=rt.classify_members(m,b['views'])
+            label,status=semantic_state(sem,rt.assets.saga20)
+            if sem.get('status')=='pending_model':status='pending_model'
+            meta=dict(**{'class':label},score=r.get('quality',{}).get('score',0.),
+                      semantics=sem,classification_status=status,semantic_views=b['views'])
+        meta.update(object_uid=u,point_count=len(m),selected_candidate=r['id'],score_source='object-explanation-v1')
+        metadata[k]=meta
+        ownership.append(dict(uid=u,requested_candidate=proposed[u]['id'],written_candidate=r['id'],
+            requested_members=len(proposed[u]['members']),written_members=len(m),
+            exact=np.array_equal(m,proposed[u]['members']),
+            result_kind=r.get('kind','pure_selection'),conflict_choice=r.get('conflict_choice')))
+    normalized=normalize_prediction(owner,metadata)
+    payload=dict(point_labels=normalized.point_labels.tolist(),instances=normalized.instances,
+        prediction_contract=normalized.audit,repair_policy='object-explanation-v1',
+        instance_aliases={u:canon(u) for u in original_banks},
+        classification_complete=not any(m.get('classification_status')=='pending_model' for m in metadata.values()))
+    if dry_run:return payload
+    save(dest/'scene.json',payload,compact=True)
+    if payload['classification_complete']:
+        allowed={k:v for k,v in normalized.instances.items() if v['class'] in rt.assets.saga20}
+        exported=normalize_prediction(normalized.point_labels,allowed)
+        save(dest/'scene-evaluation.json',dict(point_labels=exported.point_labels.tolist(),instances=exported.instances,
+                                             geometry_source=str(dest/'scene.json')),compact=True)
+    np.savez_compressed(dest/'actual-members.npz',**{u:rt.actual_for(payload,u) for u in original_banks})
+    save(dest/'summary.json',dict(execution_complete=True,selector='object-explanation-v1',
+        ownership=ownership,conflicts=trace,unresolved=unresolved,include_regional=include_regional))
+    return payload
+
+
 def assemble(rt,banks,dest,*,baseline=None,excluded_views=None,include_regional=True):
     from run_effective_repair import read,save
     from .multiview_repair_experiment import ids_file

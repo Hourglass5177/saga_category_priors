@@ -28,7 +28,7 @@ from .object_verification.observation import cameras_independent
 from .prediction_contract import normalize_prediction
 from .common_geometry_selector import (VERSION as GEOMETRY_SELECTOR, reference_family,
     geometry_quality, pixel_evidence, select_geometry, semantic_state, stable_improvement)
-from .regional_evidence import VERSION as REGIONAL_SELECTOR
+from .regional_evidence import VERSION as REGIONAL_SELECTOR, OBJECT_VERSION
 
 EXPERIMENT = 'multiview-repair-20260918'
 TAIL_SOURCES = {'scene0025_01': [23, 28, 109, 122], 'scene0645_00': [41]}
@@ -41,8 +41,12 @@ def ids_file(path):
 
 class MultiviewRuntime(ScaleRuntime):
     @property
+    def object_explanation(self):
+        return getattr(self,'plan',{}).get('selector') == OBJECT_VERSION
+
+    @property
     def common_geometry(self):
-        return getattr(self, 'plan', {}).get('selector') in (GEOMETRY_SELECTOR, REGIONAL_SELECTOR)
+        return getattr(self, 'plan', {}).get('selector') in (GEOMETRY_SELECTOR, REGIONAL_SELECTOR, OBJECT_VERSION)
 
     @property
     def regional_evidence(self):
@@ -84,7 +88,7 @@ class MultiviewRuntime(ScaleRuntime):
         self.descriptor_cache[str(path)] = result
         return result
 
-    def adopt_raw(self, camera_uid, masks, crop, dest, *, actual_input, qualities, source):
+    def adopt_raw(self, camera_uid, masks, crop, dest, *, actual_input, qualities, source, interpretation_observation=False):
         """Reuse raw masks, not historic full-image negatives or old alpha denominators."""
         result = dest / 'group.json'
         if result.exists():
@@ -106,7 +110,7 @@ class MultiviewRuntime(ScaleRuntime):
                 continue
             # Alpha integrates multiple contributors. The single-dominant-contributor
             # rule is for hard IDs/prompts, not a pixel veto on the existing G2 renderer.
-            known = known_domain(mask, masks, observed)
+            known = observed.copy() if interpretation_observation else known_domain(mask, masks, observed)
             mass = self.renderer.alpha(self.cameras[camera_uid], mask[None], known)
             hard = np.unique(d['ids'][d['reliable'] & mask])
             negative = np.unique(d['ids'][d['reliable'] & known & ~mask])
@@ -249,6 +253,9 @@ class MultiviewRuntime(ScaleRuntime):
 
     def score_evidence(self, members, pool, views):
         """A common pool and final membership determine score; ancestry cannot affect it."""
+        if self.object_explanation:
+            from .regional_evidence_runtime import score_object
+            return score_object(self,members,pool,views)
         if self.common_geometry:
             return self.score_common_geometry(members, pool, views)
         members = np.asarray(members, np.int64)
@@ -386,6 +393,9 @@ class MultiviewRuntime(ScaleRuntime):
         return semantics, quality, core, negative, refs
 
     def bank(self, uid, rows, pool, views, dest, *, metadata=None, reference_pool=None):
+        if self.object_explanation:
+            from .regional_evidence_runtime import object_bank
+            return object_bank(self,uid,rows,pool,views,dest,metadata,reference_pool)
         if (dest / 'bank.json').exists():
             return read(dest / 'bank.json')
         dest.mkdir(parents=True, exist_ok=True)
@@ -664,6 +674,12 @@ class MultiviewRuntime(ScaleRuntime):
              reasons_are_observation_cues_not_gt=True))
 
     def assemble_evidence(self, banks, dest, *, baseline=None, excluded_views=None):
+        if self.object_explanation:
+            from .regional_evidence_assembly import assemble_selected
+            assemble_selected(self,banks,dest.parent/(dest.name+'-pure'),baseline=baseline,
+                              excluded_views=excluded_views,include_regional=False)
+            return assemble_selected(self,banks,dest,baseline=baseline,
+                                     excluded_views=excluded_views,include_regional=True)
         if self.regional_evidence:
             from .regional_evidence_assembly import assemble
             assemble(self,banks,dest.parent/(dest.name+'-pure'),baseline=baseline,
@@ -1122,7 +1138,7 @@ def evaluate_scenes(output):
         row = {k:old[k] for k in ('scene_id','gt_npz','gaussian_ply','gaussian_to_gt_transform','b0_output_json')}
         row['condition_outputs'] = {'legacy_C_open':old['condition_outputs']['C_open']}
         row['condition_outputs'].update({c:{'output_json':str(output/'scenes'/sid/c/
-            ('scene-evaluation.json' if plan.get('selector') in (GEOMETRY_SELECTOR, REGIONAL_SELECTOR)
+            ('scene-evaluation.json' if plan.get('selector') in (GEOMETRY_SELECTOR, REGIONAL_SELECTOR, OBJECT_VERSION)
              and c in ('initial','matched-open','feedback') else 'scene.json'))} for c in conditions[1:]})
         scenes.append(row)
     save(output / 'evaluation-manifest.json', dict(original, conditions=conditions, scenes=scenes))
@@ -1141,7 +1157,7 @@ def main():
     parser.add_argument('--saved-global', type=Path, default=ROOT/'category-scale-20260918/global')
     parser.add_argument('--shared-output', type=Path, default=ROOT/EXPERIMENT/'shared')
     parser.add_argument('--prior-mode', choices=['category','global'], default='category')
-    parser.add_argument('--selector', choices=['legacy', GEOMETRY_SELECTOR, REGIONAL_SELECTOR], default='legacy')
+    parser.add_argument('--selector', choices=['legacy', GEOMETRY_SELECTOR, REGIONAL_SELECTOR, OBJECT_VERSION], default='legacy')
     parser.add_argument('--stage', choices=['local','writeback','diagnostic','scene','all','evaluate'], default='all')
     parser.add_argument('--worker', action='store_true')
     parser.add_argument('--attempt', default='01')
